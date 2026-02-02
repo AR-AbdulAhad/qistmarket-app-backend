@@ -1,0 +1,247 @@
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-1.0.x"]
+}
+
+datasource db {
+  provider = "mysql"
+  url = env("DATABASE_URL")
+}
+
+model User {
+  id                Int           @id @default(autoincrement())
+  full_name         String
+  role_id           Int
+  username          String        @unique
+  password_hash     String
+  email             String?       @unique
+  cnic              String?
+  phone             String?
+  device_id         String?
+  status            String        @default("active")
+  created_at        DateTime      @default(now())
+  updated_at        DateTime      @updatedAt
+  bio               String?       @db.Text
+  image             String?       @db.VarChar(255)
+  coverImage        String?       @db.VarChar(255)
+  permissions_json  Json?
+  fcm_token         String?       @db.VarChar(255)
+  
+  // Relations
+  role              Role          @relation(fields: [role_id], references: [id])
+  created_orders    Order[]
+  assigned_orders   Order[]       @relation("assignedOrders")
+  verifications     Verification[] @relation("verification_officer")
+  approved_verifications Verification[] @relation("verification_approver")
+
+
+  reset_token_hash     String?
+  reset_token_expires  DateTime?
+  
+  @@index([role_id])
+}
+
+model Role {
+  id                Int           @id @default(autoincrement())
+  name              String
+  permissions_json  Json?
+  
+  // Relations
+  users             User[]
+}
+
+model Order {
+  id                  Int             @id @default(autoincrement())
+  order_ref           String          @unique
+  token_number        String          @unique
+  customer_name       String
+  whatsapp_number     String
+  address             String
+  city                String?
+  area                String?
+  product_name        String
+  total_amount        Float
+  advance_amount      Float
+  monthly_amount      Float
+  months              Int
+  channel             String
+  status              String          @default("new")
+  created_at          DateTime        @default(now())
+  updated_at          DateTime        @updatedAt
+  created_by_user_id  Int?
+  assigned_to_user_id Int?
+  
+  // Relations
+  created_by          User?           @relation(fields: [created_by_user_id], references: [id])
+  assigned_to         User?           @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
+  verification        Verification?   @relation("OrderVerification")
+  
+  @@index([created_by_user_id])
+  @@index([assigned_to_user_id])
+}
+
+model Verification {
+  id                      Int                       @id @default(autoincrement())
+  order_id                Int                       @unique
+  verification_officer_id Int
+  status                  String                    @default("in_progress") // in_progress, completed
+  start_time              DateTime
+  end_time                DateTime?
+  created_at              DateTime                  @default(now())
+  updated_at              DateTime                  @updatedAt
+  is_approved             Boolean?
+  admin_remarks           String?                   @db.Text
+  approved_at             DateTime?
+  approved_by             Int?
+  
+  // Relations
+  order                   Order                     @relation("OrderVerification", fields: [order_id], references: [id], onDelete: Cascade)
+  verification_officer    User                      @relation("verification_officer", fields: [verification_officer_id], references: [id])
+  approved_by_user        User?                     @relation("verification_approver", fields: [approved_by], references: [id])
+  
+  purchaser               PurchaserVerification?
+  grantors                GrantorVerification[]
+  nextOfKin               NextOfKinVerification?
+  locations               LocationTracking[]
+  verification_locations  VerificationLocation[] 
+  documents               VerificationDocument[]
+  
+  @@index([verification_officer_id])
+  @@index([approved_by])
+}
+
+model PurchaserVerification {
+  id                    Int       @id @default(autoincrement())
+  verification_id       Int       @unique
+  name                  String
+  father_husband_name   String
+  present_address       String
+  permanent_address     String
+  utility_bill_url      String?
+  cnic_number           String
+  cnic_front_url        String?
+  cnic_back_url         String?
+  telephone_number      String
+  employer_name         String
+  employer_address      String
+  designation           String
+  official_number       String?
+  service_card_url      String?
+  years_in_company      String?
+  gross_salary          String?
+  signature_url         String?
+  nearest_location      String
+  
+  // Relations
+  verification          Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  
+  @@index([verification_id])
+}
+
+model GrantorVerification {
+  id                      Int      @id @default(autoincrement())
+  verification_id         Int
+  grantor_number          Int      // 1 or 2
+  name                    String
+  father_husband_name     String
+  present_address         String
+  permanent_address       String
+  utility_bill_url        String?
+  cnic_number             String
+  cnic_front_url          String?
+  cnic_back_url           String?
+  telephone_number        String
+  designation             String
+  official_number         String?
+  service_card_url        String?
+  office_address          String
+  company_name           String?
+  years_in_company       String?
+  monthly_income         String?
+  full_residential_address String
+  relationship           String
+  signature_url          String?
+  nearest_location          String
+  
+  // Relations
+  verification            Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  
+  @@unique([verification_id, grantor_number])
+  @@index([verification_id])
+}
+
+model NextOfKinVerification {
+  id              Int      @id @default(autoincrement())
+  verification_id Int      @unique
+  name            String
+  cnic_number     String
+  relation        String
+  phone_number    String
+  
+  // Relations
+  verification    Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  
+  @@index([verification_id])
+}
+
+model LocationTracking {
+  id              Int      @id @default(autoincrement())
+  verification_id Int
+  latitude        Float
+  longitude       Float
+  accuracy        Float?
+  label           String
+  timestamp       DateTime @default(now())
+  
+  // Relations
+  verification    Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  
+  @@index([verification_id])
+}
+
+model VerificationLocation {
+  id              Int      @id @default(autoincrement())
+  verification_id Int
+  location_type   String
+  latitude        Float?
+  longitude       Float?
+  address         String?
+  label           String
+  person_type     String?
+  person_id       Int?
+  created_at      DateTime @default(now())
+  
+  verification    Verification @relation(fields: [verification_id], references: [id])
+  photos          VerificationLocationPhoto[] // One-to-many relationship
+  
+  @@index([verification_id])
+  @@index([person_type, person_id])
+}
+
+model VerificationLocationPhoto {
+  id                      Int                 @id @default(autoincrement())
+  verification_location_id Int
+  file_url               String
+  uploaded_at            DateTime            @default(now())
+  
+  verification_location  VerificationLocation @relation(fields: [verification_location_id], references: [id])
+  
+  @@index([verification_location_id])
+}
+
+model VerificationDocument {
+  id              Int      @id @default(autoincrement())
+  verification_id Int
+  document_type   String   // cnic_front, cnic_back, utility_bill, service_card, photo, signature
+  person_type     String   // purchaser, grantor1, grantor2, nextOfKin
+  person_id       Int?
+  file_url        String
+  label           String?
+  uploaded_at     DateTime @default(now())
+  
+  // Relations
+  verification    Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  
+  @@index([verification_id])
+  @@index([person_type, person_id])
+}

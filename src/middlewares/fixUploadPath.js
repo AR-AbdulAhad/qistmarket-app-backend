@@ -1,0 +1,70 @@
+const path = require('path');
+
+const uploadsBaseUrl = `http://192.168.88.79:5000/uploads`;
+
+module.exports = (req, res, next) => {
+  try {
+    if (!req.file && !req.files) return next();
+
+    // Handle single file upload (upload.single())
+    if (req.file) {
+      const filename = req.file.filename || path.basename(req.file.path);
+      req.file.url = `${uploadsBaseUrl}/${filename}`;
+      
+      // Also fix path separator
+      if (req.file.path) {
+        req.file.path = req.file.path.replace(/\\/g, '/');
+      }
+    }
+
+    // Handle multiple files
+    if (req.files) {
+      // Case 1: req.files is an array (upload.array())
+      if (Array.isArray(req.files)) {
+        req.files.forEach(file => {
+          const filename = file.filename || path.basename(file.path);
+          file.url = `${uploadsBaseUrl}/${filename}`;
+          
+          // Fix path separator
+          if (file.path) {
+            file.path = file.path.replace(/\\/g, '/');
+          }
+        });
+      } 
+      // Case 2: req.files is an object with field names (upload.fields())
+      else if (typeof req.files === 'object') {
+        Object.keys(req.files).forEach(fieldName => {
+          const fileOrArray = req.files[fieldName];
+          
+          // If it's an array of files
+          if (Array.isArray(fileOrArray)) {
+            fileOrArray.forEach(file => {
+              const filename = file.filename || path.basename(file.path);
+              file.url = `${uploadsBaseUrl}/${filename}`;
+              
+              // Fix path separator
+              if (file.path) {
+                file.path = file.path.replace(/\\/g, '/');
+              }
+            });
+          } 
+          // If it's a single file object
+          else if (fileOrArray && typeof fileOrArray === 'object') {
+            const filename = fileOrArray.filename || path.basename(fileOrArray.path);
+            fileOrArray.url = `${uploadsBaseUrl}/${filename}`;
+            
+            // Fix path separator
+            if (fileOrArray.path) {
+              fileOrArray.path = fileOrArray.path.replace(/\\/g, '/');
+            }
+          }
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Error in fixUploadPath middleware:', error);
+    // Continue anyway, don't break the request
+  }
+
+  next();
+};
