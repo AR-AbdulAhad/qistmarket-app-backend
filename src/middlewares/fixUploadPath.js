@@ -1,6 +1,6 @@
 const path = require('path');
 
-const uploadsBaseUrl = `http://192.168.88.79:5000/uploads`;
+const uploadsBaseUrl = `https://qistmarket-software-backend.onrender.com/uploads`;
 
 module.exports = (req, res, next) => {
   try {
