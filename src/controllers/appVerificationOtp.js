@@ -10,29 +10,65 @@ const sendCode = async (req, res) => {
   const { code, phone } = req.body;
 
   if (!/^\d{5}$/.test(code)) {
-    return res.status(400).json({ error: 'Code must be a 5-digit number.' });
+    return res.status(400).json({ 
+      success: false,
+      error: 'Code must be a 5-digit number.' 
+    });
   }
 
   if (!/^03\d{9}$/.test(phone)) {
-    return res.status(400).json({ error: 'Phone must be an 11-digit Pakistani number starting with 03.' });
+    return res.status(400).json({ 
+      success: false,
+      error: 'Phone must be an 11-digit Pakistani number starting with 03.' 
+    });
   }
 
   const whatsappNumber = '+92' + phone.slice(1);
 
   const url = `${WATI_BASE_URL}/api/v2/sendTemplateMessage?whatsappNumber=${whatsappNumber}`;
 
-  const body = {
+  const payload = {
     template_name: WATI_TEMPLATE_NAME,
     broadcast_name: WATI_BROADCAST_NAME,
     parameters: [{ name: '1', value: code }]
   };
 
-  await axios.post(url, body, {
-    headers: {
-      'Authorization': `Bearer ${WATI_ACCESS_TOKEN}`,
-      'Content-Type': 'application/json'
+  try {
+    const response = await axios.post(url, payload, {
+      headers: {
+        'Authorization': `Bearer ${WATI_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Code sent successfully via WhatsApp.',
+    });
+
+  } catch (error) {
+    console.error('Error sending template message:', error.message);
+
+    let status = 500;
+    let errorMessage = 'Failed to send code. Please try again later.';
+
+    if (error.response) {
+      status = error.response.status;
+      errorMessage = error.response.data?.error || 
+                     error.response.data?.info || 
+                     'Wati API returned an error.';
+    } else if (error.request) {
+      errorMessage = 'No response from Wati server. Check network or base URL.';
+    } else {
+      errorMessage = error.message;
     }
-  });
-}
+
+    return res.status(status).json({
+      success: false,
+      error: errorMessage
+    });
+  }
+};
 
 module.exports = { sendCode };
