@@ -131,6 +131,7 @@ model PurchaserVerification {
   gross_salary          String?
   signature_url         String?
   nearest_location      String
+  is_verified         Boolean   @default(false)
   
   // Relations
   verification          Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
@@ -162,6 +163,7 @@ model GrantorVerification {
   relationship           String
   signature_url          String?
   nearest_location          String
+  is_verified         Boolean   @default(false)
   
   // Relations
   verification            Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)

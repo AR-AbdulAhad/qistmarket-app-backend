@@ -7,7 +7,7 @@ const { jwtSecret } = require('../config/jwtConfig');
 const sendEmail = require('../utils/sendEmail');
 
 const generatePassword = () => {
-  return crypto.randomBytes(4).toString("hex"); // 8 chars
+  return crypto.randomBytes(4).toString("hex");
 };
 
 

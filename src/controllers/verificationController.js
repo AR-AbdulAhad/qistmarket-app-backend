@@ -114,7 +114,8 @@ const savePurchaserVerification = async (req, res) => {
           designation,
           official_number,
           years_in_company,
-          gross_salary
+          gross_salary,
+          is_verified: true
         }
       });
     } else {
@@ -134,7 +135,8 @@ const savePurchaserVerification = async (req, res) => {
           designation,
           official_number,
           years_in_company,
-          gross_salary
+          gross_salary,
+          is_verified: true
         }
       });
     }
@@ -227,7 +229,8 @@ const saveGrantorVerification = async (req, res) => {
           years_in_company,
           monthly_income,
           full_residential_address,
-          relationship
+          relationship,
+          is_verified: true
         }
       });
     } else {
@@ -249,7 +252,8 @@ const saveGrantorVerification = async (req, res) => {
           years_in_company,
           monthly_income,
           full_residential_address,
-          relationship
+          relationship,
+          is_verified: true
         }
       });
     }
