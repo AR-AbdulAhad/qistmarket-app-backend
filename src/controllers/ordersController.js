@@ -523,19 +523,8 @@ const getVerificationOrders = async (req, res) => {
             status: true,
             start_time: true,
             end_time: true,
-            is_approved: true,
-            admin_remarks: true,
-            approved_at: true,
             
             verification_officer: {
-              select: {
-                id: true,
-                username: true,
-                full_name: true,
-              },
-            },
-            
-            approved_by_user: {
               select: {
                 id: true,
                 username: true,

@@ -106,7 +106,7 @@ const savePurchaserVerification = async (req, res) => {
           father_husband_name,
           present_address,
           permanent_address,
-          nearest_location, // NEW FIELD
+          nearest_location,
           cnic_number,
           telephone_number,
           employer_name,
@@ -127,7 +127,7 @@ const savePurchaserVerification = async (req, res) => {
           father_husband_name,
           present_address,
           permanent_address,
-          nearest_location, // NEW FIELD
+          nearest_location,
           cnic_number,
           telephone_number,
           employer_name,
@@ -921,10 +921,6 @@ const completeVerification = async (req, res) => {
       data: {
         status: 'completed',
         end_time: new Date(),
-        is_approved: null,
-        admin_remarks: null,
-        approved_at: null,
-        approved_by: null
       },
       include: {
         order: true,
@@ -978,9 +974,29 @@ const getVerificationByOrderId = async (req, res) => {
             photos: true
           }
         },
-        documents: true
+        documents: true,
+        // ── IMPORTANT: This is what was missing ────────────────────────
+        reviews: {
+          include: {
+            reviewer: {
+              select: {
+                id: true,           // useful for frontend checks if needed
+                full_name: true,
+                username: true
+              }
+            }
+          }
+        }
+        // ───────────────────────────────────────────────────────────────
       }
     });
+    
+    if (!verification) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Verification not found for this order' }
+      });
+    }
     
     return res.status(200).json({
       success: true,
@@ -995,14 +1011,15 @@ const getVerificationByOrderId = async (req, res) => {
   }
 };
 
-// Admin Approval
-const adminApproveVerification = async (req, res) => {
+// Submit Verification Review
+const submitVerificationReview = async (req, res) => {
   const { verification_id } = req.params;
-  const { is_approved, admin_remarks } = req.body;
+  const { approved, remarks } = req.body;
   
   try {
     const verification = await prisma.verification.findUnique({
-      where: { id: parseInt(verification_id) }
+      where: { id: parseInt(verification_id) },
+      include: { reviews: true }
     });
     
     if (!verification) {
@@ -1015,43 +1032,67 @@ const adminApproveVerification = async (req, res) => {
     if (verification.status !== 'completed') {
       return res.status(400).json({
         success: false,
-        error: { code: 400, message: 'Verification must be completed before approval' }
+        error: { code: 400, message: 'Verification must be completed before review' }
+      });
+    }
+
+    // Check if maximum reviews reached
+    if (verification.reviews.length >= 3) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 400, message: 'Maximum of 3 reviews allowed' }
+      });
+    }
+
+    // Check if user already reviewed
+    const existingReview = verification.reviews.find(r => r.reviewer_id === req.user.id);
+    if (existingReview) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 400, message: 'You have already reviewed this verification' }
       });
     }
     
-    const updatedVerification = await prisma.verification.update({
-      where: { id: parseInt(verification_id) },
+    // Create review
+    const review = await prisma.verificationReview.create({
       data: {
-        is_approved: is_approved === 'true' || is_approved === true,
-        admin_remarks,
-        approved_at: new Date(),
-        approved_by: req.user.id
-      },
-      include: {
-        order: true,
-        verification_officer: {
-          select: { full_name: true, username: true }
-        },
-        purchaser: true,
-        grantors: true,
-        nextOfKin: true,
-        locations: true,
-        verification_locations: {
-          include: {
-            photos: true
-          }
-        },
-        documents: true
+        verification_id: parseInt(verification_id),
+        reviewer_id: req.user.id,
+        approved: approved === 'true' || approved === true,
+        remarks
       }
     });
+
+    // Fetch updated reviews
+    const updatedVerification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) },
+      include: { reviews: true }
+    });
+
+    const approves = updatedVerification.reviews.filter(r => r.approved).length;
+    const rejects = updatedVerification.reviews.filter(r => !r.approved).length;
+
+    let newStatus = verification.status;
+    if (approves >= 2) {
+      newStatus = 'approved';
+    } else if (rejects >= 2) {
+      newStatus = 'rejected';
+    }
+
+    if (newStatus !== verification.status) {
+      await prisma.verification.update({
+        where: { id: parseInt(verification_id) },
+        data: { status: newStatus }
+      });
+    }
     
     return res.status(200).json({
       success: true,
-      message: `Verification ${is_approved ? 'approved' : 'rejected'} successfully`,
-      data: { verification: updatedVerification }
+      message: `Review submitted successfully`,
+      data: { review }
     });
   } catch (error) {
-    console.error('Admin approve verification error:', error);
+    console.error('Submit verification review error:', error);
     return res.status(500).json({
       success: false,
       error: { code: 500, message: 'Internal server error' }
@@ -1147,5 +1188,5 @@ module.exports = {
   deleteDocument,
   completeVerification,
   getVerificationByOrderId,
-  adminApproveVerification
+  submitVerificationReview
 };

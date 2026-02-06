@@ -5,6 +5,7 @@ const fixUploadPath = require('../middlewares/fixUploadPath');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
 const {
+  getVerifications,
   startVerification,
   savePurchaserVerification,
   saveGrantorVerification,
@@ -20,8 +21,7 @@ const {
   deleteDocument,
   completeVerification,
   getVerificationByOrderId,
-  adminApproveVerification,
-  getVerifications
+  submitVerificationReview
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -31,7 +31,7 @@ router.get('/verifications', authenticateJWT, getVerifications);
 router.post('/verification/start', authenticateJWT, startVerification);
 
 // Get verification by order ID
-router.get('/verification/order/:order_id', authenticateJWT, getVerificationByOrderId);
+router.get('/verification/order/:order_id', getVerificationByOrderId);
 
 // Save verification data
 router.post('/verification/:verification_id/purchaser', authenticateJWT, savePurchaserVerification);
@@ -98,7 +98,7 @@ router.delete('/verification/document/:document_id', authenticateJWT, deleteDocu
 // Complete verification
 router.post('/verification/:verification_id/complete', authenticateJWT, completeVerification);
 
-// Admin approval
-router.post('/verification/:verification_id/approve', authenticateJWT, adminApproveVerification);
+// Submit review (replaces admin approval)
+router.post('/verification/:verification_id/approve', authenticateJWT, submitVerificationReview);
 
 module.exports = router;
