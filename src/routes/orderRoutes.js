@@ -16,11 +16,11 @@ const {
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
 router.get('/orders/verification-pending', getVerificationOrders);
-router.get('/orders/delivery-pending', getApprovedOrders);
+router.get('/orders/delivery-pending', authenticateJWT, getApprovedOrders);
 router.post('/orders/create', authenticateJWT, createOrder);
 router.get('/orders', authenticateJWT, getOrders);
-router.get('/orders/scroll', getOrdersWithPagination);
-router.get('/orders/deliver/scroll', getMyDeliveryOrdersWithPagination);
+router.get('/orders/scroll', authenticateJWT, getOrdersWithPagination);
+router.get('/orders/deliver/scroll', authenticateJWT, getMyDeliveryOrdersWithPagination);
 router.patch('/orders/:id/assign', authenticateJWT, assignOrder);
 router.post('/orders/assign-bulk', authenticateJWT, assignBulk);
 router.get('/orders/:id', authenticateJWT, getOrderById);

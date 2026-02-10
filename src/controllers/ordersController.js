@@ -320,14 +320,6 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
   const cursorId = Number(lastId);
 
   try {
-
-    if (!req.user || !req.user.role || req.user.role.name !== 'Delivery Officer') {
-      return res.status(403).json({
-        success: false,
-        message: 'Only Delivery Officers can access their assigned orders'
-      });
-    }
-    
     const baseWhere = {
       delivery_officer_id: req.user.id,
     };
