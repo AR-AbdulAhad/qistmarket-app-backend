@@ -34,6 +34,26 @@ async function sendAssignmentNotification(order, user) {
   }
 }
 
+async function sendDeliveryAssignmentNotification(order, user) {
+  if (!user?.fcm_token) return;
+
+  try {
+    await admin.messaging().send({
+      token: user.fcm_token,
+      notification: {
+        title: 'New Order Assigned for Delivery',
+        body: `Order ${order.order_ref} has been assigned to you for Delivery.`,
+      },
+      data: {
+        order_id: order.id.toString(),
+        order_ref: order.order_ref,
+      },
+    });
+  } catch (fcmError) {
+    console.error('FCM send failed:', fcmError);
+  }
+}
+
 const createOrder = async (req, res) => {
   const {
     customer_name,
@@ -293,8 +313,95 @@ const getOrdersWithPagination = async (req, res) => {
   }
 };
 
+const getMyDeliveryOrdersWithPagination = async (req, res) => {
+  const { lastId = 0, limit = 10, search = '', ...filters } = req.query;
+
+  const take = Number(limit);
+  const cursorId = Number(lastId);
+
+  try {
+    const baseWhere = {
+      delivery_officer_id: req.user.id,
+    };
+
+    if (search.trim()) {
+      baseWhere.OR = [
+        { customer_name: { contains: search } },
+        { whatsapp_number: { contains: search } },
+        { order_ref: { contains: search } },
+        { token_number: { contains: search } },
+        { product_name: { contains: search } },
+        { city: { contains: search } },
+        { area: { contains: search } },
+      ];
+    }
+
+    // Optional extra filters (agar frontend se bheje ja rahe hon)
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) {
+        if (key === 'status') {
+          baseWhere.status = value;
+        } else if (key === 'created_by') {
+          baseWhere.created_by = { username: value };
+        } else {
+          baseWhere[key] = { contains: value };
+        }
+      }
+    });
+
+    const totalCount = await prisma.order.count({
+      where: baseWhere
+    });
+
+    const where = { ...baseWhere };
+    if (cursorId > 0) {
+      where.id = { lt: cursorId };
+    }
+
+    const orders = await prisma.order.findMany({
+      where,
+      take,
+      orderBy: { id: 'desc' },
+      include: {
+        created_by:    { select: { username: true, full_name: true } },
+        assigned_to:   { select: { username: true, full_name: true } },
+        delivery_officer: { select: { username: true, full_name: true } },
+        verification:  { select: { id: true, status: true } },
+      },
+    });
+
+    let nextLastId = null;
+    if (orders.length > 0) {
+      nextLastId = orders[orders.length - 1].id;
+    }
+
+    const hasMore = orders.length === take;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders,
+        pagination: {
+          nextLastId,
+          hasMore,
+          limit: take,
+          count: orders.length,
+          totalCount
+        },
+      },
+    });
+  } catch (error) {
+    console.error('getMyDeliveryOrdersWithPagination error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
 const getOrderById = async (req, res) => {
   const { id } = req.params;
+  console.log('Fetching order with ID:', id);
 
   try {
     const order = await prisma.order.findUnique({
@@ -501,7 +608,7 @@ const getVerificationOrders = async (req, res) => {
         status: true,
         created_at: true,
         updated_at: true,
-        
+
         assigned_to: {
           select: {
             id: true,
@@ -509,21 +616,24 @@ const getVerificationOrders = async (req, res) => {
             full_name: true,
           },
         },
-        
+
         created_by: {
           select: {
             username: true,
             full_name: true,
           },
         },
-        
+
         verification: {
+          where: {
+            status: 'completed',
+          },
           select: {
             id: true,
             status: true,
             start_time: true,
             end_time: true,
-            
+
             verification_officer: {
               select: {
                 id: true,
@@ -531,15 +641,15 @@ const getVerificationOrders = async (req, res) => {
                 full_name: true,
               },
             },
-            
+
             purchaser: true,
             grantors: true,
             nextOfKin: true,
-            
+
             locations: {
               orderBy: { timestamp: 'desc' },
             },
-            
+
             documents: {
               orderBy: { uploaded_at: 'desc' },
             },
@@ -548,9 +658,11 @@ const getVerificationOrders = async (req, res) => {
       },
     });
 
+    const filteredOrders = orders.filter(order => order.verification !== null);
+
     return res.status(200).json({
       success: true,
-      data: { orders },
+      data: { orders: filteredOrders },
     });
   } catch (error) {
     console.error('Error in getVerificationOrders:', error);
@@ -561,12 +673,241 @@ const getVerificationOrders = async (req, res) => {
   }
 };
 
+const getApprovedOrders = async (req, res) => {
+  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
+
+  const skip = (Number(page) - 1) * Number(limit);
+  const take = Number(limit);
+
+  try {
+    const where = {
+      verification: {
+        status: 'approved',
+      },
+    };
+
+    if (search.trim()) {
+      where.OR = [
+        { customer_name: { contains: search } },
+        { whatsapp_number: { contains: search } },
+        { order_ref: { contains: search } },
+        { token_number: { contains: search } },
+        { product_name: { contains: search } },
+        { city: { contains: search } },
+        { area: { contains: search } },
+      ];
+    }
+
+    // Support column filters (same as getOrders)
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) {
+        if (key === 'delivery_officer') {
+          where.delivery_officer = { username: { contains: value } };
+        } else if (key === 'created_by') {
+          where.created_by = { username: { contains: value } };
+        } else {
+          where[key] = { contains: value };
+        }
+      }
+    });
+
+    const orders = await prisma.order.findMany({
+      where,
+      skip,
+      take,
+      orderBy: { [sortBy]: sortDir },
+      include: {
+        created_by:     { select: { username: true, full_name: true } },
+        assigned_to:    { select: { username: true, full_name: true } },
+        delivery_officer: { select: { username: true, full_name: true } },
+        verification:   { select: { id: true, status: true } },
+      },
+    });
+
+    const total = await prisma.order.count({ where });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders,
+        pagination: {
+          page: Number(page),
+          limit: take,
+          total,
+          totalPages: Math.ceil(total / take),
+          hasNext: skip + take < total,
+          hasPrev: Number(page) > 1,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('getApprovedOrders error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
+const assignDelivery = async (req, res) => {
+  const { id } = req.params;
+  const { user_id, action = 'assign' } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+      include: {
+        delivery_officer: { select: { username: true, fcm_token: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    if (action === 'unassign') {
+      if (!order.delivery_officer_id) {
+        return res.status(400).json({ success: false, message: 'Order is not assigned for delivery' });
+      }
+
+      const updated = await prisma.order.update({
+        where: { id: Number(id) },
+        data: { delivery_officer_id: null },
+        include: {
+          created_by: { select: { username: true } },
+          assigned_to: { select: { username: true } },
+          delivery_officer: { select: { username: true } },
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Delivery unassigned successfully',
+        data: { order: updated },
+      });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'User ID required for assignment' });
+    }
+
+    if (order.delivery_officer_id) {
+      return res.status(409).json({ success: false, message: 'Order is already assigned for delivery' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: Number(user_id) },
+      include: { role: true },
+    });
+
+    if (!user || user.role.name !== 'Delivery Agent') {
+      return res.status(400).json({ success: false, message: 'Invalid Delivery Officer' });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: Number(id) },
+      data: { delivery_officer_id: Number(user_id) },
+      include: {
+        delivery_officer: { select: { username: true, fcm_token: true } },
+        created_by: { select: { username: true } },
+        assigned_to: { select: { username: true } },
+      },
+    });
+
+    await sendDeliveryAssignmentNotification(updatedOrder, updatedOrder.delivery_officer);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Delivery assigned successfully',
+      data: { order: updatedOrder },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const assignBulkDelivery = async (req, res) => {
+  const { order_ids, user_id, action = 'assign' } = req.body;
+
+  if (!Array.isArray(order_ids) || order_ids.length === 0) {
+    return res.status(400).json({ success: false, message: 'order_ids array is required' });
+  }
+
+  try {
+    if (action === 'unassign') {
+      await prisma.order.updateMany({
+        where: {
+          id: { in: order_ids.map(Number) },
+          delivery_officer_id: { not: null },
+        },
+        data: { delivery_officer_id: null },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Selected deliveries have been unassigned',
+      });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'user_id required for assignment' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: Number(user_id) },
+      include: { role: true },
+    });
+
+    if (!user || user.role.name !== 'Delivery Agent') {
+      return res.status(400).json({ success: false, message: 'Invalid delivery officer' });
+    }
+
+    const orders = await prisma.order.findMany({
+      where: { id: { in: order_ids.map(Number) } },
+      include: {
+        delivery_officer: { select: { username: true, fcm_token: true } },
+      },
+    });
+
+    const alreadyAssigned = orders.filter((o) => o.delivery_officer_id !== null);
+    if (alreadyAssigned.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Some selected orders are already assigned for delivery',
+      });
+    }
+
+    await prisma.order.updateMany({
+      where: { id: { in: order_ids.map(Number) } },
+      data: { delivery_officer_id: Number(user_id) },
+    });
+
+    // Send notifications
+    for (const order of orders) {
+      await sendDeliveryAssignmentNotification(order, user);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Deliveries assigned successfully. Notifications sent.',
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = { 
   createOrder, 
   getOrders, 
   getOrdersWithPagination,
+  getMyDeliveryOrdersWithPagination,
   assignOrder, 
   assignBulk, 
   getOrderById,
-  getVerificationOrders
+  getVerificationOrders,
+  getApprovedOrders,
+  assignDelivery,
+  assignBulkDelivery
 };

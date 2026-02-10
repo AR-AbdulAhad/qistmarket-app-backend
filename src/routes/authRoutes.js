@@ -17,6 +17,7 @@ const {
   getVerificationOfficers,
   forgotPassword,
   resetPassword,
+  getDeliveryOfficers
 } = require('../controllers/authController');
 
 const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
@@ -36,6 +37,7 @@ router.post(
 );
 
 router.get('/users/verification-officers', authenticateJWT, getVerificationOfficers);
+router.get('/users/delivery-officers', authenticateJWT, getDeliveryOfficers);
 
 router.post('/signup', authenticateJWT, requireSuperAdmin, signup);
 router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);

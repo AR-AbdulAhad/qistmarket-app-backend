@@ -875,6 +875,41 @@ const getVerificationOfficers = async (req, res) => {
   }
 };
 
+// In usersController.js (create if not present)
+const getDeliveryOfficers = async (req, res) => {
+  try {
+    const officers = await prisma.user.findMany({
+      where: 
+      { 
+        role: { 
+          name: 'Delivery Agent' 
+        },
+        status: 'active'
+      },
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+      },
+      orderBy: {
+        full_name: 'asc',
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: { officers },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
+
 module.exports = {
   signup,
   loginWeb,
@@ -888,5 +923,6 @@ module.exports = {
   getMe,
   updateProfile,
   forgotPassword,
-  resetPassword
+  resetPassword,
+  getDeliveryOfficers
 };
