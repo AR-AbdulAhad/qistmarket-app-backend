@@ -24,7 +24,6 @@ model User {
   coverImage String? @db.VarChar(255)
   permissions_json Json?
   fcm_token String? @db.VarChar(255)
- 
   // Relations
   role Role @relation(fields: [role_id], references: [id])
   created_orders Order[]
@@ -34,14 +33,13 @@ model User {
   reset_token_expires DateTime?
   verification_reviews VerificationReview[] @relation("verification_reviewer")
   delivery_orders Order[] @relation("deliveryOrders")
- 
+  deliveries Delivery[] @relation("delivery_agent")
   @@index([role_id])
 }
 model Role {
   id Int @id @default(autoincrement())
   name String
   permissions_json Json?
- 
   // Relations
   users User[]
 }
@@ -71,7 +69,7 @@ model Order {
   assigned_to User? @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
   delivery_officer User? @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
   verification Verification? @relation("OrderVerification")
-  
+  delivery Delivery? @relation("OrderDelivery")
  
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -86,11 +84,9 @@ model Verification {
   end_time DateTime?
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
- 
   // Relations
   order Order @relation("OrderVerification", fields: [order_id], references: [id], onDelete: Cascade)
   verification_officer User @relation("verification_officer", fields: [verification_officer_id], references: [id])
- 
   purchaser PurchaserVerification?
   grantors GrantorVerification[]
   nextOfKin NextOfKinVerification?
@@ -98,7 +94,6 @@ model Verification {
   verification_locations VerificationLocation[]
   documents VerificationDocument[]
   reviews VerificationReview[]
- 
   @@index([verification_officer_id])
 }
 model VerificationReview {
@@ -108,10 +103,8 @@ model VerificationReview {
   approved Boolean
   remarks String? @db.Text
   created_at DateTime @default(now())
-
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
   reviewer User @relation("verification_reviewer", fields: [reviewer_id], references: [id])
-
   @@index([verification_id])
   @@index([reviewer_id])
 }
@@ -137,10 +130,8 @@ model PurchaserVerification {
   signature_url String?
   nearest_location String
   is_verified Boolean @default(false)
- 
   // Relations
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
- 
   @@index([verification_id])
 }
 model GrantorVerification {
@@ -168,10 +159,8 @@ model GrantorVerification {
   signature_url String?
   nearest_location String
   is_verified Boolean @default(false)
- 
   // Relations
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
- 
   @@unique([verification_id, grantor_number])
   @@index([verification_id])
 }
@@ -182,10 +171,8 @@ model NextOfKinVerification {
   cnic_number String
   relation String
   phone_number String
- 
   // Relations
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
- 
   @@index([verification_id])
 }
 model LocationTracking {
@@ -196,10 +183,8 @@ model LocationTracking {
   accuracy Float?
   label String
   timestamp DateTime @default(now())
- 
   // Relations
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
- 
   @@index([verification_id])
 }
 model VerificationLocation {
@@ -213,10 +198,8 @@ model VerificationLocation {
   person_type String?
   person_id Int?
   created_at DateTime @default(now())
- 
   verification Verification @relation(fields: [verification_id], references: [id])
   photos VerificationLocationPhoto[] // One-to-many relationship
- 
   @@index([verification_id])
   @@index([person_type, person_id])
 }
@@ -225,9 +208,7 @@ model VerificationLocationPhoto {
   verification_location_id Int
   file_url String
   uploaded_at DateTime @default(now())
- 
   verification_location VerificationLocation @relation(fields: [verification_location_id], references: [id])
- 
   @@index([verification_location_id])
 }
 model VerificationDocument {
@@ -239,10 +220,36 @@ model VerificationDocument {
   file_url String
   label String?
   uploaded_at DateTime @default(now())
- 
   // Relations
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
- 
   @@index([verification_id])
   @@index([person_type, person_id])
+}
+model Delivery {
+  id Int @id @default(autoincrement())
+  order_id Int @unique
+  delivery_agent_id Int
+  status String @default("pending") // pending, in_progress, completed
+  start_time DateTime?
+  end_time DateTime?
+  verified Boolean @default(false)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  // Relations
+  order Order @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
+  delivery_agent User @relation("delivery_agent", fields: [delivery_agent_id], references: [id])
+  uploads DeliveryUpload[]
+  @@index([delivery_agent_id])
+}
+model DeliveryUpload {
+  id Int @id @default(autoincrement())
+  delivery_id Int
+  upload_type String // face_photo, location_photo, house_photo, location_link
+  file_url String?
+  link String?
+  tag String?
+  uploaded_at DateTime @default(now())
+  // Relations
+  delivery Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
+  @@index([delivery_id])
 }
