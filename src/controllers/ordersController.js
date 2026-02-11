@@ -363,10 +363,56 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
       take,
       orderBy: { id: 'desc' },
       include: {
-        created_by:    { select: { username: true, full_name: true } },
-        assigned_to:   { select: { username: true, full_name: true } },
-        delivery_officer: { select: { username: true, full_name: true } },
-        verification:  { select: { id: true, status: true } },
+        created_by: {
+          select: {
+            username: true,
+            full_name: true,
+          },
+        },
+        assigned_to: {
+          select: {
+            username: true,
+            full_name: true,
+          },
+        },
+        delivery_officer: {
+          select: {
+            username: true,
+            full_name: true,
+          },
+        },
+        verification: {
+          select: {
+            id: true,
+            status: true,
+            start_time: true,
+            end_time: true,
+            purchaser: {
+              select: {
+                id:                     true,
+                name:                   true,
+                father_husband_name:    true,
+                present_address:        true,
+                permanent_address:      true,
+                utility_bill_url:       true,
+                cnic_number:            true,
+                cnic_front_url:         true,
+                cnic_back_url:          true,
+                telephone_number:       true,
+                employer_name:          true,
+                employer_address:       true,
+                designation:            true,
+                official_number:        true,
+                service_card_url:       true,
+                years_in_company:       true,
+                gross_salary:           true,
+                signature_url:          true,
+                nearest_location:       true,
+                is_verified:            true,
+              },
+            },
+          },
+        },
       },
     });
 
