@@ -44,33 +44,36 @@ model Role {
   users User[]
 }
 model Order {
-  id Int @id @default(autoincrement())
-  order_ref String @unique
-  token_number String @unique
-  customer_name String
-  whatsapp_number String
-  address String
-  city String?
-  area String?
-  product_name String
-  total_amount Float
-  advance_amount Float
-  monthly_amount Float
-  months Int
-  channel String
-  status String @default("new")
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-  created_by_user_id Int?
+  id                  Int       @id @default(autoincrement())
+  order_ref           String    @unique
+  token_number        String    @unique
+  customer_name       String
+  whatsapp_number     String
+  address             String
+  city                String?
+  area                String?
+  product_name        String
+  total_amount        Float
+  advance_amount      Float
+  monthly_amount      Float
+  months              Int
+  channel             String
+  status              String    @default("new")
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @updatedAt
+  created_by_user_id  Int?
   assigned_to_user_id Int?
   delivery_officer_id Int?
-  // Relations
-  created_by User? @relation(fields: [created_by_user_id], references: [id])
-  assigned_to User? @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
-  delivery_officer User? @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
-  verification Verification? @relation("OrderVerification")
-  delivery Delivery? @relation("OrderDelivery")
- 
+  is_delivered Boolean @default(false)
+
+  // Relations (add this line)
+  delivery            Delivery? @relation("OrderDelivery")
+
+  created_by          User?     @relation(fields: [created_by_user_id], references: [id])
+  assigned_to         User?     @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
+  delivery_officer    User?     @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
+  verification        Verification? @relation("OrderVerification")
+
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
   @@index([delivery_officer_id])

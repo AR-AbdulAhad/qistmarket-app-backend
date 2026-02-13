@@ -6,7 +6,8 @@ const { authenticateJWT } = require('../middlewares/authMiddleware');
 
 const {
   submitDelivery,
-  getDeliveryByOrderId
+  getDeliveryByOrderId,
+  getPendingDeliveryProducts
 } = require('../controllers/deliveryController');
 
 // Submit delivery (batch)
@@ -23,6 +24,7 @@ router.post(
 );
 
 // Get delivery by order ID
-router.get('/delivery/order/:order_id', authenticateJWT, getDeliveryByOrderId);
+router.get('/delivery/order/:order_id', getDeliveryByOrderId);
+router.get('/delivery-boy/picked-products-minimal', authenticateJWT, getPendingDeliveryProducts);
 
 module.exports = router;

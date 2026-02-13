@@ -48,10 +48,10 @@ const submitDelivery = async (req, res) => {
     const linkTags = req.body.link_tags ? JSON.parse(req.body.link_tags) : [];
 
     // Validate counts
-    if (facePhotos.length > 1 || locationPhotos.length > 1 || housePhotos.length > 1 || locationLinks.length > 1) {
+    if (facePhotos.length > 5 || locationPhotos.length > 5 || housePhotos.length > 5 || locationLinks.length > 5) {
       return res.status(400).json({
         success: false,
-        error: { code: 400, message: 'Maximum 1 items per type allowed' }
+        error: { code: 400, message: 'Maximum 5 items per type allowed' }
       });
     }
 
@@ -123,7 +123,10 @@ const submitDelivery = async (req, res) => {
     // Update order status
     await prisma.order.update({
       where: { id: parseInt(order_id) },
-      data: { status: 'delivered' }
+      data: { 
+        status: 'delivered',
+        is_delivered: true 
+      }
     });
 
     // Fetch updated delivery
@@ -154,6 +157,8 @@ const submitDelivery = async (req, res) => {
 // Get Delivery by Order ID
 const getDeliveryByOrderId = async (req, res) => {
   const { order_id } = req.params;
+
+  console.log('Get delivery for order_id:', order_id);
   
   try {
     const delivery = await prisma.delivery.findUnique({
@@ -173,13 +178,6 @@ const getDeliveryByOrderId = async (req, res) => {
       });
     }
     
-    // Check authorization: delivery agent or admin/assigned
-    if (delivery.delivery_agent_id !== req.user.id && req.user.role.name !== 'Admin') {
-      return res.status(403).json({
-        success: false,
-        error: { code: 403, message: 'Not authorized' }
-      });
-    }
     
     return res.status(200).json({
       success: true,
@@ -194,7 +192,101 @@ const getDeliveryByOrderId = async (req, res) => {
   }
 };
 
+const getPendingDeliveryProducts = async (req, res) => {
+  try {
+    const deliveryBoyId = req.user.id;
+
+    if (!deliveryBoyId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 401, message: 'Authentication required' }
+      });
+    }
+
+    // Fetch all pending orders with only needed fields
+    const orders = await prisma.order.findMany({
+      where: {
+        delivery_officer_id: deliveryBoyId,
+        is_delivered: false,           // or delivery: null if you chose that approach
+      },
+      select: {
+        product_name: true,
+        total_amount: true,
+        advance_amount: true,
+        monthly_amount: true,
+        months: true,
+      },
+      orderBy: {
+        updated_at: 'desc',
+      },
+    });
+
+    if (orders.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No pending delivery orders assigned',
+        data: [],
+      });
+    }
+
+    // Group by product_name (case-insensitive + trimmed)
+    const grouped = {};
+
+    orders.forEach((order) => {
+      const productKey = (order.product_name || 'N/A').trim().toLowerCase();
+
+      if (!grouped[productKey]) {
+        grouped[productKey] = {
+          product_name: order.product_name.trim() || 'N/A',
+          count: 0,
+          total_amount: 0,
+          advance_amount: 0,
+          monthly_amount: 0,
+          months: 0, // we take the most common value or first one
+          sample_months: order.months ?? 0,
+        };
+      }
+
+      const group = grouped[productKey];
+      group.count += 1;
+      group.total_amount += order.total_amount;
+      group.advance_amount += order.advance_amount ?? 0;
+      group.monthly_amount += order.monthly_amount ?? 0;
+
+      // Keep the most common months value (simple approach: take first non-zero)
+      if (group.months === 0 && order.months > 0) {
+        group.months = order.months;
+      }
+    });
+
+    // Convert grouped object to array
+    const result = Object.values(grouped).map((group) => ({
+      product_name: group.product_name,
+      count: group.count,
+      total_amount: Math.round(group.total_amount * 100) / 100, // avoid floating point issues
+      advance_amount: Math.round(group.advance_amount * 100) / 100,
+      monthly_amount: Math.round(group.monthly_amount * 100) / 100,
+      months: group.months || group.sample_months,
+    }));
+
+    // Optional: sort by count descending or by name
+    result.sort((a, b) => b.count - a.count || a.product_name.localeCompare(b.product_name));
+
+    return res.status(200).json({
+      success: true,
+      products: result,
+    });
+  } catch (error) {
+    console.error('Error fetching grouped pending products:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
 module.exports = {
   submitDelivery,
-  getDeliveryByOrderId
+  getDeliveryByOrderId,
+  getPendingDeliveryProducts
 };
