@@ -5,6 +5,7 @@ const orderRoutes = require('./src/routes/orderRoutes');
 const verificationRoutes = require('./src/routes/verificationRoutes');
 const appVerificationOtpRoutes = require('./src/routes/appVerificationOtpRoutes');
 const deliveryRoutes = require('./src/routes/deliveryRoutes');
+const deliveryManagement = require('./src/routes/deliveryManagement');
 require('dotenv').config();
 
 const app = express();
@@ -24,6 +25,7 @@ app.use('/api', orderRoutes);
 app.use('/api', verificationRoutes);
 app.use('/api', appVerificationOtpRoutes);
 app.use('/api', deliveryRoutes);
+app.use('/api', deliveryManagement);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

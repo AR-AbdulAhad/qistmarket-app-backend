@@ -285,8 +285,73 @@ const getPendingDeliveryProducts = async (req, res) => {
   }
 };
 
+const getCashInHand = async (req, res) => {
+  try {
+    const deliveryBoyId = 6;
+
+    if (!deliveryBoyId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 401, message: 'Authentication required' }
+      });
+    }
+
+    const deliveries = await prisma.delivery.findMany({
+      where: {
+        delivery_agent_id: deliveryBoyId,
+        status: 'completed',
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            product_name: true,
+            advance_amount: true,
+          }
+        }
+      },
+      orderBy: {
+        created_at: 'desc'
+      }
+    });
+
+    if (deliveries.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No cash in hand entries',
+        data: [],
+        total_unpaid: 0
+      });
+    }
+
+    const cashEntries = deliveries.map(d => ({
+      order_id: d.order.id,
+      product_name: d.order.product_name,
+      amount: d.order.advance_amount,
+      status: 'unpaid',  // Hardcoded as per current requirements; can be made dynamic later
+      created_at: d.createdAt || d.end_time,  // Use createdAt if auto-generated, else end_time
+      updated_at: d.updatedAt || d.end_time   // Use updatedAt if auto-generated, else end_time
+    }));
+
+    const totalUnpaid = cashEntries.reduce((sum, entry) => sum + (entry.amount || 0), 0);
+
+    return res.status(200).json({
+      success: true,
+      data: cashEntries,
+      total_unpaid: totalUnpaid
+    });
+  } catch (error) {
+    console.error('Error fetching cash in hand:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
-  getPendingDeliveryProducts
+  getPendingDeliveryProducts, 
+  getCashInHand
 };

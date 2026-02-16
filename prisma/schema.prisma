@@ -65,6 +65,9 @@ model Order {
   assigned_to_user_id Int?
   delivery_officer_id Int?
   is_delivered Boolean @default(false)
+  pickup_otp    String?     @db.VarChar(5)   // 6-digit OTP for pickup confirmation
+  otp_generated_at DateTime? 
+  otp_expires_at   DateTime?
 
   // Relations (add this line)
   delivery            Delivery? @relation("OrderDelivery")
