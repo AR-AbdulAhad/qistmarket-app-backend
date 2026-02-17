@@ -1,7 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-const notifyAdmins = async (title, message, type, related_id = null, io = null) => {
+const notifyAdmins = async (title, message, type, relatedId = null, io = null) => {
   try {
     const admins = await prisma.user.findMany({
       where: {
@@ -14,12 +14,12 @@ const notifyAdmins = async (title, message, type, related_id = null, io = null) 
     if (admins.length === 0) return;
 
     const notificationData = admins.map(admin => ({
-      user_id:    admin.id,
+      userId:    admin.id,
       title,
       message,
       type,
-      related_id,
-      created_at: new Date()
+      relatedId,
+      createdAt: new Date()
     }));
 
     await prisma.notification.createMany({ data: notificationData });
@@ -29,7 +29,7 @@ const notifyAdmins = async (title, message, type, related_id = null, io = null) 
         title,
         message,
         type,
-        related_id,
+        relatedId,
         timestamp: new Date().toISOString(),
       });
     }
