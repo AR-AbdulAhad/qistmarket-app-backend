@@ -1,11 +1,31 @@
+// prisma/schema.prisma
+
 generator client {
   provider = "prisma-client-js"
   binaryTargets = ["native", "debian-openssl-1.0.x"]
 }
+
 datasource db {
   provider = "mysql"
   url = env("DATABASE_URL")
 }
+
+// Naya OTP model
+model Otp {
+  id        Int      @id @default(autoincrement())
+  phone     String   // User ka phone number
+  otp       String   // 5-digit OTP
+  purpose   String   // 'login', 'verification', etc.
+  expiresAt DateTime // OTP expiry time
+  isUsed    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([phone])
+  @@index([otp])
+  @@map("otps")
+}
+
 model User {
   id Int @id @default(autoincrement())
   full_name String
@@ -36,6 +56,7 @@ model User {
   deliveries Delivery[] @relation("delivery_agent")
   @@index([role_id])
 }
+
 model Role {
   id Int @id @default(autoincrement())
   name String
@@ -43,6 +64,7 @@ model Role {
   // Relations
   users User[]
 }
+
 model Order {
   id                  Int       @id @default(autoincrement())
   order_ref           String    @unique
@@ -81,6 +103,7 @@ model Order {
   @@index([assigned_to_user_id])
   @@index([delivery_officer_id])
 }
+
 model Verification {
   id Int @id @default(autoincrement())
   order_id Int @unique
@@ -102,6 +125,7 @@ model Verification {
   reviews VerificationReview[]
   @@index([verification_officer_id])
 }
+
 model VerificationReview {
   id Int @id @default(autoincrement())
   verification_id Int
@@ -114,6 +138,7 @@ model VerificationReview {
   @@index([verification_id])
   @@index([reviewer_id])
 }
+
 model PurchaserVerification {
   id Int @id @default(autoincrement())
   verification_id Int @unique
@@ -140,6 +165,7 @@ model PurchaserVerification {
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
   @@index([verification_id])
 }
+
 model GrantorVerification {
   id Int @id @default(autoincrement())
   verification_id Int
@@ -170,6 +196,7 @@ model GrantorVerification {
   @@unique([verification_id, grantor_number])
   @@index([verification_id])
 }
+
 model NextOfKinVerification {
   id Int @id @default(autoincrement())
   verification_id Int @unique
@@ -181,6 +208,7 @@ model NextOfKinVerification {
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
   @@index([verification_id])
 }
+
 model LocationTracking {
   id Int @id @default(autoincrement())
   verification_id Int
@@ -193,6 +221,7 @@ model LocationTracking {
   verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
   @@index([verification_id])
 }
+
 model VerificationLocation {
   id Int @id @default(autoincrement())
   verification_id Int
@@ -209,6 +238,7 @@ model VerificationLocation {
   @@index([verification_id])
   @@index([person_type, person_id])
 }
+
 model VerificationLocationPhoto {
   id Int @id @default(autoincrement())
   verification_location_id Int
@@ -217,6 +247,7 @@ model VerificationLocationPhoto {
   verification_location VerificationLocation @relation(fields: [verification_location_id], references: [id])
   @@index([verification_location_id])
 }
+
 model VerificationDocument {
   id Int @id @default(autoincrement())
   verification_id Int
@@ -231,6 +262,7 @@ model VerificationDocument {
   @@index([verification_id])
   @@index([person_type, person_id])
 }
+
 model Delivery {
   id Int @id @default(autoincrement())
   order_id Int @unique
@@ -247,6 +279,7 @@ model Delivery {
   uploads DeliveryUpload[]
   @@index([delivery_agent_id])
 }
+
 model DeliveryUpload {
   id Int @id @default(autoincrement())
   delivery_id Int

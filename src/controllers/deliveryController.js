@@ -287,7 +287,7 @@ const getPendingDeliveryProducts = async (req, res) => {
 
 const getCashInHand = async (req, res) => {
   try {
-    const deliveryBoyId = 6;
+    const deliveryBoyId = req.user.id;
 
     if (!deliveryBoyId) {
       return res.status(401).json({
@@ -329,8 +329,8 @@ const getCashInHand = async (req, res) => {
       product_name: d.order.product_name,
       amount: d.order.advance_amount,
       status: 'unpaid',  // Hardcoded as per current requirements; can be made dynamic later
-      created_at: d.createdAt || d.end_time,  // Use createdAt if auto-generated, else end_time
-      updated_at: d.updatedAt || d.end_time   // Use updatedAt if auto-generated, else end_time
+      created_at: d.end_time,  // Use createdAt if auto-generated, else end_time
+      updated_at: d.end_time   // Use updatedAt if auto-generated, else end_time
     }));
 
     const totalUnpaid = cashEntries.reduce((sum, entry) => sum + (entry.amount || 0), 0);
