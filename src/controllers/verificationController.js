@@ -1,6 +1,44 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
+const notifyAdmins = async (title, message, type, related_id = null, io = null) => {
+  try {
+    const admins = await prisma.user.findMany({
+      where: {
+        role_id: { in: [4, 5, 6, 7, 8] },
+        status: 'active'
+      },
+      select: { id: true }
+    });
+
+    if (admins.length === 0) return;
+
+    const notificationData = admins.map(admin => ({
+      user_id:    admin.id,
+      title,
+      message,
+      type,
+      related_id,
+      created_at: new Date()
+    }));
+
+    await prisma.notification.createMany({ data: notificationData });
+
+    if (io) {
+      io.to('admins').emit('new_notification', {
+        title,
+        message,
+        type,
+        related_id,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+  } catch (err) {
+    console.error('Failed to notify admins:', err);
+  }
+};
+
 // Start Verification
 const startVerification = async (req, res) => {
   const { order_id } = req.body;
@@ -39,12 +77,21 @@ const startVerification = async (req, res) => {
         start_time: new Date()
       },
       include: {
-        order: true,
+        order: { select: { order_ref: true } },
         verification_officer: {
           select: { full_name: true, username: true }
         }
       }
     });
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Verification Started',
+      `Visit started for Order #${verification.order.order_ref} by ${verification.verification_officer.full_name}`,
+      'verification_start',
+      verification.id,
+      io
+    );
     
     return res.status(201).json({
       success: true,
@@ -923,7 +970,7 @@ const completeVerification = async (req, res) => {
         end_time: new Date(),
       },
       include: {
-        order: true,
+        order: { select: { order_ref: true } },
         verification_officer: {
           select: { full_name: true, username: true }
         },
@@ -939,6 +986,15 @@ const completeVerification = async (req, res) => {
         documents: true
       }
     });
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Verification Completed',
+      `Verification completed for Order #${updatedVerification.order.order_ref}`,
+      'verification_complete',
+      updatedVerification.id,
+      io
+    );
     
     return res.status(200).json({
       success: true,
@@ -1092,6 +1148,15 @@ const submitVerificationReview = async (req, res) => {
         data: { status: newStatus }
       });
     }
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Review Submitted',
+      `Review added to Order #${updated.order.order_ref} → ${newStatus.toUpperCase()} (${approvalPercentage}%)`,
+      'review_submitted',
+      parseInt(verification_id),
+      io
+    );
 
     return res.status(200).json({
       success: true,

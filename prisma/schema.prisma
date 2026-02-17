@@ -45,6 +45,7 @@ model User {
   permissions_json Json?
   fcm_token String? @db.VarChar(255)
   // Relations
+  notifications   Notification[]
   role Role @relation(fields: [role_id], references: [id])
   created_orders Order[]
   assigned_orders Order[] @relation("assignedOrders")
@@ -291,4 +292,23 @@ model DeliveryUpload {
   // Relations
   delivery Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
   @@index([delivery_id])
+}
+
+model Notification {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  title       String
+  message     String
+  type        String    // e.g. "verification_start", "verification_complete", "review_submitted", "cancelled"
+  relatedId   Int?      // verification.id ya order.id — deep linking ke liye
+  isRead      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([type])
+  @@map("notifications")
 }
