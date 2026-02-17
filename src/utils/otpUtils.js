@@ -7,24 +7,24 @@ const generateOTP = () => {
   return crypto.randomInt(10000, 99999).toString();
 };
 
-// Save OTP to database with proper expiration
-const saveOTP = async (phone, purpose = 'login') => {
+// Save OTP to database with 10 minutes expiration
+const saveOTP = async (identifier, purpose = 'login') => {
   try {
-    // Delete old unused OTPs for this phone
+    // Delete old unused OTPs for this identifier
     await prisma.otp.deleteMany({
       where: {
-        phone,
+        phone: identifier,
         isUsed: false,
         expiresAt: { lt: new Date() }
       }
     });
 
     const otp = generateOTP();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
 
     await prisma.otp.create({
       data: {
-        phone,
+        phone: identifier, // storing email in phone field (we'll rename later)
         otp,
         purpose,
         expiresAt
@@ -39,11 +39,11 @@ const saveOTP = async (phone, purpose = 'login') => {
 };
 
 // Verify OTP
-const verifyOTP = async (phone, otp, purpose = 'login') => {
+const verifyOTP = async (identifier, otp, purpose = 'login') => {
   try {
     const otpRecord = await prisma.otp.findFirst({
       where: {
-        phone,
+        phone: identifier,
         otp,
         purpose,
         isUsed: false,
@@ -68,7 +68,7 @@ const verifyOTP = async (phone, otp, purpose = 'login') => {
   }
 };
 
-// Clean up expired OTPs (call this periodically)
+// Clean up expired OTPs
 const cleanupExpiredOTPs = async () => {
   try {
     const result = await prisma.otp.deleteMany({

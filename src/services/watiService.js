@@ -2,8 +2,8 @@ const axios = require('axios');
 require('dotenv').config();
 
 const WATI_ACCESS_TOKEN = process.env.WATI_ACCESS_TOKEN;
-const WATI_TEMPLATE_NAME = process.env.WATI_TEMPLATE_NAME;
-const WATI_BROADCAST_NAME = process.env.WATI_BROADCAST_NAME;
+const WATI_TEMPLATE_NAME = process.env.WATI_TEMPLATE_NAME || 'otp_template';
+const WATI_BROADCAST_NAME = process.env.WATI_BROADCAST_NAME || 'otp_broadcast';
 const WATI_BASE_URL = process.env.WATI_BASE_URL;
 
 const sendOTPWhatsApp = async (phone, otp) => {
@@ -37,7 +37,6 @@ const sendOTPWhatsApp = async (phone, otp) => {
       timeout: 10000
     });
 
-    // Wati ki response structure check karo
     if (response.data) {
       return { 
         success: true, 
@@ -46,7 +45,7 @@ const sendOTPWhatsApp = async (phone, otp) => {
       };
     } else {
       return { 
-        success: true,  // Success true rakho agar response aya hai
+        success: true,
         message: 'OTP sent',
         data: response.data 
       };
@@ -60,7 +59,6 @@ const sendOTPWhatsApp = async (phone, otp) => {
   }
 };
 
-// Main send function - development mein hamesha success return karo
 const sendOTP = async (phone, otp) => {
   return sendOTPWhatsApp(phone, otp);
 };

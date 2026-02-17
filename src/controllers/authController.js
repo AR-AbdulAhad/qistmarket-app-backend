@@ -9,34 +9,49 @@ const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP } = require('../services/watiService');
 
 const sendLoginOTP = async (req, res) => {
-  const { phone } = req.body;
+  const { identifier } = req.body;  // identifier can be phone or email
 
-  // Validate phone number
-  if (!phone) {
+  // Validate identifier
+  if (!identifier) {
     return res.status(400).json({
       success: false,
-      error: { code: 400, message: 'Phone number is required.' }
+      error: { code: 400, message: 'Phone number or email is required.' }
     });
   }
 
-  // Pakistani phone number validation
-  if (!/^03\d{9}$/.test(phone)) {
+  // Determine if identifier is phone or email
+  const isPhone = /^03\d{9}$/.test(identifier);
+  const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
+
+  if (!isPhone && !isEmail) {
     return res.status(400).json({
       success: false,
       error: { 
         code: 400, 
-        message: 'Please enter a valid Pakistani phone number (03XXXXXXXXX)' 
+        message: 'Please enter a valid phone number (03XXXXXXXXX) or email address.' 
       }
     });
   }
 
   try {
-    // Check if user exists with this phone number
-    const user = await prisma.user.findFirst({
-      where: { 
-        phone,
+    // Find user by phone or email
+    let user;
+    let whereCondition = {};
+
+    if (isPhone) {
+      whereCondition = { 
+        phone: identifier,
         role_id: { in: [1, 2, 3] } // App roles
-      }
+      };
+    } else {
+      whereCondition = { 
+        email: identifier.toLowerCase(),
+        role_id: { in: [1, 2, 3] } // App roles
+      };
+    }
+
+    user = await prisma.user.findFirst({
+      where: whereCondition
     });
 
     if (!user) {
@@ -44,7 +59,9 @@ const sendLoginOTP = async (req, res) => {
         success: false,
         error: { 
           code: 404, 
-          message: 'No account found with this phone number.' 
+          message: isPhone 
+            ? 'No account found with this phone number.' 
+            : 'No account found with this email address.'
         }
       });
     }
@@ -54,32 +71,54 @@ const sendLoginOTP = async (req, res) => {
         success: false,
         error: { 
           code: 403, 
-          message: 'Your account is not active.' 
+          message: 'Your account is not active. Please contact support.' 
         }
       });
     }
 
-    // Generate and save OTP
-    const otp = await saveOTP(phone, 'login');
+    // Generate and save OTP (10 minutes expiry)
+    const otp = await saveOTP(identifier, 'login'); // Save with identifier (phone/email)
 
-    // Send OTP
-    const watiResponse = await sendOTP(phone, otp);
+    // Send OTP based on identifier type
+    let deliveryMethod = '';
+    let deliveryResponse;
 
-    // Production mein Wati response check karo
-    if (!watiResponse.success) {
-      return res.status(500).json({
-        success: false,
-        error: { 
-          code: 500, 
-          message: 'Unable to send OTP at the moment. Please try again later.' 
-        }
-      });
+    if (isPhone) {
+      // Send OTP via WhatsApp
+      deliveryResponse = await sendOTP(identifier, otp);
+      deliveryMethod = 'WhatsApp';
+    } else {
+      // Send OTP via Email
+      const emailHtml = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+          <h2 style="color: #333; text-align: center;">Login OTP Verification</h2>
+          <p style="font-size: 16px; color: #555;">Hello ${user.full_name || 'User'},</p>
+          <p style="font-size: 16px; color: #555;">Your OTP for login is:</p>
+          <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #0066cc; border-radius: 5px; margin: 20px 0;">
+            ${otp}
+          </div>
+          <p style="font-size: 14px; color: #777;">This OTP is valid for 10 minutes. Please do not share it with anyone.</p>
+          <p style="font-size: 14px; color: #777;">If you didn't request this OTP, please ignore this email.</p>
+          <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+          <p style="font-size: 12px; color: #999; text-align: center;">© ${new Date().getFullYear()} Your Company. All rights reserved.</p>
+        </div>
+      `;
+
+      deliveryResponse = await sendEmail({
+        to: identifier,
+        subject: 'Login OTP Verification',
+        html: emailHtml
+      }).then(() => ({ success: true }))
+        .catch(error => ({ success: false, error: error.message }));
+
+      deliveryMethod = 'Email';
     }
+
 
     return res.status(200).json({
       success: true,
-      message: 'OTP sent successfully to your WhatsApp number.',
-      expiresIn: '5 minutes'
+      message: `OTP sent successfully.`,
+      expiresIn: '10 minutes'
     });
 
   } catch (error) {
@@ -91,13 +130,13 @@ const sendLoginOTP = async (req, res) => {
 };
 
 const verifyLoginOTP = async (req, res) => {
-  const { phone, otp, device_id, fcm_token } = req.body;
+  const { identifier, otp, device_id, fcm_token } = req.body;
 
   // Validate required fields
-  if (!phone || !otp) {
+  if (!identifier || !otp) {
     return res.status(400).json({
       success: false,
-      error: { code: 400, message: 'Phone number and OTP are required.' }
+      error: { code: 400, message: 'Phone number/email and OTP are required.' }
     });
   }
 
@@ -111,7 +150,7 @@ const verifyLoginOTP = async (req, res) => {
 
   try {
     // Verify OTP
-    const verification = await verifyOTP(phone, otp, 'login');
+    const verification = await verifyOTP(identifier, otp, 'login');
 
     if (!verification.valid) {
       return res.status(401).json({
@@ -120,12 +159,31 @@ const verifyLoginOTP = async (req, res) => {
       });
     }
 
-    // Find user with this phone number
+    // Determine if identifier is phone or email
+    const isPhone = /^03\d{9}$/.test(identifier);
+    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
+
+    // Find user by phone or email
+    let whereCondition = {};
+    if (isPhone) {
+      whereCondition = { 
+        phone: identifier,
+        role_id: { in: [1, 2, 3] }
+      };
+    } else if (isEmail) {
+      whereCondition = { 
+        email: identifier.toLowerCase(),
+        role_id: { in: [1, 2, 3] }
+      };
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: { code: 400, message: 'Invalid identifier format.' }
+      });
+    }
+
     const user = await prisma.user.findFirst({
-      where: { 
-        phone,
-        role_id: { in: [1, 2, 3] } // App roles only
-      },
+      where: whereCondition,
       include: { 
         role: {
           select: {
@@ -195,7 +253,6 @@ const verifyLoginOTP = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Verify OTP login error:', error);
     return res.status(500).json({
       success: false,
       error: { code: 500, message: 'Internal server error. Please try again.' }
