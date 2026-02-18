@@ -44,6 +44,13 @@ model User {
   coverImage String? @db.VarChar(255)
   permissions_json Json?
   fcm_token String? @db.VarChar(255)
+  is_online            Boolean   @default(false)
+  last_known_latitude  Float?
+  last_known_longitude Float?
+  last_online_at       DateTime?
+  bike_km_range        Int?      // e.g. 50 km
+  working_hours_start  String?   @db.VarChar(5)  // "09:00"
+  working_hours_end    String?   @db.VarChar(5)  // "18:00"
   // Relations
   deletionRequests          AccountDeletionRequest[]   @relation("UserDeletionRequests")
   reviewedDeletionRequests  AccountDeletionRequest[]   @relation("ReviewedBy")
@@ -58,6 +65,9 @@ model User {
   delivery_orders Order[] @relation("deliveryOrders")
   deliveries Delivery[] @relation("delivery_agent")
   @@index([role_id])
+  @@index([is_online])
+  @@index([role_id, is_online])
+  @@index([last_online_at])
 }
 
 model Role {
