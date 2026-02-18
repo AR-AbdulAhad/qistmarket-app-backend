@@ -22,7 +22,11 @@ const {
   getVerificationOfficers,
   forgotPassword,
   resetPassword,
-  getDeliveryOfficers
+  getDeliveryOfficers,
+  requestAccountDeletion,
+  getMyDeletionRequest,
+  getAllDeletionRequests,
+  reviewDeletionRequest
 } = require('../controllers/authController');
 
 const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
@@ -72,5 +76,13 @@ router.patch(
 );
 router.patch('/users/:userId/permissions', authenticateJWT, requireSuperAdmin, updateUserPermissions);
 router.delete('/users/:userId', authenticateJWT, requireSuperAdmin, deleteUser);
+
+
+router.post('/account/deletion-request', authenticateJWT, requestAccountDeletion);
+router.get('/account/deletion-request', authenticateJWT, getMyDeletionRequest);
+
+// Admin ke liye
+router.get('/admin/deletion-requests', authenticateJWT, requireSuperAdmin, getAllDeletionRequests);
+router.patch('/admin/deletion-requests/:requestId/review', authenticateJWT, requireSuperAdmin, reviewDeletionRequest);
 
 module.exports = router;

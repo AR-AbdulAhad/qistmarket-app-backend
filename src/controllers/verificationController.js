@@ -1246,6 +1246,93 @@ const getVerifications = async (req, res) => {
   }
 };
 
+const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) => {
+  const officerId = req.user.id;
+
+  const { 
+    lastId = 0, 
+    limit = 10, 
+    search = '', 
+  } = req.query;
+
+  const take = Number(limit);
+  const cursorId = Number(lastId);
+
+  try {
+    const baseWhere = {
+      assigned_to_user_id: officerId,
+      status: targetStatus,
+    };
+
+    if (search.trim()) {
+      baseWhere.OR = [
+        { customer_name:     { contains: search } },
+        { whatsapp_number:   { contains: search } },
+        { order_ref:         { contains: search } },
+        { token_number:      { contains: search } },
+        { product_name:      { contains: search } },
+        { city:              { contains: search } },
+        { area:              { contains: search } },
+      ];
+    }
+
+    const totalCount = await prisma.order.count({
+      where: baseWhere,
+    });
+
+    const where = { ...baseWhere };
+    if (cursorId > 0) {
+      where.id = { lt: cursorId };
+    }
+
+    const orders = await prisma.order.findMany({
+      where,
+      take,
+      orderBy: { id: 'desc' },
+      include: {
+        created_by:    { select: { username: true, full_name: true } },
+        assigned_to:   { select: { username: true, full_name: true } },
+        verification: {
+          select: {
+            id: true,
+            status: true,
+            start_time: true,
+            end_time: true,
+          }
+        },
+      },
+    });
+
+    let nextLastId = null;
+    if (orders.length > 0) {
+      nextLastId = orders[orders.length - 1].id;
+    }
+
+    const hasMore = orders.length === take;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders,
+        pagination: {
+          nextLastId,
+          hasMore,
+          limit: take,
+          count: orders.length,
+          totalCount,
+        },
+        currentStatus: targetStatus,
+      },
+    });
+  } catch (error) {
+    console.error(`Error fetching ${targetStatus} orders:`, error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
 module.exports = {
   getVerifications,
   startVerification,
@@ -1253,9 +1340,9 @@ module.exports = {
   saveGrantorVerification,
   saveNextOfKin,
   saveLocation,
-  saveVerificationLocation, // NEW
-  getVerificationLocations, // NEW
-  deleteVerificationLocation, // NEW
+  saveVerificationLocation,
+  getVerificationLocations,
+  deleteVerificationLocation,
   uploadPurchaserDocument,
   uploadGrantorDocument,
   uploadPhoto,
@@ -1263,5 +1350,8 @@ module.exports = {
   deleteDocument,
   completeVerification,
   getVerificationByOrderId,
-  submitVerificationReview
+  submitVerificationReview,
+  getMyPendingOrders:    getMyAssignedOrdersCursorPaginated('pending'),
+  getMyConfirmedOrders:  getMyAssignedOrdersCursorPaginated('confirmed'),
+  getMyCancelledOrders:  getMyAssignedOrdersCursorPaginated('cancelled'),
 };

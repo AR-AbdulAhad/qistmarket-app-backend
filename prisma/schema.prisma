@@ -45,6 +45,8 @@ model User {
   permissions_json Json?
   fcm_token String? @db.VarChar(255)
   // Relations
+  deletionRequests          AccountDeletionRequest[]   @relation("UserDeletionRequests")
+  reviewedDeletionRequests  AccountDeletionRequest[]   @relation("ReviewedBy")
   notifications   Notification[]
   role Role @relation(fields: [role_id], references: [id])
   created_orders Order[]
@@ -311,4 +313,23 @@ model Notification {
   @@index([createdAt])
   @@index([type])
   @@map("notifications")
+}
+
+model AccountDeletionRequest {
+  id              Int       @id @default(autoincrement())
+  userId          Int
+  reason          String?   @db.Text
+  status          String    @default("pending") // pending, approved, rejected
+  requestedAt     DateTime  @default(now())
+  reviewedAt      DateTime?
+  reviewedById    Int?
+  reviewRemarks   String?   @db.Text
+
+  // Relations – now properly connected both ways
+  user            User      @relation("UserDeletionRequests", fields: [userId], references: [id], onDelete: Cascade)
+  reviewedBy      User?     @relation("ReviewedBy", fields: [reviewedById], references: [id])
+
+  @@index([userId])
+  @@index([status])
+  @@index([requestedAt])
 }

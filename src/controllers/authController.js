@@ -8,6 +8,44 @@ const sendEmail = require('../utils/sendEmail');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP } = require('../services/watiService');
 
+const notifyAdmins = async (title, message, type, relatedId = null, io = null) => {
+  try {
+    const admins = await prisma.user.findMany({
+      where: {
+        role_id: { in: [4, 5, 6, 7, 8] },
+        status: 'active'
+      },
+      select: { id: true }
+    });
+
+    if (admins.length === 0) return;
+
+    const notificationData = admins.map(admin => ({
+      userId:    admin.id,
+      title,
+      message,
+      type,
+      relatedId,
+      createdAt: new Date()
+    }));
+
+    await prisma.notification.createMany({ data: notificationData });
+
+    if (io) {
+      io.to('admins').emit('new_notification', {
+        title,
+        message,
+        type,
+        relatedId,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+  } catch (err) {
+    console.error('Failed to notify admins:', err);
+  }
+};
+
 const sendLoginOTP = async (req, res) => {
   const { identifier } = req.body;  // identifier can be phone or email
 
@@ -1139,6 +1177,207 @@ const getDeliveryOfficers = async (req, res) => {
   }
 };
 
+const requestAccountDeletion = async (req, res) => {
+  const userId = req.user.id;
+  const { reason } = req.body;
+
+  try {
+    const existingRequest = await prisma.accountDeletionRequest.findFirst({
+      where: {
+        userId,
+        status: { in: ['pending', 'approved'] }
+      }
+    });
+
+    if (existingRequest) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 400,
+          message: existingRequest.status === 'approved'
+            ? 'Your account deletion request has already been approved.'
+            : 'You already have a pending account deletion request.'
+        }
+      });
+    }
+
+    const request = await prisma.accountDeletionRequest.create({
+      data: {
+        userId,
+        reason: reason || null,
+        status: 'pending',
+        requestedAt: new Date()
+      }
+    });
+
+    await notifyAdmins(
+      'New Account Deletion Request',
+      `Verification Officer ${req.user.full_name} (${req.user.username}) ne account delete karne ki request ki hai. Reason: ${reason || 'Not provided'}`,
+      'account_deletion_request',
+      request.id,
+      io
+    );
+
+  } catch (error) {
+    console.error('Account deletion request error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+const getMyDeletionRequest = async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const request = await prisma.accountDeletionRequest.findFirst({
+      where: { userId },
+      orderBy: { requestedAt: 'desc' },
+      select: {
+        id: true,
+        reason: true,
+        status: true,
+        requestedAt: true,
+        reviewedAt: true,
+        reviewRemarks: true
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: { request: request || null }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+// ───────────────────────────────────────────────
+// ADMIN ONLY ROUTES
+// ───────────────────────────────────────────────
+
+const getAllDeletionRequests = async (req, res) => {
+  const { status = 'pending', page = 1, limit = 10 } = req.query;
+
+  try {
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const where = status ? { status } : {};
+
+    const [requests, total] = await Promise.all([
+      prisma.accountDeletionRequest.findMany({
+        where,
+        skip,
+        take: Number(limit),
+        orderBy: { requestedAt: 'desc' },
+        include: {
+          user: {
+            select: { id: true, full_name: true, username: true, phone: true, role: { select: { name: true } } }
+          },
+          reviewedBy: {
+            select: { full_name: true, username: true }
+          }
+        }
+      }),
+      prisma.accountDeletionRequest.count({ where })
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        requests,
+        pagination: {
+          page: Number(page),
+          limit: Number(limit),
+          total,
+          totalPages: Math.ceil(total / limit),
+          hasNext: skip + Number(limit) < total
+        }
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+const reviewDeletionRequest = async (req, res) => {
+  const { requestId } = req.params;
+  const { action, remarks } = req.body; // action: "approve" | "reject"
+
+  if (!['approve', 'reject'].includes(action)) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Action must be "approve" or "reject"' }
+    });
+  }
+
+  try {
+    const deletionRequest = await prisma.accountDeletionRequest.findUnique({
+      where: { id: Number(requestId) },
+      include: { user: true }
+    });
+
+    if (!deletionRequest) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Deletion request not found' }
+      });
+    }
+
+    if (deletionRequest.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        error: { code: 400, message: `Request is already ${deletionRequest.status}` }
+      });
+    }
+
+    let newStatus = action === 'approve' ? 'approved' : 'rejected';
+
+    await prisma.$transaction(async (tx) => {
+      // Update request
+      await tx.accountDeletionRequest.update({
+        where: { id: Number(requestId) },
+        data: {
+          status: newStatus,
+          reviewedAt: new Date(),
+          reviewedById: req.user.id,
+          reviewRemarks: remarks || null
+        }
+      });
+
+      // Agar approve → user ko inactive kar do
+      if (action === 'approve') {
+        await tx.user.update({
+          where: { id: deletionRequest.userId },
+          data: { status: 'inactive' }
+        });
+      }
+    });
+
+    // Optional: User ko notification bhej sakte hain
+
+    return res.status(200).json({
+      success: true,
+      message: `Request ${newStatus} successfully.`,
+      data: { status: newStatus }
+    });
+
+  } catch (error) {
+    console.error('Review deletion request error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
 module.exports = {
   // OTP Login functions
   sendLoginOTP,
@@ -1158,5 +1397,9 @@ module.exports = {
   updateProfile,
   forgotPassword,
   resetPassword,
-  getDeliveryOfficers
+  getDeliveryOfficers,
+  requestAccountDeletion,
+  getMyDeletionRequest,
+  getAllDeletionRequests,
+  reviewDeletionRequest
 };
