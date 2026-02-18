@@ -1201,7 +1201,7 @@ const requestAccountDeletion = async (req, res) => {
       });
     }
 
-    const request = await prisma.accountDeletionRequest.create({
+    const deletionRequest = await prisma.accountDeletionRequest.create({
       data: {
         userId,
         reason: reason || null,
@@ -1211,20 +1211,30 @@ const requestAccountDeletion = async (req, res) => {
     });
 
     const io = req.app.get('io');
-    
     await notifyAdmins(
       'New Account Deletion Request',
       `Verification Officer ${req.user.full_name} (${req.user.username}) ne account delete karne ki request ki hai. Reason: ${reason || 'Not provided'}`,
       'account_deletion_request',
-      request.id,
+      deletionRequest.id,
       io
-    );
+    ).catch(err => {
+      console.error('Notification failed but request created:', err);
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Account deletion request submitted successfully. It will be reviewed by admin shortly.',
+      data: {
+        requestId: deletionRequest.id,
+        requestedAt: deletionRequest.requestedAt
+      }
+    });
 
   } catch (error) {
     console.error('Account deletion request error:', error);
     return res.status(500).json({
       success: false,
-      error: { code: 500, message: 'Internal server error' }
+      error: { code: 500, message: 'Failed to submit deletion request. Please try again later.' }
     });
   }
 };
