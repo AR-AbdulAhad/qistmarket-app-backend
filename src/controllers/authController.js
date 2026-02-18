@@ -1210,6 +1210,8 @@ const requestAccountDeletion = async (req, res) => {
       }
     });
 
+    const io = req.app.get('io');
+    
     await notifyAdmins(
       'New Account Deletion Request',
       `Verification Officer ${req.user.full_name} (${req.user.username}) ne account delete karne ki request ki hai. Reason: ${reason || 'Not provided'}`,
