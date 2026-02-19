@@ -15,6 +15,6 @@ router.get('/officers', authenticateJWT, getAllVerificationOfficers);
 router.put('/officer/profile', authenticateJWT, updateOfficerProfile);
 
 // Officer only - Get own online/location status (for Flutter dashboard)
-router.get('/officer/status', getMyOfficerStatus);
+router.get('/officer/status', authenticateJWT, getMyOfficerStatus);
 
 module.exports = router;
