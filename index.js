@@ -40,7 +40,7 @@ const io = new Server(server, {
       "http://localhost:3000",
       "http://localhost:5173",           // Vite default
       "http://127.0.0.1:3000",
-      "https://your-admin-dashboard-domain.com",   // ← change to real domain
+      "https://qistmarket-app-dashboard.onrender.com",   // ← change to real domain
       "https://your-flutter-web-domain.com",       // if you have web version
       "*"                                       
     ],
