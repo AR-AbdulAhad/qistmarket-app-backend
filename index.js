@@ -57,6 +57,7 @@ app.set('io', io);
 io.on('connection', (socket) => {
   console.log(`Client connected → ${socket.id}`);
 
+  // Admin joins notifications room
   socket.on('join_admin_notifications', (token) => {
     if (!token) return;
     try {
@@ -78,9 +79,7 @@ io.on('connection', (socket) => {
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      const isOfficer =
-        decoded.role === 'Verification Officer' ||
-        decoded.role_id === 1;  // adjust role_id if needed
+      const isOfficer = decoded.role === 'Verification Officer' || decoded.role_id === 1;
 
       if (!isOfficer) {
         socket.emit('auth_error', { message: 'Not a Verification Officer' });
@@ -92,29 +91,24 @@ io.on('connection', (socket) => {
 
       await prisma.user.update({
         where: { id: officerId },
-        data: {
-          is_online: true,
-          last_online_at: new Date(),
-        },
+        data: { is_online: true, last_online_at: new Date() },
       });
 
-      // Create new session only if no open session exists
-      const openSession = await prisma.officerSession.findFirst({
+      // Create session if none open
+      let session = await prisma.officerSession.findFirst({
         where: { officer_id: officerId, end_time: null },
       });
 
-      if (!openSession) {
-        await prisma.officerSession.create({
-          data: {
-            officer_id: officerId,
-            start_time: new Date(),
-          },
+      if (!session) {
+        session = await prisma.officerSession.create({
+          data: { officer_id: officerId, start_time: new Date() },
         });
       }
 
       socket.join('verification_officers');
       socket.join(`officer_${officerId}`);
 
+      // Emit status update
       io.to('admins').emit('officer_status_update', {
         officerId,
         is_online: true,
@@ -123,13 +117,58 @@ io.on('connection', (socket) => {
 
       socket.emit('officer_online_confirmed', { officerId, is_online: true });
 
+      // ────────────────────────────────────────────────
+      // Emit initial daily & monthly deltas on login
+      // ────────────────────────────────────────────────
+      const today = new Date().toISOString().split('T')[0];
+
+      const dailyAgg = await prisma.officerSession.aggregate({
+        where: {
+          officer_id: officerId,
+          start_time: {
+            gte: new Date(`${today}T00:00:00.000Z`),
+            lt: new Date(`${today}T23:59:59.999Z`),
+          },
+        },
+        _sum: { duration_minutes: true },
+      });
+
+      const dailyHours = ((dailyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
+
+      io.to('admins').emit('officer_daily_update', {
+        officerId,
+        date: today,
+        online_hours: dailyHours,
+      });
+
+      // Monthly (current month)
+      const now = new Date();
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      const monthlyAgg = await prisma.officerSession.aggregate({
+        where: {
+          officer_id: officerId,
+          start_time: { gte: startOfMonth },
+        },
+        _sum: { duration_minutes: true },
+      });
+
+      const monthlyHours = ((monthlyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
+
+      io.to('admins').emit('officer_monthly_update', {
+        officerId,
+        monthly_online_hours: monthlyHours,
+        month: now.toISOString().slice(0, 7),
+      });
+
       console.log(`Officer ${officerId} → ONLINE ✅`);
     } catch (err) {
-      console.error('officer_login JWT error:', err.message);
-      socket.emit('auth_error', { message: 'Invalid token for officer' });
+      console.error('officer_login error:', err.message);
+      socket.emit('auth_error', { message: 'Invalid token' });
     }
   });
 
+  // Location update (unchanged, already emits to admins)
   socket.on('update_officer_location', async (data) => {
     if (!officerId) return;
 
@@ -181,6 +220,10 @@ io.on('connection', (socket) => {
         orderBy: { start_time: 'desc' },
       });
 
+      let dailyHours = '0.00';
+      let monthlyHours = '0.00';
+      let today = new Date().toISOString().split('T')[0];
+
       if (openSession) {
         const endTime = new Date();
         const durationMs = endTime.getTime() - openSession.start_time.getTime();
@@ -188,19 +231,61 @@ io.on('connection', (socket) => {
 
         await prisma.officerSession.update({
           where: { id: openSession.id },
-          data: {
-            end_time: endTime,
-            duration_minutes: durationMin,
+          data: { end_time: endTime, duration_minutes: durationMin },
+        });
+
+        // ────────────────────────────────────────────────
+        // Recalculate & emit DAILY delta
+        // ────────────────────────────────────────────────
+        const sessionDate = openSession.start_time.toISOString().split('T')[0];
+        today = sessionDate; // use session date
+
+        const dailyAgg = await prisma.officerSession.aggregate({
+          where: {
+            officer_id: officerId,
+            start_time: {
+              gte: new Date(`${sessionDate}T00:00:00.000Z`),
+              lt: new Date(`${sessionDate}T23:59:59.999Z`),
+            },
           },
+          _sum: { duration_minutes: true },
+        });
+
+        dailyHours = ((dailyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
+
+        io.to('admins').emit('officer_daily_update', {
+          officerId,
+          date: sessionDate,
+          online_hours: dailyHours,
+        });
+
+        // ────────────────────────────────────────────────
+        // Recalculate & emit MONTHLY delta (current month)
+        // ────────────────────────────────────────────────
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+        const monthlyAgg = await prisma.officerSession.aggregate({
+          where: {
+            officer_id: officerId,
+            start_time: { gte: startOfMonth },
+          },
+          _sum: { duration_minutes: true },
+        });
+
+        monthlyHours = ((monthlyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
+
+        io.to('admins').emit('officer_monthly_update', {
+          officerId,
+          monthly_online_hours: monthlyHours,
+          month: now.toISOString().slice(0, 7),
         });
       }
 
+      // Mark user offline
       await prisma.user.update({
         where: { id: officerId },
-        data: {
-          is_online: false,
-          last_online_at: new Date(),
-        },
+        data: { is_online: false, last_online_at: new Date() },
       });
 
       io.to('admins').emit('officer_status_update', {
@@ -211,7 +296,7 @@ io.on('connection', (socket) => {
 
       console.log(`Officer ${officerId} → OFFLINE`);
     } catch (err) {
-      console.error('Disconnect update error:', err.message);
+      console.error('Disconnect handler error:', err.message);
     }
 
     officerId = null;
