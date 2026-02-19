@@ -42,7 +42,7 @@ const io = new Server(server, {
       "http://127.0.0.1:3000",
       "https://your-admin-dashboard-domain.com",   // ← change to real domain
       "https://your-flutter-web-domain.com",       // if you have web version
-      "*"                                        // ← remove in production
+      "*"                                       
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
@@ -52,16 +52,11 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
-// Make io available in controllers (for notifications)
 app.set('io', io);
 
-// ────────────────────────────────────────────────
-// Socket Connection Logic
-// ────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`Client connected → ${socket.id}`);
 
-  // ── Admin joins notification room ──
   socket.on('join_admin_notifications', (token) => {
     if (!token) return;
     try {
@@ -76,49 +71,53 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── Verification Officer real-time events ──
   let officerId = null;
 
-  // ✅ FIX: officer_login — token receive karo, DB update karo
   socket.on('officer_login', async (token) => {
-    if (!token) return;
+  if (!token) return;
 
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET);
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    
+    console.log('=== officer_login decoded ===', JSON.stringify(decoded));
+    const isOfficer =
+      decoded.role === 'Verification Officer' ||
+      decoded.role_id === 1;
 
-      // Role check — naam ya role_id dono handle karo
-      const isOfficer =
-        decoded.role === 'Verification Officer' || decoded.role_id === 3;
-      if (!isOfficer) return;
-
-      officerId = decoded.id;
-      socket.officerId = officerId;
-
-      // ✅ Direct prisma use karo
-      await prisma.user.update({
-        where: { id: officerId },
-        data: {
-          is_online: true,
-          last_online_at: new Date(),
-        },
-      });
-
-      socket.join('verification_officers');
-      socket.join(`officer_${officerId}`);
-
-      // Admins ko notify karo
-      io.to('admins').emit('officer_status_update', {
-        officerId,
-        is_online: true,
-        timestamp: new Date().toISOString(),
-      });
-
-      console.log(`Officer ${officerId} → ONLINE ✅`);
-    } catch (err) {
-      console.error('officer_login error:', err.message);
-      socket.emit('auth_error', { message: 'Invalid token for officer' });
+    if (!isOfficer) {
+      console.log('Not an officer. role:', decoded.role, 'role_id:', decoded.role_id);
+      socket.emit('auth_error', { message: 'Not a Verification Officer' });
+      return;
     }
-  });
+
+    officerId = decoded.id;
+    socket.officerId = officerId;
+
+    await prisma.user.update({
+      where: { id: officerId },
+      data: {
+        is_online: true,
+        last_online_at: new Date(),
+      },
+    });
+
+    socket.join('verification_officers');
+    socket.join(`officer_${officerId}`);
+
+    io.to('admins').emit('officer_status_update', {
+      officerId,
+      is_online: true,
+      timestamp: new Date().toISOString(),
+    });
+
+    socket.emit('officer_online_confirmed', { officerId, is_online: true });
+
+    console.log(`Officer ${officerId} → ONLINE ✅`);
+  } catch (err) {
+    console.error('officer_login JWT error:', err.message);
+    socket.emit('auth_error', { message: 'Invalid token for officer' });
+  }
+});
 
   // ✅ FIX: update_officer_location — DB mein lat/lng save karo
   socket.on('update_officer_location', async (data) => {
