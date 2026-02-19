@@ -24,7 +24,8 @@ const {
   submitVerificationReview,
   getMyPendingOrders,
   getMyConfirmedOrders,
-  getMyCancelledOrders
+  getMyCancelledOrders,
+  getMyCustomersWithOrdersAndLedger
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -33,6 +34,12 @@ router.get('/verifications', authenticateJWT, getVerifications);
 router.get('/officer/orders/pending', authenticateJWT, getMyPendingOrders);
 router.get('/officer/orders/confirmed', authenticateJWT, getMyConfirmedOrders);
 router.get('/officer/orders/cancelled', authenticateJWT, getMyCancelledOrders);
+
+router.get(
+  '/officer/customers', 
+  authenticateJWT, 
+  getMyCustomersWithOrdersAndLedger
+);
 
 // Start verification
 router.post('/verification/start', authenticateJWT, startVerification);

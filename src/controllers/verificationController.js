@@ -1333,6 +1333,173 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
   }
 };
 
+const getMyCustomersWithOrdersAndLedger = async (req, res) => {
+  const officerId = req.user.id;
+
+  const now = new Date();
+  let startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  let endOfMonth   = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+  if (req.query.year && req.query.month) {
+    const y = parseInt(req.query.year);
+    const m = parseInt(req.query.month) - 1;
+    if (!isNaN(y) && !isNaN(m) && m >= 0 && m <= 11) {
+      startOfMonth = new Date(y, m, 1);
+      endOfMonth   = new Date(y, m + 1, 1);
+    }
+  }
+
+  try {
+    const orders = await prisma.order.findMany({
+      where: {
+        assigned_to_user_id: officerId,
+        created_at: { gte: startOfMonth, lt: endOfMonth },
+      },
+      include: {
+        verification: { select: { status: true, start_time: true, end_time: true } },
+        delivery:     { select: { status: true, end_time: true, verified: true } },
+      },
+      orderBy: [{ customer_name: 'asc' }, { created_at: 'desc' }],
+    });
+
+    if (orders.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: { month: startOfMonth.toISOString().slice(0, 7), totalCustomers: 0, totalOrders: 0, paidOrders: 0, pendingOrders: 0, customers: [] },
+      });
+    }
+
+    const customerMap = new Map();
+
+    for (const order of orders) {
+      const key = (order.whatsapp_number || `unknown-${order.id}`).trim();
+
+      if (!customerMap.has(key)) {
+        customerMap.set(key, {
+          customer: {
+            name: order.customer_name,
+            whatsapp_number: order.whatsapp_number,
+            address: order.address,
+            city: order.city,
+            area: order.area,
+          },
+          orders: [],
+          ledgerSummary: { totalOrders: 0, paidOrders: 0, pendingOrders: 0, totalAdvanceReceived: 0, totalPendingAmount: 0 },
+        });
+      }
+
+      const group = customerMap.get(key);
+
+      const isDelivered = order.is_delivered || (order.delivery?.status === 'completed');
+      const deliveryDate = isDelivered ? (order.delivery?.end_time || order.updated_at) : null;
+
+      const advanceAmount   = order.advance_amount || 0;
+      const monthlyAmount   = order.monthly_amount || 0;
+      const totalMonths     = order.months || 0;
+
+      let advancePayment = {
+        amount: advanceAmount,
+        paid: isDelivered,
+        paidAt: deliveryDate ? deliveryDate.toISOString() : null,
+        status: isDelivered ? 'paid' : 'pending',
+        paidVia: isDelivered ? 'delivery' : null,
+      };
+
+      let installmentLedger = [];
+      let paidInstallments = 0;
+      let pendingInstallments = totalMonths;
+
+      if (isDelivered && deliveryDate && totalMonths > 0) {
+        let current = new Date(deliveryDate);
+        current.setMonth(current.getMonth() + 1);
+        current.setDate(1);
+        const DUE_DAY = 5;
+        current.setDate(DUE_DAY);
+
+        for (let i = 0; i < totalMonths; i++) {
+          const dueDate = new Date(current);
+          installmentLedger.push({
+            monthNumber: i + 1,
+            dueDate: dueDate.toISOString().split('T')[0],
+            yearMonth: dueDate.toISOString().slice(0, 7),
+            dueAmount: monthlyAmount,
+            paidAmount: 0,
+            remainingAmount: monthlyAmount,
+            status: 'pending',
+          });
+
+          // Move to next month
+          current.setMonth(current.getMonth() + 1);
+        }
+      }
+
+      const totalDue      = advanceAmount + (monthlyAmount * totalMonths);
+      const totalPaid     = isDelivered ? advanceAmount : 0;
+      const totalRemaining = totalDue - totalPaid;
+
+      const orderEntry = {
+        order_id: order.id,
+        order_ref: order.order_ref,
+        token_number: order.token_number,
+        product_name: order.product_name,
+        total_amount: order.total_amount,
+        advance_amount: advanceAmount,
+        monthly_amount: monthlyAmount,
+        months: totalMonths,
+        status: order.status,
+        created_at: order.created_at.toISOString(),
+        is_delivered: isDelivered,
+        delivered_at: deliveryDate ? deliveryDate.toISOString() : null,
+        verification_status: order.verification?.status || null,
+
+        ledgerHistory: {
+          advancePayment,
+          installmentLedger,
+          summary: {
+            totalDue,
+            totalPaid,
+            totalRemaining,
+            paidInstallments,
+            pendingInstallments,
+            installmentsStarted: isDelivered && totalMonths > 0,
+            firstInstallmentDate: installmentLedger[0]?.dueDate || null,
+          },
+        },
+      };
+
+      group.orders.push(orderEntry);
+
+      group.ledgerSummary.totalOrders += 1;
+      group.ledgerSummary.totalAdvanceReceived += advanceAmount;
+
+      if (isDelivered) {
+        group.ledgerSummary.paidOrders += 1;
+      } else {
+        group.ledgerSummary.pendingOrders += 1;
+        group.ledgerSummary.totalPendingAmount += totalRemaining;
+      }
+    }
+
+    const customers = Array.from(customerMap.values())
+      .sort((a, b) => a.customer.name.localeCompare(b.customer.name));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        month: startOfMonth.toISOString().slice(0, 7),
+        totalCustomers: customers.length,
+        totalOrders: orders.length,
+        paidOrders: orders.filter(o => o.is_delivered || o.delivery?.status === 'completed').length,
+        pendingOrders: orders.length - orders.filter(o => o.is_delivered || o.delivery?.status === 'completed').length,
+        customers,
+      },
+    });
+  } catch (error) {
+    console.error('Error in getMyCustomersWithOrdersAndLedger:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
 module.exports = {
   getVerifications,
   startVerification,
@@ -1354,4 +1521,5 @@ module.exports = {
   getMyPendingOrders:    getMyAssignedOrdersCursorPaginated('pending'),
   getMyConfirmedOrders:  getMyAssignedOrdersCursorPaginated('confirmed'),
   getMyCancelledOrders:  getMyAssignedOrdersCursorPaginated('cancelled'),
+  getMyCustomersWithOrdersAndLedger,
 };
