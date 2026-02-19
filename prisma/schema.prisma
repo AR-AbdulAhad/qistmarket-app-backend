@@ -52,6 +52,7 @@ model User {
   working_hours_start  String?   @db.VarChar(5)  // "09:00"
   working_hours_end    String?   @db.VarChar(5)  // "18:00"
   // Relations
+  officerSessions OfficerSession[]
   deletionRequests          AccountDeletionRequest[]   @relation("UserDeletionRequests")
   reviewedDeletionRequests  AccountDeletionRequest[]   @relation("ReviewedBy")
   notifications   Notification[]
@@ -342,4 +343,19 @@ model AccountDeletionRequest {
   @@index([userId])
   @@index([status])
   @@index([requestedAt])
+}
+
+model OfficerSession {
+  id               Int      @id @default(autoincrement())
+  officer_id       Int
+  start_time       DateTime
+  end_time         DateTime?
+  duration_minutes Int?
+  created_at       DateTime @default(now())
+
+  officer          User     @relation(fields: [officer_id], references: [id], onDelete: Cascade)
+
+  @@index([officer_id])
+  @@index([start_time])
+  @@index([officer_id, start_time])
 }

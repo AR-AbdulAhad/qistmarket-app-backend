@@ -74,57 +74,64 @@ io.on('connection', (socket) => {
   let officerId = null;
 
   socket.on('officer_login', async (token) => {
-  if (!token) return;
+    if (!token) return;
 
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    
-    console.log('=== officer_login decoded ===', JSON.stringify(decoded));
-    const isOfficer =
-      decoded.role === 'Verification Officer' ||
-      decoded.role_id === 1;
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      const isOfficer =
+        decoded.role === 'Verification Officer' ||
+        decoded.role_id === 1;  // adjust role_id if needed
 
-    if (!isOfficer) {
-      console.log('Not an officer. role:', decoded.role, 'role_id:', decoded.role_id);
-      socket.emit('auth_error', { message: 'Not a Verification Officer' });
-      return;
-    }
+      if (!isOfficer) {
+        socket.emit('auth_error', { message: 'Not a Verification Officer' });
+        return;
+      }
 
-    officerId = decoded.id;
-    socket.officerId = officerId;
+      officerId = decoded.id;
+      socket.officerId = officerId;
 
-    await prisma.user.update({
-      where: { id: officerId },
-      data: {
+      await prisma.user.update({
+        where: { id: officerId },
+        data: {
+          is_online: true,
+          last_online_at: new Date(),
+        },
+      });
+
+      // Create new session only if no open session exists
+      const openSession = await prisma.officerSession.findFirst({
+        where: { officer_id: officerId, end_time: null },
+      });
+
+      if (!openSession) {
+        await prisma.officerSession.create({
+          data: {
+            officer_id: officerId,
+            start_time: new Date(),
+          },
+        });
+      }
+
+      socket.join('verification_officers');
+      socket.join(`officer_${officerId}`);
+
+      io.to('admins').emit('officer_status_update', {
+        officerId,
         is_online: true,
-        last_online_at: new Date(),
-      },
-    });
+        timestamp: new Date().toISOString(),
+      });
 
-    socket.join('verification_officers');
-    socket.join(`officer_${officerId}`);
+      socket.emit('officer_online_confirmed', { officerId, is_online: true });
 
-    io.to('admins').emit('officer_status_update', {
-      officerId,
-      is_online: true,
-      timestamp: new Date().toISOString(),
-    });
-
-    socket.emit('officer_online_confirmed', { officerId, is_online: true });
-
-    console.log(`Officer ${officerId} → ONLINE ✅`);
-  } catch (err) {
-    console.error('officer_login JWT error:', err.message);
-    socket.emit('auth_error', { message: 'Invalid token for officer' });
-  }
-});
-
-  // ✅ FIX: update_officer_location — DB mein lat/lng save karo
-  socket.on('update_officer_location', async (data) => {
-    if (!officerId) {
-      console.log('update_officer_location ignored — officerId null');
-      return;
+      console.log(`Officer ${officerId} → ONLINE ✅`);
+    } catch (err) {
+      console.error('officer_login JWT error:', err.message);
+      socket.emit('auth_error', { message: 'Invalid token for officer' });
     }
+  });
+
+  socket.on('update_officer_location', async (data) => {
+    if (!officerId) return;
 
     const { latitude, longitude, accuracy, verification_id } = data;
     if (typeof latitude !== 'number' || typeof longitude !== 'number') return;
@@ -140,7 +147,6 @@ io.on('connection', (socket) => {
         },
       });
 
-      // Optional: verification ke liye location history save karo
       if (verification_id) {
         await prisma.locationTracking.create({
           data: {
@@ -154,7 +160,6 @@ io.on('connection', (socket) => {
         });
       }
 
-      // Admins ko broadcast karo
       io.to('admins').emit('officer_location_update', {
         officerId,
         latitude,
@@ -162,18 +167,34 @@ io.on('connection', (socket) => {
         accuracy,
         timestamp: new Date().toISOString(),
       });
-
-      console.log(`Officer ${officerId} location updated: ${latitude}, ${longitude}`);
     } catch (err) {
       console.error('Location update failed:', err.message);
     }
   });
 
-  // ✅ Disconnect — offline mark karo
   socket.on('disconnect', async () => {
     if (!officerId) return;
 
     try {
+      const openSession = await prisma.officerSession.findFirst({
+        where: { officer_id: officerId, end_time: null },
+        orderBy: { start_time: 'desc' },
+      });
+
+      if (openSession) {
+        const endTime = new Date();
+        const durationMs = endTime.getTime() - openSession.start_time.getTime();
+        const durationMin = Math.round(durationMs / 60000);
+
+        await prisma.officerSession.update({
+          where: { id: openSession.id },
+          data: {
+            end_time: endTime,
+            duration_minutes: durationMin,
+          },
+        });
+      }
+
       await prisma.user.update({
         where: { id: officerId },
         data: {
