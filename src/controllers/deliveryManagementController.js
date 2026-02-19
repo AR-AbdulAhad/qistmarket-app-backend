@@ -141,7 +141,7 @@ const generatePickupOtp = async (req, res) => {
   try {
     const boy = await prisma.user.findUnique({
       where: { id: Number(deliveryBoyId) },
-      select: { whatsapp_number: true, phone: true }
+      select: { phone: true }
     });
 
     if (!boy) return res.status(404).json({ success: false, error: 'Delivery boy not found' });
