@@ -177,6 +177,21 @@ const createOrder = async (req, res) => {
 
     const token_number = crypto.randomBytes(4).toString('hex').toUpperCase();
 
+    // Auto-assignment logic
+    let assignedOfficerId = null;
+    if (zone && area) {
+      const assignment = await prisma.officerAreaAssignment.findFirst({
+        where: {
+          zone: zone.trim(),
+          area: area.trim()
+        },
+        select: { user_id: true }
+      });
+      if (assignment) {
+        assignedOfficerId = assignment.user_id;
+      }
+    }
+
     const order = await prisma.order.create({
       data: {
         order_ref,
@@ -201,13 +216,30 @@ const createOrder = async (req, res) => {
         monthly_amount: parseFloat(monthly_amount),
         months: parseInt(months),
         channel: channel.trim(),
-        status: 'new',
-        created_by_user_id: req.user.id
+        status: assignedOfficerId ? 'assigned' : 'new',
+        created_by_user_id: req.user.id,
+        assigned_to_user_id: assignedOfficerId
       },
       include: {
-        created_by: { select: { username: true } }
+        created_by: { select: { username: true } },
+        assigned_to: { select: { id: true, username: true, fcm_token: true } }
       }
     });
+
+    // Create verification entry if assigned
+    if (assignedOfficerId) {
+      await prisma.verification.create({
+        data: {
+          order_id: order.id,
+          verification_officer_id: assignedOfficerId,
+          status: 'in_progress',
+          start_time: new Date()
+        }
+      });
+      // Send notification
+      const io = req.app.get('io');
+      await sendAssignmentNotification(order, order.assigned_to, io);
+    }
 
     return res.status(201).json({
       success: true,
@@ -624,7 +656,7 @@ const assignOrder = async (req, res) => {
       where: { id: Number(id) },
       data: { assigned_to_user_id: Number(user_id) },
       include: {
-        assigned_to: { select: { username: true, fcm_token: true } },
+        assigned_to: { select: { id: true, username: true, fcm_token: true } },
         created_by: { select: { username: true } },
       },
     });

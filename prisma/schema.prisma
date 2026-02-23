@@ -65,6 +65,7 @@ model User {
   verification_reviews VerificationReview[] @relation("verification_reviewer")
   delivery_orders Order[] @relation("deliveryOrders")
   deliveries Delivery[] @relation("delivery_agent")
+  officerAssignments OfficerAreaAssignment[] @relation("OfficerAssignments")
   @@index([role_id])
   @@index([is_online])
   @@index([role_id, is_online])
@@ -423,5 +424,19 @@ model OrderPayment {
   created_at    DateTime @default(now())
 
   @@index([order_id])
-  @@index([order_id, paymentType])
+    @@index([order_id, paymentType])
+}
+
+model OfficerAreaAssignment {
+  id        Int      @id @default(autoincrement())
+  user_id   Int
+  user      User     @relation("OfficerAssignments", fields: [user_id], references: [id], onDelete: Cascade)
+  zone      String
+  area      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([user_id, zone, area])
+  @@index([user_id])
+  @@index([zone, area])
 }
