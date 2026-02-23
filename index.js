@@ -13,13 +13,14 @@ const jwt = require('jsonwebtoken');
 // ────────────────────────────────────────────────
 // Route Imports
 // ────────────────────────────────────────────────
-const authRoutes          = require('./src/routes/authRoutes');
-const orderRoutes         = require('./src/routes/orderRoutes');
-const verificationRoutes  = require('./src/routes/verificationRoutes');
+const authRoutes = require('./src/routes/authRoutes');
+const orderRoutes = require('./src/routes/orderRoutes');
+const verificationRoutes = require('./src/routes/verificationRoutes');
 const appVerificationOtpRoutes = require('./src/routes/appVerificationOtpRoutes');
-const deliveryRoutes      = require('./src/routes/deliveryRoutes');
-const deliveryManagement  = require('./src/routes/deliveryManagement');
-const officerRoutes       = require('./src/routes/officerRoutes');      // ← new officer realtime routes
+const deliveryRoutes = require('./src/routes/deliveryRoutes');
+const deliveryManagement = require('./src/routes/deliveryManagement');
+const officerRoutes = require('./src/routes/officerRoutes');      // ← new officer realtime routes
+const notificationRoutes = require('./src/routes/notificationRoutes');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -42,7 +43,7 @@ const io = new Server(server, {
       "http://127.0.0.1:3000",
       "https://qistmarket-app-dashboard.onrender.com",   // ← change to real domain
       "https://your-flutter-web-domain.com",       // if you have web version
-      "*"                                       
+      "*"
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
@@ -67,6 +68,11 @@ io.on('connection', (socket) => {
         socket.emit('joined_admin_room', { success: true, userId: decoded.id });
         console.log(`Admin ${decoded.id} joined admins room`);
       }
+
+      // All users join their own personal room
+      socket.join(`user_${decoded.id}`);
+      socket.emit('joined_user_room', { success: true, userId: decoded.id });
+      console.log(`User ${decoded.id} joined personal room user_${decoded.id}`);
     } catch (err) {
       socket.emit('auth_error', { message: 'Invalid or expired token' });
     }
@@ -332,6 +338,7 @@ app.use('/api', appVerificationOtpRoutes);
 app.use('/api', deliveryRoutes);
 app.use('/api', deliveryManagement);
 app.use('/api', officerRoutes);           // ← officer realtime endpoints
+app.use('/api', notificationRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -380,4 +387,4 @@ const gracefulShutdown = (signal) => {
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

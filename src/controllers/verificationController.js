@@ -1,74 +1,34 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-
-const notifyAdmins = async (title, message, type, relatedId = null, io = null) => {
-  try {
-    const admins = await prisma.user.findMany({
-      where: {
-        role_id: { in: [4, 5, 6, 7, 8] },
-        status: 'active'
-      },
-      select: { id: true }
-    });
-
-    if (admins.length === 0) return;
-
-    const notificationData = admins.map(admin => ({
-      userId:    admin.id,
-      title,
-      message,
-      type,
-      relatedId,
-      createdAt: new Date()
-    }));
-
-    await prisma.notification.createMany({ data: notificationData });
-
-    if (io) {
-      io.to('admins').emit('new_notification', {
-        title,
-        message,
-        type,
-        relatedId,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-  } catch (err) {
-    console.error('Failed to notify admins:', err);
-  }
-};
+const { notifyAdmins } = require('../utils/notificationUtils');
 
 // Start Verification
 const startVerification = async (req, res) => {
   const { order_id } = req.body;
-  
+
   try {
-    // Check if verification already exists
     const existingVerification = await prisma.verification.findUnique({
       where: { order_id: parseInt(order_id) }
     });
-    
+
     if (existingVerification) {
       return res.status(400).json({
         success: false,
         error: { code: 400, message: 'Verification already started for this order' }
       });
     }
-    
-    // Check if order exists
+
     const order = await prisma.order.findUnique({
       where: { id: parseInt(order_id) }
     });
-    
+
     if (!order) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Order not found' }
       });
     }
-    
-    // Create verification
+
     const verification = await prisma.verification.create({
       data: {
         order_id: parseInt(order_id),
@@ -78,9 +38,100 @@ const startVerification = async (req, res) => {
       },
       include: {
         order: { select: { order_ref: true } },
-        verification_officer: {
-          select: { full_name: true, username: true }
-        }
+        verification_officer: { select: { full_name: true, username: true } }
+      }
+    });
+
+    // Create empty purchaser
+    const purchaser = await prisma.purchaserVerification.create({
+      data: {
+        verification_id: verification.id,
+        name: '',
+        father_husband_name: '',
+        present_address: '',
+        permanent_address: '',
+        nearest_location: '',
+        cnic_number: '',
+        telephone_number: '',
+        employment_type: 'EMPLOYED',
+        job_type: null,
+        employer_name: '',
+        employer_address: '',
+        designation: '',
+        official_number: null,
+        years_in_company: null,
+        gross_salary: null,
+        business_name: null,
+        established_since: null,
+        business_address: null,
+        net_income: null,
+        service_card_url: null,
+        signature_url: null,
+        is_verified: false
+      }
+    });
+
+    // Grantor 1
+    const grantor1 = await prisma.grantorVerification.create({
+      data: {
+        verification_id: verification.id,
+        grantor_number: 1,
+        name: '',
+        father_husband_name: '',
+        present_address: '',
+        permanent_address: '',
+        nearest_location: '',
+        cnic_number: '',
+        telephone_number: '',
+        employment_type: 'EMPLOYED',
+        job_type: null,
+        designation: '',
+        official_number: null,
+        office_address: '',
+        company_name: null,
+        years_in_company: null,
+        monthly_income: null,
+        business_name: null,
+        established_since: null,
+        business_address: null,
+        net_income: null,
+        full_residential_address: '',
+        relationship: '',
+        service_card_url: null,
+        signature_url: null,
+        is_verified: false
+      }
+    });
+
+    // Grantor 2
+    const grantor2 = await prisma.grantorVerification.create({
+      data: {
+        verification_id: verification.id,
+        grantor_number: 2,
+        name: '',
+        father_husband_name: '',
+        present_address: '',
+        permanent_address: '',
+        nearest_location: '',
+        cnic_number: '',
+        telephone_number: '',
+        employment_type: 'EMPLOYED',
+        job_type: null,
+        designation: '',
+        official_number: null,
+        office_address: '',
+        company_name: null,
+        years_in_company: null,
+        monthly_income: null,
+        business_name: null,
+        established_since: null,
+        business_address: null,
+        net_income: null,
+        full_residential_address: '',
+        relationship: '',
+        service_card_url: null,
+        signature_url: null,
+        is_verified: false
       }
     });
 
@@ -92,11 +143,16 @@ const startVerification = async (req, res) => {
       verification.id,
       io
     );
-    
+
     return res.status(201).json({
       success: true,
       message: 'Verification started successfully',
-      data: { verification }
+      data: {
+        verification,
+        purchaser: { id: purchaser.id },
+        grantor1: { id: grantor1.id },
+        grantor2: { id: grantor2.id }
+      }
     });
   } catch (error) {
     console.error('Start verification error:', error);
@@ -114,80 +170,105 @@ const savePurchaserVerification = async (req, res) => {
     name,
     father_husband_name,
     present_address,
+    present_zone,
+    present_area,
+    present_block,
+    present_street,
+    present_house_no,
+    present_period_of_stay,
     permanent_address,
-    nearest_location, // NEW FIELD
+    permanent_zone,
+    permanent_area,
+    permanent_block,
+    permanent_street,
+    permanent_house_no,
+    permanent_period_of_stay,
+    nearest_location,
     cnic_number,
     telephone_number,
+    employment_type,
+    job_type,
     employer_name,
     employer_address,
     designation,
     official_number,
     years_in_company,
-    gross_salary
+    gross_salary,
+    business_name,
+    established_since,
+    business_address,
+    net_income
   } = req.body;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
-    
+
     if (!verification) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Verification not found' }
-      });
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Verification not found' } });
     }
-    
-    // Check if purchaser already exists
-    const existingPurchaser = await prisma.purchaserVerification.findUnique({
-      where: { verification_id: parseInt(verification_id) }
-    });
-    
-    let purchaser;
-    if (existingPurchaser) {
-      // Update existing
-      purchaser = await prisma.purchaserVerification.update({
-        where: { verification_id: parseInt(verification_id) },
-        data: {
-          name,
-          father_husband_name,
-          present_address,
-          permanent_address,
-          nearest_location,
-          cnic_number,
-          telephone_number,
-          employer_name,
-          employer_address,
-          designation,
-          official_number,
-          years_in_company,
-          gross_salary,
-          is_verified: true
-        }
-      });
+
+    const data = {
+      name: name || '',
+      father_husband_name: father_husband_name || '',
+      present_address: present_address || '',
+      present_zone: present_zone || null,
+      present_area: present_area || null,
+      present_block: present_block || null,
+      present_street: present_street || null,
+      present_house_no: present_house_no || null,
+      present_period_of_stay: present_period_of_stay || null,
+      permanent_address: permanent_address || '',
+      permanent_zone: permanent_zone || null,
+      permanent_area: permanent_area || null,
+      permanent_block: permanent_block || null,
+      permanent_street: permanent_street || null,
+      permanent_house_no: permanent_house_no || null,
+      permanent_period_of_stay: permanent_period_of_stay || null,
+      nearest_location: nearest_location || '',
+      cnic_number: cnic_number || '',
+      telephone_number: telephone_number || '',
+      employment_type: employment_type || 'EMPLOYED',
+      job_type: job_type || null,
+      is_verified: true
+    };
+
+    if (employment_type === 'SELF_EMPLOYED') {
+      data.business_name = business_name || null;
+      data.established_since = established_since || null;
+      data.business_address = business_address || null;
+      data.net_income = net_income || null;
+
+      data.employer_name = null;
+      data.employer_address = null;
+      data.designation = null;
+      data.official_number = null;
+      data.years_in_company = null;
+      data.gross_salary = null;
     } else {
-      // Create new
-      purchaser = await prisma.purchaserVerification.create({
-        data: {
-          verification_id: parseInt(verification_id),
-          name,
-          father_husband_name,
-          present_address,
-          permanent_address,
-          nearest_location,
-          cnic_number,
-          telephone_number,
-          employer_name,
-          employer_address,
-          designation,
-          official_number,
-          years_in_company,
-          gross_salary,
-          is_verified: true
-        }
-      });
+      data.employer_name = employer_name || null;
+      data.employer_address = employer_address || null;
+      data.designation = designation || null;
+      data.official_number = official_number || null;
+      data.years_in_company = years_in_company || null;
+      data.gross_salary = gross_salary || null;
+
+      data.business_name = null;
+      data.established_since = null;
+      data.business_address = null;
+      data.net_income = null;
     }
-    
+
+    const purchaser = await prisma.purchaserVerification.upsert({
+      where: { verification_id: parseInt(verification_id) },
+      update: data,
+      create: {
+        verification_id: parseInt(verification_id),
+        ...data
+      }
+    });
+
     return res.status(200).json({
       success: true,
       message: 'Purchaser verification saved successfully',
@@ -195,10 +276,7 @@ const savePurchaserVerification = async (req, res) => {
     });
   } catch (error) {
     console.error('Save purchaser error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
 
@@ -209,102 +287,133 @@ const saveGrantorVerification = async (req, res) => {
     name,
     father_husband_name,
     present_address,
+    present_zone,
+    present_area,
+    present_block,
+    present_street,
+    present_house_no,
+    present_period_of_stay,
     permanent_address,
-    nearest_location, // NEW FIELD
+    permanent_zone,
+    permanent_area,
+    permanent_block,
+    permanent_street,
+    permanent_house_no,
+    permanent_period_of_stay,
+    nearest_location,
     cnic_number,
     telephone_number,
+    employment_type,
+    job_type,
     designation,
     official_number,
     office_address,
     company_name,
     years_in_company,
     monthly_income,
+    business_name,
+    established_since,
+    business_address,
+    net_income,
     full_residential_address,
     relationship
   } = req.body;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
-    
+
     if (!verification) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Verification not found' }
-      });
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Verification not found' } });
     }
-    
+
     const grantorNum = parseInt(grantor_number);
     if (grantorNum !== 1 && grantorNum !== 2) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: 'Grantor number must be 1 or 2' }
-      });
+      return res.status(400).json({ success: false, error: { code: 400, message: 'Grantor number must be 1 or 2' } });
     }
-    
+
+    const data = {
+      name: name || '',
+      father_husband_name: father_husband_name || '',
+      present_address: present_address || '',
+      present_zone: present_zone || null,
+      present_area: present_area || null,
+      present_block: present_block || null,
+      present_street: present_street || null,
+      present_house_no: present_house_no || null,
+      present_period_of_stay: present_period_of_stay || null,
+      permanent_address: permanent_address || '',
+      permanent_zone: permanent_zone || null,
+      permanent_area: permanent_area || null,
+      permanent_block: permanent_block || null,
+      permanent_street: permanent_street || null,
+      permanent_house_no: permanent_house_no || null,
+      permanent_period_of_stay: permanent_period_of_stay || null,
+      nearest_location: nearest_location || '',
+      cnic_number: cnic_number || '',
+      telephone_number: telephone_number || '',
+      office_address: office_address || '',
+      full_residential_address: full_residential_address || '',
+      relationship: relationship || '',
+      employment_type: employment_type || 'EMPLOYED',
+      job_type: job_type || null,
+      is_verified: true
+    };
+
+    if (employment_type === 'SELF_EMPLOYED') {
+      data.business_name = business_name || null;
+      data.established_since = established_since || null;
+      data.business_address = business_address || null;
+      data.net_income = net_income || null;
+
+      data.designation = null;
+      data.official_number = null;
+      data.company_name = null;
+      data.years_in_company = null;
+      data.monthly_income = null;
+    } else {
+      data.designation = designation || null;
+      data.official_number = official_number || null;
+      data.company_name = company_name || null;
+      data.years_in_company = years_in_company || null;
+      data.monthly_income = monthly_income || null;
+
+      data.business_name = null;
+      data.established_since = null;
+      data.business_address = null;
+      data.net_income = null;
+    }
+
     let grantor;
-    
-    // Upsert grantor
-    const existingGrantor = await prisma.grantorVerification.findFirst({
+
+    const existing = await prisma.grantorVerification.findFirst({
       where: {
         verification_id: parseInt(verification_id),
         grantor_number: grantorNum
       }
     });
-    
-    if (existingGrantor) {
+
+    if (existing) {
       grantor = await prisma.grantorVerification.update({
-        where: { 
+        where: {
           verification_id_grantor_number: {
             verification_id: parseInt(verification_id),
             grantor_number: grantorNum
           }
         },
-        data: {
-          name,
-          father_husband_name,
-          present_address,
-          permanent_address,
-          nearest_location, // NEW FIELD
-          cnic_number,
-          telephone_number,
-          designation,
-          official_number,
-          office_address,
-          company_name,
-          years_in_company,
-          monthly_income,
-          full_residential_address,
-          relationship,
-          is_verified: true
-        }
+        data
       });
     } else {
       grantor = await prisma.grantorVerification.create({
         data: {
           verification_id: parseInt(verification_id),
           grantor_number: grantorNum,
-          name,
-          father_husband_name,
-          present_address,
-          permanent_address,
-          nearest_location, // NEW FIELD
-          cnic_number,
-          telephone_number,
-          designation,
-          official_number,
-          office_address,
-          company_name,
-          years_in_company,
-          monthly_income,
-          full_residential_address,
-          relationship,
-          is_verified: true
+          ...data
         }
       });
     }
-    
+
     return res.status(200).json({
       success: true,
       message: `Grantor ${grantorNum} verification saved successfully`,
@@ -312,10 +421,7 @@ const saveGrantorVerification = async (req, res) => {
     });
   } catch (error) {
     console.error('Save grantor error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
 
@@ -328,25 +434,25 @@ const saveNextOfKin = async (req, res) => {
     relation,
     phone_number
   } = req.body;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
-    
+
     if (!verification) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Verification not found' }
       });
     }
-    
+
     let nextOfKin;
-    
+
     const existing = await prisma.nextOfKinVerification.findUnique({
       where: { verification_id: parseInt(verification_id) }
     });
-    
+
     if (existing) {
       nextOfKin = await prisma.nextOfKinVerification.update({
         where: { verification_id: parseInt(verification_id) },
@@ -363,7 +469,7 @@ const saveNextOfKin = async (req, res) => {
         }
       });
     }
-    
+
     return res.status(200).json({
       success: true,
       message: 'Next of kin saved successfully',
@@ -387,19 +493,19 @@ const saveLocation = async (req, res) => {
     accuracy,
     label
   } = req.body;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
-    
+
     if (!verification) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Verification not found' }
       });
     }
-    
+
     const location = await prisma.locationTracking.create({
       data: {
         verification_id: parseInt(verification_id),
@@ -410,7 +516,7 @@ const saveLocation = async (req, res) => {
         timestamp: new Date()
       }
     });
-    
+
     return res.status(201).json({
       success: true,
       message: 'Location saved successfully',
@@ -467,9 +573,9 @@ const saveVerificationLocation = async (req, res) => {
 
     // Get uploaded photos (up to 5)
     const photos = req.files || [];
-    
+
     // Save photos to separate table
-    const photoPromises = photos.map(file => 
+    const photoPromises = photos.map(file =>
       prisma.verificationLocationPhoto.create({
         data: {
           verification_location_id: location.id,
@@ -506,7 +612,7 @@ const saveVerificationLocation = async (req, res) => {
 // NEW: Get Verification Locations
 const getVerificationLocations = async (req, res) => {
   const { verification_id } = req.params;
-  
+
   try {
     const locations = await prisma.verificationLocation.findMany({
       where: { verification_id: parseInt(verification_id) },
@@ -532,7 +638,7 @@ const getVerificationLocations = async (req, res) => {
 // NEW: Delete Verification Location
 const deleteVerificationLocation = async (req, res) => {
   const { location_id } = req.params;
-  
+
   try {
     const location = await prisma.verificationLocation.findUnique({
       where: { id: parseInt(location_id) },
@@ -585,79 +691,54 @@ const deleteVerificationLocation = async (req, res) => {
 const uploadPurchaserDocument = async (req, res) => {
   const { verification_id } = req.params;
   const { document_type } = req.body;
-  
+
   try {
-    const verification = await prisma.verification.findUnique({
-      where: { id: parseInt(verification_id) },
-      include: { purchaser: true }
-    });
-    
-    if (!verification) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Verification not found' }
-      });
-    }
-    
-    if (!verification.purchaser) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: 'Purchaser verification not found' }
-      });
-    }
-    
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: 'No file uploaded' }
-      });
+      return res.status(400).json({ success: false, error: { code: 400, message: 'No file uploaded' } });
     }
-    
-    // Save document in documents table
+
+    const purchaser = await prisma.purchaserVerification.findUnique({
+      where: { verification_id: parseInt(verification_id) }
+    });
+
+    if (!purchaser) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Purchaser record not found' } });
+    }
+
     const document = await prisma.verificationDocument.create({
       data: {
         verification_id: parseInt(verification_id),
         document_type,
         person_type: 'purchaser',
-        person_id: verification.purchaser.id,
+        person_id: purchaser.id,
         file_url: req.file.url,
         label: `${document_type} - Purchaser`,
         uploaded_at: new Date()
       }
     });
-    
-    // Also update the purchaser record with specific URL
+
     let updateData = {};
-    if (document_type === 'cnic_front') {
-      updateData.cnic_front_url = req.file.url;
-    } else if (document_type === 'cnic_back') {
-      updateData.cnic_back_url = req.file.url;
-    } else if (document_type === 'utility_bill') {
-      updateData.utility_bill_url = req.file.url;
-    } else if (document_type === 'service_card') {
-      updateData.service_card_url = req.file.url;
-    } else if (document_type === 'signature') {
-      updateData.signature_url = req.file.url;
-    }
-    
+    if (document_type === 'cnic_front') updateData.cnic_front_url = req.file.url;
+    if (document_type === 'cnic_back') updateData.cnic_back_url = req.file.url;
+    if (document_type === 'utility_bill') updateData.utility_bill_url = req.file.url;
+    if (document_type === 'service_card') updateData.service_card_url = req.file.url;
+    if (document_type === 'signature') updateData.signature_url = req.file.url;
+
     if (Object.keys(updateData).length > 0) {
       await prisma.purchaserVerification.update({
-        where: { verification_id: parseInt(verification_id) },
+        where: { id: purchaser.id },
         data: updateData
       });
     }
-    
+
     return res.status(201).json({
       success: true,
-      message: 'Document uploaded successfully',
+      message: 'Purchaser document uploaded successfully',
       data: { document }
     });
   } catch (error) {
     console.error('Upload purchaser document error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
 
@@ -665,40 +746,23 @@ const uploadPurchaserDocument = async (req, res) => {
 const uploadGrantorDocument = async (req, res) => {
   const { verification_id, grantor_number } = req.params;
   const { document_type } = req.body;
-  
+
   try {
-    const verification = await prisma.verification.findUnique({
-      where: { id: parseInt(verification_id) },
-      include: {
-        grantors: {
-          where: { grantor_number: parseInt(grantor_number) }
-        }
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: { code: 400, message: 'No file uploaded' } });
+    }
+
+    const grantor = await prisma.grantorVerification.findFirst({
+      where: {
+        verification_id: parseInt(verification_id),
+        grantor_number: parseInt(grantor_number)
       }
     });
-    
-    if (!verification) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Verification not found' }
-      });
-    }
-    
-    const grantor = verification.grantors[0];
+
     if (!grantor) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: 'Grantor not found' }
-      });
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Grantor record not found' } });
     }
-    
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: 'No file uploaded' }
-      });
-    }
-    
-    // Save document in documents table
+
     const document = await prisma.verificationDocument.create({
       data: {
         verification_id: parseInt(verification_id),
@@ -710,24 +774,17 @@ const uploadGrantorDocument = async (req, res) => {
         uploaded_at: new Date()
       }
     });
-    
-    // Also update the grantor record with specific URL
+
     let updateData = {};
-    if (document_type === 'cnic_front') {
-      updateData.cnic_front_url = req.file.url;
-    } else if (document_type === 'cnic_back') {
-      updateData.cnic_back_url = req.file.url;
-    } else if (document_type === 'utility_bill') {
-      updateData.utility_bill_url = req.file.url;
-    } else if (document_type === 'service_card') {
-      updateData.service_card_url = req.file.url;
-    } else if (document_type === 'signature') {
-      updateData.signature_url = req.file.url;
-    }
-    
+    if (document_type === 'cnic_front') updateData.cnic_front_url = req.file.url;
+    if (document_type === 'cnic_back') updateData.cnic_back_url = req.file.url;
+    if (document_type === 'utility_bill') updateData.utility_bill_url = req.file.url;
+    if (document_type === 'service_card') updateData.service_card_url = req.file.url;
+    if (document_type === 'signature') updateData.signature_url = req.file.url;
+
     if (Object.keys(updateData).length > 0) {
       await prisma.grantorVerification.update({
-        where: { 
+        where: {
           verification_id_grantor_number: {
             verification_id: parseInt(verification_id),
             grantor_number: parseInt(grantor_number)
@@ -736,18 +793,15 @@ const uploadGrantorDocument = async (req, res) => {
         data: updateData
       });
     }
-    
+
     return res.status(201).json({
       success: true,
-      message: 'Document uploaded successfully',
+      message: `Grantor ${grantor_number} document uploaded successfully`,
       data: { document }
     });
   } catch (error) {
     console.error('Upload grantor document error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
 
@@ -755,26 +809,26 @@ const uploadGrantorDocument = async (req, res) => {
 const uploadPhoto = async (req, res) => {
   const { verification_id } = req.params;
   const { person_type, person_id, label } = req.body;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
-    
+
     if (!verification) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Verification not found' }
       });
     }
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
         error: { code: 400, message: 'No file uploaded' }
       });
     }
-    
+
     const document = await prisma.verificationDocument.create({
       data: {
         verification_id: parseInt(verification_id),
@@ -786,7 +840,7 @@ const uploadPhoto = async (req, res) => {
         uploaded_at: new Date()
       }
     });
-    
+
     return res.status(201).json({
       success: true,
       message: 'Photo uploaded successfully',
@@ -805,26 +859,26 @@ const uploadPhoto = async (req, res) => {
 const uploadSignature = async (req, res) => {
   const { verification_id } = req.params;
   const { person_type, person_id } = req.body;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
-    
+
     if (!verification) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Verification not found' }
       });
     }
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
         error: { code: 400, message: 'No file uploaded' }
       });
     }
-    
+
     // Save document
     const document = await prisma.verificationDocument.create({
       data: {
@@ -837,7 +891,7 @@ const uploadSignature = async (req, res) => {
         uploaded_at: new Date()
       }
     });
-    
+
     // Update respective person's signature URL
     if (person_type === 'purchaser' && person_id) {
       await prisma.purchaserVerification.update({
@@ -850,7 +904,7 @@ const uploadSignature = async (req, res) => {
         data: { signature_url: req.file.url }
       });
     }
-    
+
     return res.status(201).json({
       success: true,
       message: 'Signature uploaded successfully',
@@ -868,36 +922,36 @@ const uploadSignature = async (req, res) => {
 // Delete Document
 const deleteDocument = async (req, res) => {
   const { document_id } = req.params;
-  
+
   try {
     const document = await prisma.verificationDocument.findUnique({
       where: { id: parseInt(document_id) }
     });
-    
+
     if (!document) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Document not found' }
       });
     }
-    
+
     // Check if user has permission to delete this document
     const verification = await prisma.verification.findUnique({
       where: { id: document.verification_id }
     });
-    
+
     if (verification.verification_officer_id !== req.user.id && req.user.role !== 'admin') {
       return res.status(403).json({
         success: false,
         error: { code: 403, message: 'Not authorized to delete this document' }
       });
     }
-    
+
     // Delete document
     await prisma.verificationDocument.delete({
       where: { id: parseInt(document_id) }
     });
-    
+
     return res.status(200).json({
       success: true,
       message: 'Document deleted successfully'
@@ -914,7 +968,7 @@ const deleteDocument = async (req, res) => {
 // Complete Verification
 const completeVerification = async (req, res) => {
   const { verification_id } = req.params;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) },
@@ -924,65 +978,39 @@ const completeVerification = async (req, res) => {
         nextOfKin: true,
         documents: true,
         locations: true,
-        verification_locations: {
-          include: {
-            photos: true
-          }
-        }
+        verification_locations: { include: { photos: true } }
       }
     });
-    
+
     if (!verification) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Verification not found' }
-      });
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Verification not found' } });
     }
-    
-    // Check if all required data is present
+
     if (!verification.purchaser) {
+      return res.status(400).json({ success: false, error: { code: 400, message: 'Purchaser record is required' } });
+    }
+
+    if (!verification.purchaser.cnic_front_url || !verification.purchaser.cnic_back_url) {
       return res.status(400).json({
         success: false,
-        error: { code: 400, message: 'Purchaser verification is required' }
+        error: { code: 400, message: 'Purchaser CNIC front and back are required' }
       });
     }
-    
-    // Check minimum documents requirement
-    const cnicFrontCount = verification.documents.filter(d => d.document_type === 'cnic_front').length;
-    const cnicBackCount = verification.documents.filter(d => d.document_type === 'cnic_back').length;
-    const signatureCount = verification.documents.filter(d => d.document_type === 'signature').length;
-    
-    if (cnicFrontCount < 3 || cnicBackCount < 3 || signatureCount < 3) {
-      return res.status(400).json({
-        success: false,
-        error: { 
-          code: 400, 
-          message: 'Minimum 3 CNIC front, 3 CNIC back, and 3 signature copies are required' 
-        }
-      });
-    }
-    
-    // Update verification status
+
     const updatedVerification = await prisma.verification.update({
       where: { id: parseInt(verification_id) },
       data: {
         status: 'completed',
-        end_time: new Date(),
+        end_time: new Date()
       },
       include: {
         order: { select: { order_ref: true } },
-        verification_officer: {
-          select: { full_name: true, username: true }
-        },
+        verification_officer: { select: { full_name: true, username: true } },
         purchaser: true,
         grantors: true,
         nextOfKin: true,
         locations: true,
-        verification_locations: {
-          include: {
-            photos: true
-          }
-        },
+        verification_locations: { include: { photos: true } },
         documents: true
       }
     });
@@ -995,7 +1023,7 @@ const completeVerification = async (req, res) => {
       updatedVerification.id,
       io
     );
-    
+
     return res.status(200).json({
       success: true,
       message: 'Verification completed successfully',
@@ -1003,17 +1031,14 @@ const completeVerification = async (req, res) => {
     });
   } catch (error) {
     console.error('Complete verification error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
 
 // Get Verification by Order ID (updated with verification_locations)
 const getVerificationByOrderId = async (req, res) => {
   const { order_id } = req.params;
-  
+
   try {
     const verification = await prisma.verification.findUnique({
       where: { order_id: parseInt(order_id) },
@@ -1046,14 +1071,14 @@ const getVerificationByOrderId = async (req, res) => {
         // ───────────────────────────────────────────────────────────────
       }
     });
-    
+
     if (!verification) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Verification not found for this order' }
       });
     }
-    
+
     return res.status(200).json({
       success: true,
       data: { verification }
@@ -1249,10 +1274,10 @@ const getVerifications = async (req, res) => {
 const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) => {
   const officerId = req.user.id;
 
-  const { 
-    lastId = 0, 
-    limit = 10, 
-    search = '', 
+  const {
+    lastId = 0,
+    limit = 10,
+    search = '',
   } = req.query;
 
   const take = Number(limit);
@@ -1266,13 +1291,13 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
 
     if (search.trim()) {
       baseWhere.OR = [
-        { customer_name:     { contains: search } },
-        { whatsapp_number:   { contains: search } },
-        { order_ref:         { contains: search } },
-        { token_number:      { contains: search } },
-        { product_name:      { contains: search } },
-        { city:              { contains: search } },
-        { area:              { contains: search } },
+        { customer_name: { contains: search } },
+        { whatsapp_number: { contains: search } },
+        { order_ref: { contains: search } },
+        { token_number: { contains: search } },
+        { product_name: { contains: search } },
+        { city: { contains: search } },
+        { area: { contains: search } },
       ];
     }
 
@@ -1290,8 +1315,8 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
       take,
       orderBy: { id: 'desc' },
       include: {
-        created_by:    { select: { username: true, full_name: true } },
-        assigned_to:   { select: { username: true, full_name: true } },
+        created_by: { select: { username: true, full_name: true } },
+        assigned_to: { select: { username: true, full_name: true } },
         verification: {
           select: {
             id: true,
@@ -1338,14 +1363,14 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
 
   const now = new Date();
   let startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  let endOfMonth   = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  let endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
 
   if (req.query.year && req.query.month) {
     const y = parseInt(req.query.year);
     const m = parseInt(req.query.month) - 1;
     if (!isNaN(y) && !isNaN(m) && m >= 0 && m <= 11) {
       startOfMonth = new Date(y, m, 1);
-      endOfMonth   = new Date(y, m + 1, 1);
+      endOfMonth = new Date(y, m + 1, 1);
     }
   }
 
@@ -1357,7 +1382,7 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
       },
       include: {
         verification: { select: { status: true, start_time: true, end_time: true } },
-        delivery:     { select: { status: true, end_time: true, verified: true } },
+        delivery: { select: { status: true, end_time: true, verified: true } },
       },
       orderBy: [{ customer_name: 'asc' }, { created_at: 'desc' }],
     });
@@ -1393,9 +1418,9 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
       const isDelivered = order.is_delivered || (order.delivery?.status === 'completed');
       const deliveryDate = isDelivered ? (order.delivery?.end_time || order.updated_at) : null;
 
-      const advanceAmount   = order.advance_amount || 0;
-      const monthlyAmount   = order.monthly_amount || 0;
-      const totalMonths     = order.months || 0;
+      const advanceAmount = order.advance_amount || 0;
+      const monthlyAmount = order.monthly_amount || 0;
+      const totalMonths = order.months || 0;
 
       let advancePayment = {
         amount: advanceAmount,
@@ -1433,8 +1458,8 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
         }
       }
 
-      const totalDue      = advanceAmount + (monthlyAmount * totalMonths);
-      const totalPaid     = isDelivered ? advanceAmount : 0;
+      const totalDue = advanceAmount + (monthlyAmount * totalMonths);
+      const totalPaid = isDelivered ? advanceAmount : 0;
       const totalRemaining = totalDue - totalPaid;
 
       const orderEntry = {
@@ -1518,8 +1543,8 @@ module.exports = {
   completeVerification,
   getVerificationByOrderId,
   submitVerificationReview,
-  getMyPendingOrders:    getMyAssignedOrdersCursorPaginated('pending'),
-  getMyConfirmedOrders:  getMyAssignedOrdersCursorPaginated('confirmed'),
-  getMyCancelledOrders:  getMyAssignedOrdersCursorPaginated('cancelled'),
+  getMyPendingOrders: getMyAssignedOrdersCursorPaginated('pending'),
+  getMyConfirmedOrders: getMyAssignedOrdersCursorPaginated('confirmed'),
+  getMyCancelledOrders: getMyAssignedOrdersCursorPaginated('cancelled'),
   getMyCustomersWithOrdersAndLedger,
 };

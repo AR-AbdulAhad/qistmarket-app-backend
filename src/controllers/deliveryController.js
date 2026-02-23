@@ -1,10 +1,11 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { notifyAdmins } = require('../utils/notificationUtils');
 
 // Submit Delivery (Batch Upload)
 const submitDelivery = async (req, res) => {
   const { order_id } = req.body;
-  
+
   if (!order_id) {
     return res.status(400).json({
       success: false,
@@ -15,20 +16,20 @@ const submitDelivery = async (req, res) => {
   try {
     // Check if order exists and is assigned to the current user
     const order = await prisma.order.findUnique({
-      where: { 
+      where: {
         id: parseInt(order_id),
         delivery_officer_id: req.user.id
       },
       include: { delivery: true }
     });
-    
+
     if (!order) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Order not found or not assigned to you' }
       });
     }
-    
+
     if (order.delivery) {
       return res.status(400).json({
         success: false,
@@ -40,7 +41,7 @@ const submitDelivery = async (req, res) => {
     const facePhotos = req.files['face_photos'] || [];
     const locationPhotos = req.files['location_photos'] || [];
     const housePhotos = req.files['house_photos'] || [];
-    
+
     const faceTags = req.body.face_tags ? JSON.parse(req.body.face_tags) : [];
     const locationTags = req.body.location_tags ? JSON.parse(req.body.location_tags) : [];
     const houseTags = req.body.house_tags ? JSON.parse(req.body.house_tags) : [];
@@ -123,9 +124,9 @@ const submitDelivery = async (req, res) => {
     // Update order status
     await prisma.order.update({
       where: { id: parseInt(order_id) },
-      data: { 
+      data: {
         status: 'delivered',
-        is_delivered: true 
+        is_delivered: true
       }
     });
 
@@ -136,10 +137,20 @@ const submitDelivery = async (req, res) => {
         delivery_agent: {
           select: { full_name: true, username: true }
         },
-        uploads: true
+        uploads: true,
+        order: { select: { order_ref: true } }
       }
     });
-    
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Delivery Submitted',
+      `Delivery completed for Order #${updatedDelivery.order.order_ref} by ${updatedDelivery.delivery_agent.full_name}`,
+      'delivery_complete',
+      updatedDelivery.id,
+      io
+    );
+
     return res.status(201).json({
       success: true,
       message: 'Delivery submitted successfully',
@@ -159,7 +170,7 @@ const getDeliveryByOrderId = async (req, res) => {
   const { order_id } = req.params;
 
   console.log('Get delivery for order_id:', order_id);
-  
+
   try {
     const delivery = await prisma.delivery.findUnique({
       where: { order_id: parseInt(order_id) },
@@ -170,15 +181,15 @@ const getDeliveryByOrderId = async (req, res) => {
         uploads: true
       }
     });
-    
+
     if (!delivery) {
       return res.status(404).json({
         success: false,
         error: { code: 404, message: 'Delivery not found for this order' }
       });
     }
-    
-    
+
+
     return res.status(200).json({
       success: true,
       data: { delivery }
@@ -352,6 +363,6 @@ const getCashInHand = async (req, res) => {
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
-  getPendingDeliveryProducts, 
+  getPendingDeliveryProducts,
   getCashInHand
 };

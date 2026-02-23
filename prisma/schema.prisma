@@ -49,8 +49,8 @@ model User {
   last_known_longitude Float?
   last_online_at       DateTime?
   bike_km_range        Int?      // e.g. 50 km
-  working_hours_start  String?   @db.VarChar(5)  // "09:00"
-  working_hours_end    String?   @db.VarChar(5)  // "18:00"
+  working_hours_start  String?   @db.VarChar(30)  // "09:00"
+  working_hours_end    String?   @db.VarChar(30)  // "18:00"
   // Relations
   officerSessions OfficerSession[]
   deletionRequests          AccountDeletionRequest[]   @relation("UserDeletionRequests")
@@ -88,6 +88,13 @@ model Order {
   address             String
   city                String?
   area                String?
+  zone                String?
+  block               String?
+  street              String?
+  house_no            String?
+  gender              String? 
+  marital_status      String?
+  residential_type    String?
   product_name        String
   total_amount        Float
   advance_amount      Float
@@ -112,6 +119,7 @@ model Order {
   assigned_to         User?     @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
   delivery_officer    User?     @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
   verification        Verification? @relation("OrderVerification")
+  payments        OrderPayment[]
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -153,25 +161,49 @@ model VerificationReview {
   @@index([reviewer_id])
 }
 
+enum EmploymentType {
+  EMPLOYED
+  SELF_EMPLOYED
+}
+
 model PurchaserVerification {
   id Int @id @default(autoincrement())
   verification_id Int @unique
   name String
   father_husband_name String
-  present_address String
-  permanent_address String
+  present_address     String
+  present_zone        String?
+  present_area        String?
+  present_block       String?
+  present_street      String?
+  present_house_no    String?
+  present_period_of_stay String?
+  permanent_address   String
+  permanent_zone      String?
+  permanent_area      String?
+  permanent_block     String?
+  permanent_street    String?
+  permanent_house_no  String?
+  permanent_period_of_stay String?
   utility_bill_url String?
   cnic_number String
   cnic_front_url String?
   cnic_back_url String?
   telephone_number String
+  employment_type     EmploymentType?   @default(EMPLOYED)
+  job_type            String?
   employer_name String
   employer_address String
   designation String
   official_number String?
+  business_name       String?
+  established_since   String?
+  business_address    String?
+  net_income          String?
   service_card_url String?
   years_in_company String?
   gross_salary String?
+
   signature_url String?
   nearest_location String
   is_verified Boolean @default(false)
@@ -186,13 +218,27 @@ model GrantorVerification {
   grantor_number Int // 1 or 2
   name String
   father_husband_name String
-  present_address String
-  permanent_address String
+  present_address     String
+  present_zone        String?
+  present_area        String?
+  present_block       String?
+  present_street      String?
+  present_house_no    String?
+  present_period_of_stay String?
+  permanent_address   String
+  permanent_zone      String?
+  permanent_area      String?
+  permanent_block     String?
+  permanent_street    String?
+  permanent_house_no  String?
+  permanent_period_of_stay String?
   utility_bill_url String?
   cnic_number String
   cnic_front_url String?
   cnic_back_url String?
   telephone_number String
+  employment_type     EmploymentType?   @default(EMPLOYED)
+  job_type            String?
   designation String
   official_number String?
   service_card_url String?
@@ -200,6 +246,10 @@ model GrantorVerification {
   company_name String?
   years_in_company String?
   monthly_income String?
+  business_name       String?
+  established_since   String?
+  business_address    String?
+  net_income          String?
   full_residential_address String
   relationship String
   signature_url String?
@@ -358,4 +408,20 @@ model OfficerSession {
   @@index([officer_id])
   @@index([start_time])
   @@index([officer_id, start_time])
+}
+
+model OrderPayment {
+  id            Int      @id @default(autoincrement())
+  order_id      Int
+  order         Order    @relation(fields: [order_id], references: [id])
+  paymentType   String   // "advance" or "installment"
+  monthNumber   Int?     // null for advance
+  amount        Float
+  paidAt        DateTime @default(now())
+  paymentMethod String?
+  collectedBy   Int?     // user id of delivery/verification officer
+  created_at    DateTime @default(now())
+
+  @@index([order_id])
+  @@index([order_id, paymentType])
 }

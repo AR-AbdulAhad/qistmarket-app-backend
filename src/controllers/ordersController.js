@@ -1,6 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const crypto = require('crypto');
 const prisma = new PrismaClient();
+const { notifyUser } = require('../utils/notificationUtils');
 
 const admin = require('firebase-admin');
 
@@ -14,16 +15,22 @@ if (!admin.apps.length) {
   });
 }
 
-async function sendAssignmentNotification(order, user) {
+async function sendAssignmentNotification(order, user, io = null) {
+  const title = 'New Order Assigned';
+  const message = `Order ${order.order_ref} has been assigned to you for verification.`;
+  const type = 'order_assignment';
+
+  // Save to DB and emit Socket.io
+  if (user?.id) {
+    await notifyUser(user.id, title, message, type, order.id, io);
+  }
+
   if (!user?.fcm_token) return;
 
   try {
     await admin.messaging().send({
       token: user.fcm_token,
-      notification: {
-        title: 'New Order Assigned',
-        body: `Order ${order.order_ref} has been assigned to you for verification.`,
-      },
+      notification: { title, body: message },
       data: {
         order_id: order.id.toString(),
         order_ref: order.order_ref,
@@ -34,16 +41,22 @@ async function sendAssignmentNotification(order, user) {
   }
 }
 
-async function sendDeliveryAssignmentNotification(order, user) {
+async function sendDeliveryAssignmentNotification(order, user, io = null) {
+  const title = 'New Order Assigned for Delivery';
+  const message = `Order ${order.order_ref} has been assigned to you for Delivery.`;
+  const type = 'delivery_assignment';
+
+  // Save to DB and emit Socket.io
+  if (user?.id) {
+    await notifyUser(user.id, title, message, type, order.id, io);
+  }
+
   if (!user?.fcm_token) return;
 
   try {
     await admin.messaging().send({
       token: user.fcm_token,
-      notification: {
-        title: 'New Order Assigned for Delivery',
-        body: `Order ${order.order_ref} has been assigned to you for Delivery.`,
-      },
+      notification: { title, body: message },
       data: {
         order_id: order.id.toString(),
         order_ref: order.order_ref,
@@ -66,19 +79,47 @@ const createOrder = async (req, res) => {
     advance_amount,
     monthly_amount,
     months,
-    channel
+    channel,
+    gender,
+    marital_status,
+    residential_type,
+    zone,
+    block,
+    street,
+    house_no,
   } = req.body;
 
   if (!customer_name || !whatsapp_number || !address || !product_name ||
-      !total_amount || !advance_amount || !monthly_amount || !months || !channel) {
+    !total_amount || !advance_amount || !monthly_amount || !months || !channel) {
     return res.status(400).json({
       success: false,
       error: { code: 400, message: 'Required fields are missing.' }
     });
   }
 
-  if (city && area) {
-    // You could add server-side check against the same API if desired
+  const validGenders = ['Male', 'Female', 'Unidentified'];
+  const validMaritalStatuses = ['Single', 'Married', 'Divorced', 'Widowed'];
+  const validResidentialTypes = ['Own', 'Rented', 'With Family'];
+
+  if (gender && !validGenders.includes(gender)) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: `Invalid gender. Allowed: ${validGenders.join(', ')}` }
+    });
+  }
+
+  if (marital_status && !validMaritalStatuses.includes(marital_status)) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: `Invalid marital status. Allowed: ${validMaritalStatuses.join(', ')}` }
+    });
+  }
+
+  if (residential_type && !validResidentialTypes.includes(residential_type)) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: `Invalid residential type. Allowed: ${validResidentialTypes.join(', ')}` }
+    });
   }
 
   try {
@@ -87,19 +128,46 @@ const createOrder = async (req, res) => {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const existing = await prisma.order.findFirst({
+    const existingOrders = await prisma.order.findMany({
+      where: {
+        OR: [
+          { whatsapp_number: whatsapp_number.trim() },
+        ],
+        created_at: { gte: today, lt: tomorrow },
+        status: { notIn: ['cancelled', 'delivered'] }
+      },
+      select: { id: true, whatsapp_number: true, status: true }
+    });
+
+    const sameDayDuplicate = existingOrders.find(
+      o => o.whatsapp_number === whatsapp_number.trim()
+        && o.product_name?.toLowerCase() === product_name.trim().toLowerCase()
+    );
+
+    if (sameDayDuplicate) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 409,
+          message: 'Duplicate active order detected today for this customer and product.'
+        }
+      });
+    }
+
+    const activeOrderCount = await prisma.order.count({
       where: {
         whatsapp_number: whatsapp_number.trim(),
-        product_name: product_name.trim(),
-        created_at: { gte: today, lt: tomorrow },
         status: { notIn: ['cancelled', 'delivered'] }
       }
     });
 
-    if (existing) {
+    if (activeOrderCount >= 2) {
       return res.status(409).json({
         success: false,
-        error: { code: 409, message: 'Duplicate active order detected today.' }
+        error: {
+          code: 409,
+          message: 'Customer already has 2 or more active orders. Maximum 2 active accounts allowed.'
+        }
       });
     }
 
@@ -118,6 +186,15 @@ const createOrder = async (req, res) => {
         address: address.trim(),
         city: city ? city.trim() : null,
         area: area ? area.trim() : null,
+        zone: zone ? zone.trim() : null,
+        block: block ? block.trim() : null,
+        street: street ? street.trim() : null,
+        house_no: house_no ? house_no.trim() : null,
+
+        gender: gender || null,
+        marital_status: marital_status || null,
+        residential_type: residential_type || null,
+
         product_name: product_name.trim(),
         total_amount: parseFloat(total_amount),
         advance_amount: parseFloat(advance_amount),
@@ -127,7 +204,9 @@ const createOrder = async (req, res) => {
         status: 'new',
         created_by_user_id: req.user.id
       },
-      include: { created_by: { select: { username: true } } }
+      include: {
+        created_by: { select: { username: true } }
+      }
     });
 
     return res.status(201).json({
@@ -143,6 +222,15 @@ const createOrder = async (req, res) => {
           address: order.address,
           city: order.city,
           area: order.area,
+          zone: order.zone,
+          block: order.block,
+          street: order.street,
+          house_no: order.house_no,
+
+          gender: order.gender,
+          marital_status: order.marital_status,
+          residential_type: order.residential_type,
+
           product_name: order.product_name,
           total_amount: order.total_amount,
           advance_amount: order.advance_amount,
@@ -155,8 +243,8 @@ const createOrder = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({
+    console.error('Create order error:', error);
+    return res.status(500).json({
       success: false,
       error: { code: 500, message: 'Internal server error' }
     });
@@ -288,7 +376,7 @@ const getOrdersWithPagination = async (req, res) => {
     if (orders.length > 0) {
       nextLastId = orders[orders.length - 1].id;
     }
-    
+
     const hasMore = orders.length === take;
 
     return res.status(200).json({
@@ -389,26 +477,26 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
             end_time: true,
             purchaser: {
               select: {
-                id:                     true,
-                name:                   true,
-                father_husband_name:    true,
-                present_address:        true,
-                permanent_address:      true,
-                utility_bill_url:       true,
-                cnic_number:            true,
-                cnic_front_url:         true,
-                cnic_back_url:          true,
-                telephone_number:       true,
-                employer_name:          true,
-                employer_address:       true,
-                designation:            true,
-                official_number:        true,
-                service_card_url:       true,
-                years_in_company:       true,
-                gross_salary:           true,
-                signature_url:          true,
-                nearest_location:       true,
-                is_verified:            true,
+                id: true,
+                name: true,
+                father_husband_name: true,
+                present_address: true,
+                permanent_address: true,
+                utility_bill_url: true,
+                cnic_number: true,
+                cnic_front_url: true,
+                cnic_back_url: true,
+                telephone_number: true,
+                employer_name: true,
+                employer_address: true,
+                designation: true,
+                official_number: true,
+                service_card_url: true,
+                years_in_company: true,
+                gross_salary: true,
+                signature_url: true,
+                nearest_location: true,
+                is_verified: true,
               },
             },
           },
@@ -541,7 +629,8 @@ const assignOrder = async (req, res) => {
       },
     });
 
-    await sendAssignmentNotification(updatedOrder, updatedOrder.assigned_to);
+    const io = req.app.get('io');
+    await sendAssignmentNotification(updatedOrder, updatedOrder.assigned_to, io);
 
     return res.status(200).json({
       success: true,
@@ -610,8 +699,9 @@ const assignBulk = async (req, res) => {
       data: { assigned_to_user_id: Number(user_id) },
     });
 
+    const io = req.app.get('io');
     for (const order of orders) {
-      await sendAssignmentNotification(order, user);
+      await sendAssignmentNotification(order, user, io);
     }
 
     return res.status(200).json({
@@ -763,10 +853,10 @@ const getApprovedOrders = async (req, res) => {
       take,
       orderBy: { [sortBy]: sortDir },
       include: {
-        created_by:     { select: { username: true, full_name: true } },
-        assigned_to:    { select: { username: true, full_name: true } },
+        created_by: { select: { username: true, full_name: true } },
+        assigned_to: { select: { username: true, full_name: true } },
         delivery_officer: { select: { username: true, full_name: true } },
-        verification:   { select: { id: true, status: true } },
+        verification: { select: { id: true, status: true } },
       },
     });
 
@@ -860,7 +950,8 @@ const assignDelivery = async (req, res) => {
       },
     });
 
-    await sendDeliveryAssignmentNotification(updatedOrder, updatedOrder.delivery_officer);
+    const io = req.app.get('io');
+    await sendDeliveryAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, io);
 
     return res.status(200).json({
       success: true,
@@ -929,9 +1020,9 @@ const assignBulkDelivery = async (req, res) => {
       data: { delivery_officer_id: Number(user_id) },
     });
 
-    // Send notifications
+    const io = req.app.get('io');
     for (const order of orders) {
-      await sendDeliveryAssignmentNotification(order, user);
+      await sendDeliveryAssignmentNotification(order, user, io);
     }
 
     return res.status(200).json({
@@ -944,13 +1035,13 @@ const assignBulkDelivery = async (req, res) => {
   }
 };
 
-module.exports = { 
-  createOrder, 
-  getOrders, 
+module.exports = {
+  createOrder,
+  getOrders,
   getOrdersWithPagination,
   getMyDeliveryOrdersWithPagination,
-  assignOrder, 
-  assignBulk, 
+  assignOrder,
+  assignBulk,
   getOrderById,
   getVerificationOrders,
   getApprovedOrders,
