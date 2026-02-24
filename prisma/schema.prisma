@@ -66,6 +66,7 @@ model User {
   delivery_orders Order[] @relation("deliveryOrders")
   deliveries Delivery[] @relation("delivery_agent")
   officerAssignments OfficerAreaAssignment[] @relation("OfficerAssignments")
+  product_change_histories OrderProductHistory[] @relation("ProductChangeHistory")
   @@index([role_id])
   @@index([is_online])
   @@index([role_id, is_online])
@@ -113,6 +114,9 @@ model Order {
   otp_generated_at DateTime? 
   otp_expires_at   DateTime?
 
+  cancelled_reason    String?   @db.Text
+  cancelled_at        DateTime?
+
   // Relations (add this line)
   delivery            Delivery? @relation("OrderDelivery")
 
@@ -121,6 +125,7 @@ model Order {
   delivery_officer    User?     @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
   verification        Verification? @relation("OrderVerification")
   payments        OrderPayment[]
+  productHistories    OrderProductHistory[]
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -439,4 +444,18 @@ model OfficerAreaAssignment {
   @@unique([user_id, zone, area])
   @@index([user_id])
   @@index([zone, area])
+}
+
+model OrderProductHistory {
+  id                Int      @id @default(autoincrement())
+  order_id          Int
+  previous_product  String
+  current_product   String
+  changed_at        DateTime @default(now())
+  changed_by_user_id Int
+  order             Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  changed_by        User     @relation("ProductChangeHistory", fields: [changed_by_user_id], references: [id])
+
+  @@index([order_id])
+  @@index([changed_by_user_id])
 }

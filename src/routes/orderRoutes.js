@@ -1,17 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const { 
-  createOrder, 
-  getOrders, 
+const {
+  createOrder,
+  getOrders,
   getOrdersWithPagination,
-  assignOrder, 
-  assignBulk, 
+  assignOrder,
+  assignBulk,
   getOrderById,
   getVerificationOrders,
   getMyDeliveryOrdersWithPagination,
   getApprovedOrders,
   assignDelivery,
-  assignBulkDelivery
+  assignBulkDelivery,
+  cancelOrder,
+  updateOrderItem
 } = require('../controllers/ordersController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -26,5 +28,7 @@ router.post('/orders/assign-bulk', authenticateJWT, assignBulk);
 router.get('/orders/:id', authenticateJWT, getOrderById);
 router.patch('/orders/:id/assign-delivery', authenticateJWT, assignDelivery);
 router.post('/orders/assign-bulk-delivery', authenticateJWT, assignBulkDelivery);
+router.patch('/orders/:id/cancel', authenticateJWT, cancelOrder);
+router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
 
 module.exports = router;

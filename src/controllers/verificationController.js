@@ -42,6 +42,15 @@ const startVerification = async (req, res) => {
       }
     });
 
+    await prisma.order.update({
+      where: { id: parseInt(order_id) },
+      data: {
+        status: 'in_progress',
+        updated_at: new Date(),
+      }
+    });
+
+
     // Create empty purchaser
     const purchaser = await prisma.purchaserVerification.create({
       data: {
@@ -1015,6 +1024,14 @@ const completeVerification = async (req, res) => {
       }
     });
 
+    await prisma.order.update({
+      where: { id: updatedVerification.order_id },
+      data: {
+        status: 'completed',
+        updated_at: new Date(),
+      }
+    });
+
     const io = req.app.get('io');
     await notifyAdmins(
       'Verification Completed',
@@ -1035,7 +1052,6 @@ const completeVerification = async (req, res) => {
   }
 };
 
-// Get Verification by Order ID (updated with verification_locations)
 const getVerificationByOrderId = async (req, res) => {
   const { order_id } = req.params;
 
@@ -1100,7 +1116,10 @@ const submitVerificationReview = async (req, res) => {
   try {
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) },
-      include: { reviews: true }
+      include: {
+        order: { select: { id: true, order_ref: true } },  // we need order.id
+        reviews: true
+      }
     });
 
     if (!verification) {
@@ -1108,18 +1127,27 @@ const submitVerificationReview = async (req, res) => {
     }
 
     if (verification.status !== 'completed') {
-      return res.status(400).json({ success: false, error: 'Verification must be completed before review' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Verification must be completed before review' 
+      });
     }
 
     if (verification.reviews.length >= 3) {
-      return res.status(400).json({ success: false, error: 'Maximum of 3 reviews allowed' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Maximum of 3 reviews allowed' 
+      });
     }
 
     if (verification.reviews.some(r => r.reviewer_id === req.user.id)) {
-      return res.status(400).json({ success: false, error: 'You have already reviewed this verification' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'You have already reviewed this verification' 
+      });
     }
 
-    // ── Enforce business rule about remarks ─────────────────────────────
+    // Normalize approved value
     approved = approved === 'true' || approved === true;
 
     let finalRemarks = null;
@@ -1133,8 +1161,8 @@ const submitVerificationReview = async (req, res) => {
       }
       finalRemarks = remarks.trim();
     }
-    // else → approve → remarks remains null
 
+    // Create the review
     const review = await prisma.verificationReview.create({
       data: {
         verification_id: parseInt(verification_id),
@@ -1145,39 +1173,70 @@ const submitVerificationReview = async (req, res) => {
       }
     });
 
-    // Recalculate after new review
+    // Reload verification with updated reviews
     const updated = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) },
-      include: { reviews: true }
+      include: { 
+        reviews: true,
+        order: { select: { id: true } }
+      }
     });
 
     const approvesCount = updated.reviews.filter(r => r.approved).length;
     const totalReviews = updated.reviews.length;
-
     const approvalPercentage = totalReviews > 0 ? Math.round((approvesCount / totalReviews) * 100) : 0;
 
-    // You can decide final status here (example thresholds)
-    let newStatus = verification.status;
+    let newVerificationStatus = verification.status;
+
     if (totalReviews === 3) {
-      if (approvalPercentage >= 67) {         // ≈ 2/3 or better
-        newStatus = 'approved';
-      } else if (approvalPercentage <= 33) {  // 1/3 or worse
-        newStatus = 'rejected';
+      if (approvalPercentage >= 67) {
+        newVerificationStatus = 'approved';
+      } else if (approvalPercentage <= 33) {
+        newVerificationStatus = 'rejected';
       }
-      // else → remains 'completed' or you can set 'pending_admin' etc.
+
     }
 
-    if (newStatus !== verification.status) {
-      await prisma.verification.update({
-        where: { id: parseInt(verification_id) },
-        data: { status: newStatus }
-      });
+    let orderStatusUpdate = null;
+
+    if (newVerificationStatus === 'approved') {
+      orderStatusUpdate = 'approved';
+    } else if (newVerificationStatus === 'rejected') {
+      orderStatusUpdate = 'rejected';
     }
 
+    const updates = [];
+
+    if (newVerificationStatus !== verification.status) {
+      updates.push(
+        prisma.verification.update({
+          where: { id: parseInt(verification_id) },
+          data: { status: newVerificationStatus }
+        })
+      );
+    }
+
+    if (orderStatusUpdate && totalReviews === 3) {
+      updates.push(
+        prisma.order.update({
+          where: { id: verification.order.id },
+          data: { 
+            status: orderStatusUpdate,
+            updated_at: new Date(),
+          }
+        })
+      );
+    }
+
+    if (updates.length > 0) {
+      await prisma.$transaction(updates);
+    }
+
+    // ── Notification ─────────────────────────────────────────────
     const io = req.app.get('io');
     await notifyAdmins(
       'Review Submitted',
-      `Review added to Order #${updated.order.order_ref} → ${newStatus.toUpperCase()} (${approvalPercentage}%)`,
+      `Review added to Order #${verification.order.order_ref} → ${newVerificationStatus.toUpperCase()} (${approvalPercentage}%)`,
       'review_submitted',
       parseInt(verification_id),
       io
@@ -1190,13 +1249,18 @@ const submitVerificationReview = async (req, res) => {
         review,
         approvalPercentage,
         totalReviews,
-        approvesCount
+        approvesCount,
+        verificationStatus: newVerificationStatus,
+        orderStatus: orderStatusUpdate || 'unchanged'
       }
     });
 
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ success: false, error: 'Internal server error' });
+    console.error('Submit review error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      error: { code: 500, message: 'Internal server error' } 
+    });
   }
 };
 

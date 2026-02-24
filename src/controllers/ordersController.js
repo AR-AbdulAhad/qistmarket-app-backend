@@ -67,6 +67,49 @@ async function sendDeliveryAssignmentNotification(order, user, io = null) {
   }
 }
 
+function getDateRangeFilter(range, start, end) {
+  const now = new Date();
+  let gte, lt;
+
+  switch (range) {
+    case 'Day':
+      gte = new Date();
+      gte.setHours(0, 0, 0, 0);
+      lt = new Date(gte);
+      lt.setDate(lt.getDate() + 1);
+      break;
+    case 'Week':
+      gte = new Date();
+      gte.setDate(now.getDate() - 7);
+      gte.setHours(0, 0, 0, 0);
+      lt = new Date(now);
+      break;
+    case 'Month':
+      gte = new Date(now.getFullYear(), now.getMonth(), 1);
+      lt = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+      break;
+    case 'Quarter':
+      const currentQuarter = Math.floor(now.getMonth() / 3);
+      gte = new Date(now.getFullYear(), currentQuarter * 3, 1);
+      lt = new Date(now.getFullYear(), (currentQuarter + 1) * 3, 0, 23, 59, 59, 999);
+      break;
+    case 'Year':
+      gte = new Date(now.getFullYear(), 0, 1);
+      lt = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+      break;
+    case 'Custom Range':
+      if (start && end) {
+        gte = new Date(start);
+        lt = new Date(end);
+        lt.setHours(23, 59, 59, 999);
+      }
+      break;
+    default:
+      return null;
+  }
+  return { gte, lt };
+}
+
 const createOrder = async (req, res) => {
   const {
     customer_name,
@@ -216,7 +259,7 @@ const createOrder = async (req, res) => {
         monthly_amount: parseFloat(monthly_amount),
         months: parseInt(months),
         channel: channel.trim(),
-        status: assignedOfficerId ? 'assigned' : 'new',
+        status: assignedOfficerId ? 'pending' : 'new',
         created_by_user_id: req.user.id,
         assigned_to_user_id: assignedOfficerId
       },
@@ -232,8 +275,7 @@ const createOrder = async (req, res) => {
         data: {
           order_id: order.id,
           verification_officer_id: assignedOfficerId,
-          status: 'in_progress',
-          start_time: new Date()
+          start_time: new Date(),
         }
       });
       // Send notification
@@ -249,6 +291,7 @@ const createOrder = async (req, res) => {
           id: order.id,
           order_ref: order.order_ref,
           token_number: order.token_number,
+          status: order.status,
           customer_name: order.customer_name,
           whatsapp_number: order.whatsapp_number,
           address: order.address,
@@ -310,21 +353,41 @@ const getOrders = async (req, res) => {
           where.assigned_to = { username: { contains: value } };
         } else if (key === 'created_by') {
           where.created_by = { username: { contains: value } };
-        } else {
+        } else if (key === 'status') {
+          const statusList = value.split(',').map(s => s.trim());
+          if (statusList.length > 1) {
+            where.status = { in: statusList };
+          } else {
+            where.status = { contains: value };
+          }
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) {
+            where.created_at = range;
+          }
+        } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
         }
       }
     });
+
+    const include = {
+      created_by: { select: { username: true } },
+      assigned_to: { select: { username: true } },
+      productHistories: {
+        include: {
+          changed_by: { select: { username: true, full_name: true } }
+        },
+        orderBy: { changed_at: 'desc' }
+      }
+    };
 
     const orders = await prisma.order.findMany({
       where,
       skip,
       take,
       orderBy: { [sortBy]: sortDir },
-      include: {
-        created_by: { select: { username: true } },
-        assigned_to: { select: { username: true } },
-      },
+      include,
     });
 
     const total = await prisma.order.count({ where });
@@ -379,7 +442,19 @@ const getOrdersWithPagination = async (req, res) => {
           baseWhere.assigned_to = { username: value };
         } else if (key === 'created_by') {
           baseWhere.created_by = { username: value };
-        } else {
+        } else if (key === 'status') {
+          const statusList = value.split(',').map(s => s.trim());
+          if (statusList.length > 1) {
+            baseWhere.status = { in: statusList };
+          } else {
+            baseWhere.status = value;
+          }
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) {
+            baseWhere.created_at = range;
+          }
+        } else if (key !== 'startDate' && key !== 'endDate') {
           baseWhere[key] = { contains: value };
         }
       }
@@ -401,6 +476,12 @@ const getOrdersWithPagination = async (req, res) => {
       include: {
         created_by: { select: { username: true } },
         assigned_to: { select: { username: true } },
+        productHistories: {
+          include: {
+            changed_by: { select: { username: true, full_name: true } }
+          },
+          orderBy: { changed_at: 'desc' }
+        }
       },
     });
 
@@ -575,6 +656,12 @@ const getOrderById = async (req, res) => {
       include: {
         created_by: { select: { username: true } },
         assigned_to: { select: { username: true } },
+        productHistories: {
+          include: {
+            changed_by: { select: { username: true, full_name: true } }
+          },
+          orderBy: { changed_at: 'desc' }
+        },
       },
     });
 
@@ -654,7 +741,10 @@ const assignOrder = async (req, res) => {
 
     const updatedOrder = await prisma.order.update({
       where: { id: Number(id) },
-      data: { assigned_to_user_id: Number(user_id) },
+      data: {
+        assigned_to_user_id: Number(user_id),
+        status: 'pending'
+      },
       include: {
         assigned_to: { select: { id: true, username: true, fcm_token: true } },
         created_by: { select: { username: true } },
@@ -728,7 +818,10 @@ const assignBulk = async (req, res) => {
 
     await prisma.order.updateMany({
       where: { id: { in: order_ids.map(Number) } },
-      data: { assigned_to_user_id: Number(user_id) },
+      data: {
+        assigned_to_user_id: Number(user_id),
+        status: 'pending'
+      },
     });
 
     const io = req.app.get('io');
@@ -747,17 +840,57 @@ const assignBulk = async (req, res) => {
 };
 
 const getVerificationOrders = async (req, res) => {
+  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
+
+  const skip = (Number(page) - 1) * Number(limit);
+  const take = Number(limit);
+
   try {
+    const where = {
+      assigned_to_user_id: { not: null },
+      verification: {
+        isNot: null,
+      },
+      status: 'in_progress',
+    };
+
+    if (search.trim()) {
+      where.OR = [
+        { customer_name: { contains: search } },
+        { whatsapp_number: { contains: search } },
+        { order_ref: { contains: search } },
+        { token_number: { contains: search } },
+        { product_name: { contains: search } },
+        { city: { contains: search } },
+        { area: { contains: search } },
+      ];
+    }
+
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) {
+        if (key === 'verification_officer') {
+          where.verification = {
+            ...where.verification,
+            verification_officer: { username: { contains: value } }
+          };
+        } else if (key === 'created_by') {
+          where.created_by = { username: { contains: value } };
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) {
+            where.created_at = range;
+          }
+        } else if (key !== 'startDate' && key !== 'endDate') {
+          where[key] = { contains: value };
+        }
+      }
+    });
+
     const orders = await prisma.order.findMany({
-      where: {
-        assigned_to_user_id: { not: null },
-        verification: {
-          isNot: null,
-        },
-      },
-      orderBy: {
-        created_at: 'desc',
-      },
+      where,
+      skip,
+      take,
+      orderBy: { [sortBy]: sortDir },
       select: {
         id: true,
         order_ref: true,
@@ -776,7 +909,6 @@ const getVerificationOrders = async (req, res) => {
         status: true,
         created_at: true,
         updated_at: true,
-
         assigned_to: {
           select: {
             id: true,
@@ -784,24 +916,18 @@ const getVerificationOrders = async (req, res) => {
             full_name: true,
           },
         },
-
         created_by: {
           select: {
             username: true,
             full_name: true,
           },
         },
-
         verification: {
-          where: {
-            status: 'completed',
-          },
           select: {
             id: true,
             status: true,
             start_time: true,
             end_time: true,
-
             verification_officer: {
               select: {
                 id: true,
@@ -809,15 +935,12 @@ const getVerificationOrders = async (req, res) => {
                 full_name: true,
               },
             },
-
             purchaser: true,
             grantors: true,
             nextOfKin: true,
-
             locations: {
               orderBy: { timestamp: 'desc' },
             },
-
             documents: {
               orderBy: { uploaded_at: 'desc' },
             },
@@ -826,11 +949,21 @@ const getVerificationOrders = async (req, res) => {
       },
     });
 
-    const filteredOrders = orders.filter(order => order.verification !== null);
+    const total = await prisma.order.count({ where });
 
     return res.status(200).json({
       success: true,
-      data: { orders: filteredOrders },
+      data: {
+        orders,
+        pagination: {
+          page: Number(page),
+          limit: take,
+          total,
+          totalPages: Math.ceil(total / take),
+          hasNext: skip + take < total,
+          hasPrev: Number(page) > 1,
+        },
+      },
     });
   } catch (error) {
     console.error('Error in getVerificationOrders:', error);
@@ -873,7 +1006,12 @@ const getApprovedOrders = async (req, res) => {
           where.delivery_officer = { username: { contains: value } };
         } else if (key === 'created_by') {
           where.created_by = { username: { contains: value } };
-        } else {
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) {
+            where.created_at = range;
+          }
+        } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
         }
       }
@@ -1067,6 +1205,107 @@ const assignBulkDelivery = async (req, res) => {
   }
 };
 
+const cancelOrder = async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  if (!reason || reason.trim() === '') {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Reason is mandatory for cancellation.' }
+    });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) }
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Order not found' }
+      });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: Number(id) },
+      data: {
+        status: 'cancelled',
+        cancelled_reason: reason.trim(),
+        cancelled_at: new Date()
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order cancelled successfully',
+      data: { order: updatedOrder }
+    });
+  } catch (error) {
+    console.error('Cancel order error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+const updateOrderItem = async (req, res) => {
+  const { id } = req.params;
+  const { product_name } = req.body;
+
+  if (!product_name) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'product_name is required' }
+    });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) }
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Order not found' }
+      });
+    }
+
+    const previousProduct = order.product_name;
+
+    // Use a transaction
+    const [updatedOrder, history] = await prisma.$transaction([
+      prisma.order.update({
+        where: { id: Number(id) },
+        data: { product_name: product_name.trim() }
+      }),
+      prisma.orderProductHistory.create({
+        data: {
+          order_id: Number(id),
+          previous_product: previousProduct,
+          current_product: product_name.trim(),
+          changed_by_user_id: req.user.id
+        }
+      })
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order item updated successfully',
+      data: { order: updatedOrder, history }
+    });
+  } catch (error) {
+    console.error('Update order item error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
 module.exports = {
   createOrder,
   getOrders,
@@ -1078,5 +1317,7 @@ module.exports = {
   getVerificationOrders,
   getApprovedOrders,
   assignDelivery,
-  assignBulkDelivery
+  assignBulkDelivery,
+  cancelOrder,
+  updateOrderItem
 };
