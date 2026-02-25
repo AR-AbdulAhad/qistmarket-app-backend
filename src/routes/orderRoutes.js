@@ -13,12 +13,14 @@ const {
   assignDelivery,
   assignBulkDelivery,
   cancelOrder,
-  updateOrderItem
+  updateOrderItem,
+  getDeliveryStatus
 } = require('../controllers/ordersController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
 router.get('/orders/verification-pending', getVerificationOrders);
 router.get('/orders/delivery-pending', authenticateJWT, getApprovedOrders);
+router.get('/orders/delivery-status', authenticateJWT, getDeliveryStatus);
 router.post('/orders/create', authenticateJWT, createOrder);
 router.get('/orders', authenticateJWT, getOrders);
 router.get('/orders/scroll', authenticateJWT, getOrdersWithPagination);

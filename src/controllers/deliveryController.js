@@ -1,5 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { saveOTP, verifyOTP } = require('../utils/otpUtils');
+const { sendOTP } = require('../services/watiService');
 const { notifyAdmins } = require('../utils/notificationUtils');
 
 // Submit Delivery (Batch Upload)
@@ -360,9 +362,160 @@ const getCashInHand = async (req, res) => {
   }
 };
 
+// Generate Delivery OTP
+const generateDeliveryOtp = async (req, res) => {
+  const { order_id } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, error: { message: 'Order not found' } });
+    }
+
+    if (order.delivery_officer_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: { message: 'Order not assigned to you' } });
+    }
+
+    const otp = await saveOTP(order.phone, 'delivery');
+    await sendOTP(order.phone, otp);
+
+    return res.status(200).json({ success: true, message: 'OTP sent to customer' });
+  } catch (error) {
+    console.error('generateDeliveryOtp error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
+
+// Verify Delivery OTP
+const verifyDeliveryOtp = async (req, res) => {
+  const { order_id, otp } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) }
+    });
+
+    if (!order) return res.status(404).json({ success: false, error: { message: 'Order not found' } });
+
+    const verification = await verifyOTP(order.phone, otp, 'delivery');
+    if (!verification.valid) {
+      return res.status(400).json({ success: true, valid: false, message: verification.message });
+    }
+
+    // Mark as delivered
+    await prisma.order.update({
+      where: { id: parseInt(order_id) },
+      data: { status: 'delivered', is_delivered: true }
+    });
+
+    // Create delivery record if not exists
+    await prisma.delivery.upsert({
+      where: { order_id: parseInt(order_id) },
+      update: { status: 'completed', end_time: new Date(), verified: true },
+      create: {
+        order_id: parseInt(order_id),
+        delivery_agent_id: req.user.id,
+        status: 'completed',
+        start_time: new Date(),
+        end_time: new Date(),
+        verified: true
+      }
+    });
+
+    return res.status(200).json({ success: true, valid: true, message: 'Delivery verified and completed' });
+  } catch (error) {
+    console.error('verifyDeliveryOtp error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
+
+// Return Product
+const returnProduct = async (req, res) => {
+  const { order_id, reason } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) }
+    });
+
+    if (!order) return res.status(404).json({ success: false, error: { message: 'Order not found' } });
+
+    await prisma.order.update({
+      where: { id: parseInt(order_id) },
+      data: {
+        status: 'returned',
+        cancelled_reason: reason,
+        cancelled_at: new Date()
+      }
+    });
+
+    return res.status(200).json({ success: true, message: 'Product marked as returned' });
+  } catch (error) {
+    console.error('returnProduct error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
+
+// Generate Refund OTP
+const generateRefundOtp = async (req, res) => {
+  const { order_id } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) }
+    });
+
+    if (!order) return res.status(404).json({ success: false, error: { message: 'Order not found' } });
+
+    const otp = await saveOTP(order.phone, 'refund');
+    await sendOTP(order.phone, otp);
+
+    return res.status(200).json({ success: true, message: 'Refund OTP sent to customer' });
+  } catch (error) {
+    console.error('generateRefundOtp error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
+
+// Verify Refund OTP
+const verifyRefundOtp = async (req, res) => {
+  const { order_id, otp } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) }
+    });
+
+    if (!order) return res.status(404).json({ success: false, error: { message: 'Order not found' } });
+
+    const verification = await verifyOTP(order.phone, otp, 'refund');
+    if (!verification.valid) {
+      return res.status(400).json({ success: true, valid: false, message: verification.message });
+    }
+
+    await prisma.order.update({
+      where: { id: parseInt(order_id) },
+      data: { status: 'refunded' }
+    });
+
+    return res.status(200).json({ success: true, valid: true, message: 'Refund verified and processed' });
+  } catch (error) {
+    console.error('verifyRefundOtp error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
+
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
   getPendingDeliveryProducts,
-  getCashInHand
+  getCashInHand,
+  generateDeliveryOtp,
+  verifyDeliveryOtp,
+  returnProduct,
+  generateRefundOtp,
+  verifyRefundOtp
 };

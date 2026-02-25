@@ -2,20 +2,24 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 const getNotifications = async (req, res) => {
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 10, status = 'all' } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
     const take = Number(limit);
 
+    const where = { userId: req.user.id };
+    if (status === 'read') where.isRead = true;
+    else if (status === 'unread') where.isRead = false;
+
     try {
         const notifications = await prisma.notification.findMany({
-            where: { userId: req.user.id },
+            where,
             orderBy: { createdAt: 'desc' },
             skip,
             take,
         });
 
         const total = await prisma.notification.count({
-            where: { userId: req.user.id },
+            where,
         });
 
         const unreadCount = await prisma.notification.count({

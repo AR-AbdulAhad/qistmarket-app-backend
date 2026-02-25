@@ -8,7 +8,12 @@ const {
   submitDelivery,
   getDeliveryByOrderId,
   getPendingDeliveryProducts,
-  getCashInHand
+  getCashInHand,
+  generateDeliveryOtp,
+  verifyDeliveryOtp,
+  returnProduct,
+  generateRefundOtp,
+  verifyRefundOtp
 } = require('../controllers/deliveryController');
 
 // Submit delivery (batch)
@@ -28,5 +33,14 @@ router.post(
 router.get('/delivery/order/:order_id', getDeliveryByOrderId);
 router.get('/delivery-boy/picked-products-minimal', authenticateJWT, getPendingDeliveryProducts);
 router.get('/delivery-boy/cash-in-hand', getCashInHand);
+
+// OTP Verified Delivery Flows
+router.post('/delivery/generate-otp', authenticateJWT, generateDeliveryOtp);
+router.post('/delivery/verify-otp', authenticateJWT, verifyDeliveryOtp);
+router.post('/delivery/return', authenticateJWT, returnProduct);
+
+// OTP Verified Refund Flows
+router.post('/delivery/refund/generate-otp', authenticateJWT, generateRefundOtp);
+router.post('/delivery/refund/verify-otp', authenticateJWT, verifyRefundOtp);
 
 module.exports = router;

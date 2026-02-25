@@ -22,6 +22,8 @@ const deliveryManagement = require('./src/routes/deliveryManagement');
 const officerRoutes = require('./src/routes/officerRoutes');      // ← new officer realtime routes
 const notificationRoutes = require('./src/routes/notificationRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
+const addressRoutes = require('./src/routes/addressRoutes');
+const productRoutes = require('./src/routes/productRoutes');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -86,10 +88,11 @@ io.on('connection', (socket) => {
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      const isOfficer = decoded.role === 'Verification Officer' || decoded.role_id === 1;
+      const isVerificationOfficer = decoded.role === 'Verification Officer' || decoded.role_id === 1;
+      const isDeliveryAgent = decoded.role === 'Delivery Agent' || decoded.role_id === 3;
 
-      if (!isOfficer) {
-        socket.emit('auth_error', { message: 'Not a Verification Officer' });
+      if (!isVerificationOfficer && !isDeliveryAgent) {
+        socket.emit('auth_error', { message: 'Not an authorized Officer/Agent' });
         return;
       }
 
@@ -341,6 +344,8 @@ app.use('/api', deliveryManagement);
 app.use('/api', officerRoutes);           // ← officer realtime endpoints
 app.use('/api', notificationRoutes);
 app.use('/api/assignments', assignmentRoutes);
+app.use('/api/address', addressRoutes);
+app.use('/api', productRoutes);
 
 // 404 handler
 app.use((req, res) => {

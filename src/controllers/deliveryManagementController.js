@@ -9,6 +9,9 @@ const WATI_BROADCAST_NAME = process.env.WATI_BROADCAST_NAME;
 
 const getDeliveryBoysOverview = async (req, res) => {
   try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     const boys = await prisma.user.findMany({
       where: {
         role: { name: { equals: 'Delivery Agent' } },
@@ -20,25 +23,44 @@ const getDeliveryBoysOverview = async (req, res) => {
         username: true,
         image: true,
         phone: true,
+        is_online: true,
+        last_online_at: true,
         _count: {
           select: {
             delivery_orders: {
               where: { is_delivered: false }
             }
           }
+        },
+        delivery_orders: {
+          where: {
+            updated_at: { gte: today }
+          },
+          select: {
+            status: true
+          }
         }
       },
       orderBy: { full_name: 'asc' }
     });
 
-    const data = boys.map(b => ({
-      id: b.id,
-      name: b.full_name,
-      username: b.username,
-      profile_image: b.image,
-      pending_count: b._count.delivery_orders,
-      whatsapp: b.phone || null
-    }));
+    const data = boys.map(b => {
+      const deliveredToday = b.delivery_orders.filter(o => o.status === 'delivered').length;
+      const returnedToday = b.delivery_orders.filter(o => o.status === 'returned').length;
+
+      return {
+        id: b.id,
+        name: b.full_name,
+        username: b.username,
+        profile_image: b.image,
+        pending_count: b._count.delivery_orders,
+        delivered_today: deliveredToday,
+        returned_today: returnedToday,
+        whatsapp: b.phone || null,
+        is_online: b.is_online,
+        last_online_at: b.last_online_at
+      };
+    });
 
     return res.json({ success: true, data });
   } catch (err) {
@@ -151,7 +173,7 @@ const generatePickupOtp = async (req, res) => {
       return res.status(400).json({ success: false, error: 'No WhatsApp or phone number' });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = Math.floor(10000 + Math.random() * 90000).toString();
     const expiresAt = new Date(Date.now() + 20 * 60 * 1000); // 20 minutes
 
     // Find pending orders without OTP
@@ -207,7 +229,7 @@ const generatePickupOtp = async (req, res) => {
 const verifyPickupOtp = async (req, res) => {
   const { deliveryBoyId, otp } = req.body;
 
-  if (!deliveryBoyId || !otp || otp.length !== 6) {
+  if (!deliveryBoyId || !otp || otp.length !== 5) {
     return res.status(400).json({ success: false, error: 'Invalid request' });
   }
 

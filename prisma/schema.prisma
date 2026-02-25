@@ -459,3 +459,32 @@ model OrderProductHistory {
   @@index([order_id])
   @@index([changed_by_user_id])
 }
+
+model City {
+  id    Int    @id @default(autoincrement())
+  name  String @unique
+  zones Zone[]
+
+  @@map("cities")
+}
+
+model Zone {
+  id      Int    @id @default(autoincrement())
+  name    String
+  city_id Int
+  city    City   @relation(fields: [city_id], references: [id], onDelete: Cascade)
+  areas   Area[]
+
+  @@unique([name, city_id])
+  @@map("zones")
+}
+
+model Area {
+  id      Int    @id @default(autoincrement())
+  name    String
+  zone_id Int
+  zone    Zone   @relation(fields: [zone_id], references: [id], onDelete: Cascade)
+
+  @@unique([name, zone_id])
+  @@map("areas")
+}

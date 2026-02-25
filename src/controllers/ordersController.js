@@ -798,40 +798,33 @@ const assignBulk = async (req, res) => {
     });
 
     if (!user || user.role.name !== 'Verification Officer') {
-      return res.status(400).json({ success: false, message: 'Invalid verification officer' });
+      return res.status(400).json({ success: false, message: 'Invalid Verification Officer' });
     }
 
-    const orders = await prisma.order.findMany({
-      where: { id: { in: order_ids.map(Number) } },
-      include: {
-        assigned_to: { select: { username: true, fcm_token: true } },
-      },
-    });
+    const verificationEntries = order_ids.map(id => ({
+      order_id: Number(id),
+      verification_officer_id: Number(user_id),
+      status: 'in_progress',
+      start_time: new Date(),
+    }));
 
-    const alreadyAssigned = orders.filter((o) => o.assigned_to_user_id !== null);
-    if (alreadyAssigned.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'Some selected orders are already assigned',
-      });
-    }
-
-    await prisma.order.updateMany({
-      where: { id: { in: order_ids.map(Number) } },
-      data: {
-        assigned_to_user_id: Number(user_id),
-        status: 'pending'
-      },
-    });
-
-    const io = req.app.get('io');
-    for (const order of orders) {
-      await sendAssignmentNotification(order, user, io);
-    }
+    await prisma.$transaction([
+      prisma.order.updateMany({
+        where: { id: { in: order_ids.map(Number) } },
+        data: {
+          assigned_to_user_id: Number(user_id),
+          status: 'pending'
+        }
+      }),
+      prisma.verification.createMany({
+        data: verificationEntries,
+        skipDuplicates: true
+      })
+    ]);
 
     return res.status(200).json({
       success: true,
-      message: 'Orders assigned successfully. Notifications sent.',
+      message: `${order_ids.length} orders assigned successfully`,
     });
   } catch (error) {
     console.error(error);
@@ -840,18 +833,14 @@ const assignBulk = async (req, res) => {
 };
 
 const getVerificationOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
-
+  const { page = 1, limit = 10, search = '' } = req.query;
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
 
   try {
     const where = {
-      assigned_to_user_id: { not: null },
-      verification: {
-        isNot: null,
-      },
-      status: 'in_progress',
+      assigned_to_user_id: null,
+      status: { not: 'cancelled' },
     };
 
     if (search.trim()) {
@@ -859,132 +848,49 @@ const getVerificationOrders = async (req, res) => {
         { customer_name: { contains: search } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
-        { token_number: { contains: search } },
-        { product_name: { contains: search } },
-        { city: { contains: search } },
-        { area: { contains: search } },
       ];
     }
 
-    Object.entries(filters).forEach(([key, value]) => {
-      if (value) {
-        if (key === 'verification_officer') {
-          where.verification = {
-            ...where.verification,
-            verification_officer: { username: { contains: value } }
-          };
-        } else if (key === 'created_by') {
-          where.created_by = { username: { contains: value } };
-        } else if (key === 'dateRange') {
-          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
-          if (range) {
-            where.created_at = range;
-          }
-        } else if (key !== 'startDate' && key !== 'endDate') {
-          where[key] = { contains: value };
-        }
-      }
-    });
-
-    const orders = await prisma.order.findMany({
-      where,
-      skip,
-      take,
-      orderBy: { [sortBy]: sortDir },
-      select: {
-        id: true,
-        order_ref: true,
-        token_number: true,
-        customer_name: true,
-        whatsapp_number: true,
-        address: true,
-        city: true,
-        area: true,
-        product_name: true,
-        total_amount: true,
-        advance_amount: true,
-        monthly_amount: true,
-        months: true,
-        channel: true,
-        status: true,
-        created_at: true,
-        updated_at: true,
-        assigned_to: {
-          select: {
-            id: true,
-            username: true,
-            full_name: true,
-          },
-        },
-        created_by: {
-          select: {
-            username: true,
-            full_name: true,
-          },
-        },
-        verification: {
-          select: {
-            id: true,
-            status: true,
-            start_time: true,
-            end_time: true,
-            verification_officer: {
-              select: {
-                id: true,
-                username: true,
-                full_name: true,
-              },
-            },
-            purchaser: true,
-            grantors: true,
-            nextOfKin: true,
-            locations: {
-              orderBy: { timestamp: 'desc' },
-            },
-            documents: {
-              orderBy: { uploaded_at: 'desc' },
-            },
-          },
-        },
-      },
-    });
-
-    const total = await prisma.order.count({ where });
+    const [orders, total] = await prisma.$transaction([
+      prisma.order.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { created_at: 'desc' },
+        include: { created_by: { select: { username: true } } },
+      }),
+      prisma.order.count({ where }),
+    ]);
 
     return res.status(200).json({
       success: true,
       data: {
         orders,
         pagination: {
-          page: Number(page),
-          limit: take,
           total,
+          page: Number(page),
           totalPages: Math.ceil(total / take),
-          hasNext: skip + take < total,
-          hasPrev: Number(page) > 1,
         },
       },
     });
   } catch (error) {
-    console.error('Error in getVerificationOrders:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' },
-    });
+    console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 const getApprovedOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
-
+  const { page = 1, limit = 10, search = '' } = req.query;
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
 
   try {
     const where = {
+      delivery_officer_id: null,
       verification: {
         status: 'approved',
       },
+      status: { not: 'delivered' }
     };
 
     if (search.trim()) {
@@ -992,141 +898,80 @@ const getApprovedOrders = async (req, res) => {
         { customer_name: { contains: search } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
-        { token_number: { contains: search } },
-        { product_name: { contains: search } },
-        { city: { contains: search } },
-        { area: { contains: search } },
       ];
     }
 
-    // Support column filters (same as getOrders)
-    Object.entries(filters).forEach(([key, value]) => {
-      if (value) {
-        if (key === 'delivery_officer') {
-          where.delivery_officer = { username: { contains: value } };
-        } else if (key === 'created_by') {
-          where.created_by = { username: { contains: value } };
-        } else if (key === 'dateRange') {
-          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
-          if (range) {
-            where.created_at = range;
+    const [orders, total] = await prisma.$transaction([
+      prisma.order.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { updated_at: 'desc' },
+        include: {
+          verification: {
+            include: {
+              verification_officer: { select: { full_name: true, username: true } }
+            }
           }
-        } else if (key !== 'startDate' && key !== 'endDate') {
-          where[key] = { contains: value };
         }
-      }
-    });
-
-    const orders = await prisma.order.findMany({
-      where,
-      skip,
-      take,
-      orderBy: { [sortBy]: sortDir },
-      include: {
-        created_by: { select: { username: true, full_name: true } },
-        assigned_to: { select: { username: true, full_name: true } },
-        delivery_officer: { select: { username: true, full_name: true } },
-        verification: { select: { id: true, status: true } },
-      },
-    });
-
-    const total = await prisma.order.count({ where });
+      }),
+      prisma.order.count({ where }),
+    ]);
 
     return res.status(200).json({
       success: true,
       data: {
         orders,
         pagination: {
-          page: Number(page),
-          limit: take,
           total,
+          page: Number(page),
           totalPages: Math.ceil(total / take),
-          hasNext: skip + take < total,
-          hasPrev: Number(page) > 1,
         },
       },
     });
   } catch (error) {
-    console.error('getApprovedOrders error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' },
-    });
+    console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 const assignDelivery = async (req, res) => {
   const { id } = req.params;
-  const { user_id, action = 'assign' } = req.body;
+  const { user_id } = req.body;
 
   try {
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'delivery_officer_id required' });
+    }
+
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
-      include: {
-        delivery_officer: { select: { username: true, fcm_token: true } },
-      },
+      include: { verification: true }
     });
 
-    if (!order) {
-      return res.status(404).json({ success: false, message: 'Order not found' });
-    }
-
-    if (action === 'unassign') {
-      if (!order.delivery_officer_id) {
-        return res.status(400).json({ success: false, message: 'Order is not assigned for delivery' });
-      }
-
-      const updated = await prisma.order.update({
-        where: { id: Number(id) },
-        data: { delivery_officer_id: null },
-        include: {
-          created_by: { select: { username: true } },
-          assigned_to: { select: { username: true } },
-          delivery_officer: { select: { username: true } },
-        },
-      });
-
-      return res.status(200).json({
-        success: true,
-        message: 'Delivery unassigned successfully',
-        data: { order: updated },
-      });
-    }
-
-    if (!user_id) {
-      return res.status(400).json({ success: false, message: 'User ID required for assignment' });
-    }
-
-    if (order.delivery_officer_id) {
-      return res.status(409).json({ success: false, message: 'Order is already assigned for delivery' });
-    }
-
-    const user = await prisma.user.findUnique({
-      where: { id: Number(user_id) },
-      include: { role: true },
-    });
-
-    if (!user || user.role.name !== 'Delivery Agent') {
-      return res.status(400).json({ success: false, message: 'Invalid Delivery Officer' });
+    if (!order || order.verification?.status !== 'approved') {
+      return res.status(400).json({ success: false, message: 'Order not found or not approved' });
     }
 
     const updatedOrder = await prisma.order.update({
       where: { id: Number(id) },
-      data: { delivery_officer_id: Number(user_id) },
-      include: {
-        delivery_officer: { select: { username: true, fcm_token: true } },
-        created_by: { select: { username: true } },
-        assigned_to: { select: { username: true } },
+      data: {
+        delivery_officer_id: Number(user_id),
+        status: 'picked_up'
       },
+      include: {
+        delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
+      }
     });
 
+    // Send notification
     const io = req.app.get('io');
     await sendDeliveryAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, io);
 
     return res.status(200).json({
       success: true,
-      message: 'Delivery assigned successfully',
-      data: { order: updatedOrder },
+      message: 'Delivery officer assigned successfully',
+      data: { order: updatedOrder }
     });
   } catch (error) {
     console.error(error);
@@ -1135,69 +980,24 @@ const assignDelivery = async (req, res) => {
 };
 
 const assignBulkDelivery = async (req, res) => {
-  const { order_ids, user_id, action = 'assign' } = req.body;
+  const { order_ids, user_id } = req.body;
 
-  if (!Array.isArray(order_ids) || order_ids.length === 0) {
-    return res.status(400).json({ success: false, message: 'order_ids array is required' });
+  if (!Array.isArray(order_ids) || order_ids.length === 0 || !user_id) {
+    return res.status(400).json({ success: false, message: 'order_ids and user_id required' });
   }
 
   try {
-    if (action === 'unassign') {
-      await prisma.order.updateMany({
-        where: {
-          id: { in: order_ids.map(Number) },
-          delivery_officer_id: { not: null },
-        },
-        data: { delivery_officer_id: null },
-      });
-
-      return res.status(200).json({
-        success: true,
-        message: 'Selected deliveries have been unassigned',
-      });
-    }
-
-    if (!user_id) {
-      return res.status(400).json({ success: false, message: 'user_id required for assignment' });
-    }
-
-    const user = await prisma.user.findUnique({
-      where: { id: Number(user_id) },
-      include: { role: true },
-    });
-
-    if (!user || user.role.name !== 'Delivery Agent') {
-      return res.status(400).json({ success: false, message: 'Invalid delivery officer' });
-    }
-
-    const orders = await prisma.order.findMany({
-      where: { id: { in: order_ids.map(Number) } },
-      include: {
-        delivery_officer: { select: { username: true, fcm_token: true } },
-      },
-    });
-
-    const alreadyAssigned = orders.filter((o) => o.delivery_officer_id !== null);
-    if (alreadyAssigned.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'Some selected orders are already assigned for delivery',
-      });
-    }
-
     await prisma.order.updateMany({
       where: { id: { in: order_ids.map(Number) } },
-      data: { delivery_officer_id: Number(user_id) },
+      data: {
+        delivery_officer_id: Number(user_id),
+        status: 'picked_up'
+      }
     });
-
-    const io = req.app.get('io');
-    for (const order of orders) {
-      await sendDeliveryAssignmentNotification(order, user, io);
-    }
 
     return res.status(200).json({
       success: true,
-      message: 'Deliveries assigned successfully. Notifications sent.',
+      message: `${order_ids.length} orders assigned for delivery`
     });
   } catch (error) {
     console.error(error);
@@ -1207,32 +1007,14 @@ const assignBulkDelivery = async (req, res) => {
 
 const cancelOrder = async (req, res) => {
   const { id } = req.params;
-  const { reason } = req.body;
-
-  if (!reason || reason.trim() === '') {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: 'Reason is mandatory for cancellation.' }
-    });
-  }
+  const { reason = 'Cancelled by admin' } = req.body;
 
   try {
-    const order = await prisma.order.findUnique({
-      where: { id: Number(id) }
-    });
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Order not found' }
-      });
-    }
-
     const updatedOrder = await prisma.order.update({
       where: { id: Number(id) },
       data: {
         status: 'cancelled',
-        cancelled_reason: reason.trim(),
+        cancelled_reason: reason,
         cancelled_at: new Date()
       }
     });
@@ -1243,11 +1025,8 @@ const cancelOrder = async (req, res) => {
       data: { order: updatedOrder }
     });
   } catch (error) {
-    console.error('Cancel order error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
@@ -1258,13 +1037,13 @@ const updateOrderItem = async (req, res) => {
   if (!product_name) {
     return res.status(400).json({
       success: false,
-      error: { code: 400, message: 'product_name is required' }
+      error: { code: 400, message: 'Product name is required' }
     });
   }
 
   try {
     const order = await prisma.order.findUnique({
-      where: { id: Number(id) }
+      where: { id: parseInt(id) }
     });
 
     if (!order) {
@@ -1274,19 +1053,18 @@ const updateOrderItem = async (req, res) => {
       });
     }
 
-    const previousProduct = order.product_name;
+    const previous_product = order.product_name;
 
-    // Use a transaction
     const [updatedOrder, history] = await prisma.$transaction([
       prisma.order.update({
-        where: { id: Number(id) },
-        data: { product_name: product_name.trim() }
+        where: { id: parseInt(id) },
+        data: { product_name }
       }),
       prisma.orderProductHistory.create({
         data: {
-          order_id: Number(id),
-          previous_product: previousProduct,
-          current_product: product_name.trim(),
+          order_id: parseInt(id),
+          previous_product,
+          current_product: product_name,
           changed_by_user_id: req.user.id
         }
       })
@@ -1299,6 +1077,56 @@ const updateOrderItem = async (req, res) => {
     });
   } catch (error) {
     console.error('Update order item error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+const getDeliveryStatus = async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      where: {
+        delivery_officer_id: { not: null }
+      },
+      select: {
+        id: true,
+        order_ref: true,
+        customer_name: true,
+        address: true,
+        product_name: true,
+        advance_amount: true,
+        status: true,
+        updated_at: true,
+        delivery_officer: {
+          select: {
+            username: true,
+            full_name: true
+          }
+        }
+      },
+      orderBy: { updated_at: 'desc' }
+    });
+
+    const formattedOrders = orders.map(o => ({
+      id: o.id,
+      order_ref: o.order_ref,
+      customer_name: o.customer_name,
+      address: o.address,
+      product_name: o.product_name,
+      amount: o.advance_amount,
+      status: o.status,
+      delivery_officer: o.delivery_officer,
+      updated_at: o.updated_at
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: formattedOrders
+    });
+  } catch (error) {
+    console.error('getDeliveryStatus error:', error);
     return res.status(500).json({
       success: false,
       error: { code: 500, message: 'Internal server error' }
@@ -1319,5 +1147,6 @@ module.exports = {
   assignDelivery,
   assignBulkDelivery,
   cancelOrder,
-  updateOrderItem
+  updateOrderItem,
+  getDeliveryStatus
 };

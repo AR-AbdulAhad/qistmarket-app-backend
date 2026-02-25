@@ -2,9 +2,11 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 const getOfficerAssignments = async (req, res) => {
+    const { role } = req.query;
     try {
+        const roleName = role === 'delivery' ? 'Delivery Agent' : 'Verification Officer';
         const officers = await prisma.user.findMany({
-            where: { role: { name: 'Verification Officer' } },
+            where: { role: { name: roleName } },
             select: {
                 id: true,
                 full_name: true,
