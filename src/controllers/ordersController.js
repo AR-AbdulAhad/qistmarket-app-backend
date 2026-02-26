@@ -839,8 +839,7 @@ const getVerificationOrders = async (req, res) => {
 
   try {
     const where = {
-      assigned_to_user_id: null,
-      status: { not: 'cancelled' },
+      status: 'completed',
     };
 
     if (search.trim()) {
@@ -886,11 +885,7 @@ const getApprovedOrders = async (req, res) => {
 
   try {
     const where = {
-      delivery_officer_id: null,
-      verification: {
-        status: 'approved',
-      },
-      status: { not: 'delivered' }
+      status: "approved"
     };
 
     if (search.trim()) {
