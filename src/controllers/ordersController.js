@@ -269,13 +269,14 @@ const createOrder = async (req, res) => {
       }
     });
 
-    // Create verification entry if assigned
     if (assignedOfficerId) {
-      await prisma.verification.create({
+      await prisma.order.update({
+        where: { id: order.id },
         data: {
-          order_id: order.id,
-          verification_officer_id: assignedOfficerId,
-          start_time: new Date(),
+          assigned_to_user_id: assignedOfficerId,
+          status: 'pending',
+          assigned_at: new Date(),
+          updated_at: new Date()
         }
       });
       // Send notification
@@ -691,7 +692,7 @@ const assignOrder = async (req, res) => {
 
   try {
     const order = await prisma.order.findUnique({
-      where: { id: Number(id) },
+      where: { id: parseInt(id) },
       include: {
         assigned_to: { select: { username: true, fcm_token: true } },
       },
@@ -707,7 +708,7 @@ const assignOrder = async (req, res) => {
       }
 
       const updated = await prisma.order.update({
-        where: { id: Number(id) },
+        where: { id: parseInt(id) },
         data: { assigned_to_user_id: null },
         include: {
           created_by: { select: { username: true } },
@@ -731,7 +732,7 @@ const assignOrder = async (req, res) => {
     }
 
     const user = await prisma.user.findUnique({
-      where: { id: Number(user_id) },
+      where: { id: parseInt(user_id) },
       include: { role: true },
     });
 
@@ -740,9 +741,9 @@ const assignOrder = async (req, res) => {
     }
 
     const updatedOrder = await prisma.order.update({
-      where: { id: Number(id) },
+      where: { id: parseInt(id) },
       data: {
-        assigned_to_user_id: Number(user_id),
+        assigned_to_user_id: parseInt(user_id),
         status: 'pending'
       },
       include: {
@@ -793,7 +794,7 @@ const assignBulk = async (req, res) => {
     }
 
     const user = await prisma.user.findUnique({
-      where: { id: Number(user_id) },
+      where: { id: parseInt(user_id) },
       include: { role: true },
     });
 
@@ -802,8 +803,8 @@ const assignBulk = async (req, res) => {
     }
 
     const verificationEntries = order_ids.map(id => ({
-      order_id: Number(id),
-      verification_officer_id: Number(user_id),
+      order_id: parseInt(id),
+      verification_officer_id: parseInt(user_id),
       status: 'in_progress',
       start_time: new Date(),
     }));
@@ -812,7 +813,7 @@ const assignBulk = async (req, res) => {
       prisma.order.updateMany({
         where: { id: { in: order_ids.map(Number) } },
         data: {
-          assigned_to_user_id: Number(user_id),
+          assigned_to_user_id: parseInt(user_id),
           status: 'pending'
         }
       }),

@@ -7,7 +7,7 @@ const {
   // OTP Login functions
   sendLoginOTP,
   verifyLoginOTP,
-  
+
   // Existing functions
   signup,
   loginWeb,
@@ -22,11 +22,7 @@ const {
   getVerificationOfficers,
   forgotPassword,
   resetPassword,
-  getDeliveryOfficers,
-  requestAccountDeletion,
-  getMyDeletionRequest,
-  getAllDeletionRequests,
-  reviewDeletionRequest
+  getDeliveryOfficers
 } = require('../controllers/authController');
 
 const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
@@ -67,22 +63,15 @@ router.post('/signup', authenticateJWT, requireSuperAdmin, signup);
 router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
 router.patch('/users/:userId/status', authenticateJWT, requireSuperAdmin, toggleUserStatus);
 router.patch(
-  '/users/:userId/edit', 
-  authenticateJWT, 
+  '/users/:userId/edit',
+  authenticateJWT,
   requireSuperAdmin,
   upload.fields([{ name: 'image', maxCount: 1 }, { name: 'coverImage', maxCount: 1 }]),
-  fixUploadPath, 
+  fixUploadPath,
   editUser
 );
 router.patch('/users/:userId/permissions', authenticateJWT, requireSuperAdmin, updateUserPermissions);
 router.delete('/users/:userId', authenticateJWT, requireSuperAdmin, deleteUser);
 
-
-router.post('/account/deletion-request', authenticateJWT, requestAccountDeletion);
-router.get('/account/deletion-request', authenticateJWT, getMyDeletionRequest);
-
-// Admin ke liye
-router.get('/admin/deletion-requests', authenticateJWT, requireSuperAdmin, getAllDeletionRequests);
-router.patch('/admin/deletion-requests/:requestId/review', authenticateJWT, requireSuperAdmin, reviewDeletionRequest);
 
 module.exports = router;
