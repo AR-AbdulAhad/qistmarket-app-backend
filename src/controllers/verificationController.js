@@ -1101,8 +1101,6 @@ const getVerificationByOrderId = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
-        order_ref: verification.order.order_ref,
-        order_status: verification.order.status,
         verification
       }
     });
