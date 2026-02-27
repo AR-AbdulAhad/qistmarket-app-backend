@@ -21,7 +21,7 @@ const notifyAdmins = async (title, message, type, relatedId = null, io = null) =
     if (admins.length === 0) return;
 
     const notificationData = admins.map(admin => ({
-      userId:    admin.id,
+      userId: admin.id,
       title,
       message,
       type,
@@ -64,9 +64,9 @@ const sendLoginOTP = async (req, res) => {
   if (!isPhone && !isEmail) {
     return res.status(400).json({
       success: false,
-      error: { 
-        code: 400, 
-        message: 'Please enter a valid phone number (03XXXXXXXXX) or email address.' 
+      error: {
+        code: 400,
+        message: 'Please enter a valid phone number (03XXXXXXXXX) or email address.'
       }
     });
   }
@@ -77,12 +77,12 @@ const sendLoginOTP = async (req, res) => {
     let whereCondition = {};
 
     if (isPhone) {
-      whereCondition = { 
+      whereCondition = {
         phone: identifier,
         role_id: { in: [1, 2, 3] } // App roles
       };
     } else {
-      whereCondition = { 
+      whereCondition = {
         email: identifier.toLowerCase(),
         role_id: { in: [1, 2, 3] } // App roles
       };
@@ -95,10 +95,10 @@ const sendLoginOTP = async (req, res) => {
     if (!user) {
       return res.status(404).json({
         success: false,
-        error: { 
-          code: 404, 
-          message: isPhone 
-            ? 'No account found with this phone number.' 
+        error: {
+          code: 404,
+          message: isPhone
+            ? 'No account found with this phone number.'
             : 'No account found with this email address.'
         }
       });
@@ -107,9 +107,9 @@ const sendLoginOTP = async (req, res) => {
     if (user.status !== 'active') {
       return res.status(403).json({
         success: false,
-        error: { 
-          code: 403, 
-          message: 'Your account is not active. Please contact support.' 
+        error: {
+          code: 403,
+          message: 'Your account is not active. Please contact support.'
         }
       });
     }
@@ -204,12 +204,12 @@ const verifyLoginOTP = async (req, res) => {
     // Find user by phone or email
     let whereCondition = {};
     if (isPhone) {
-      whereCondition = { 
+      whereCondition = {
         phone: identifier,
         role_id: { in: [1, 2, 3] }
       };
     } else if (isEmail) {
-      whereCondition = { 
+      whereCondition = {
         email: identifier.toLowerCase(),
         role_id: { in: [1, 2, 3] }
       };
@@ -222,7 +222,7 @@ const verifyLoginOTP = async (req, res) => {
 
     const user = await prisma.user.findFirst({
       where: whereCondition,
-      include: { 
+      include: {
         role: {
           select: {
             id: true,
@@ -756,11 +756,11 @@ const getUsers = async (req, res) => {
     // Global search
     if (search.trim()) {
       where.OR = [
-        { full_name: { contains: search.trim()} },
-        { username: { contains: search.trim()} },
-        { email: { contains: search.trim()} },
-        { phone: { contains: search.trim()} },
-        { cnic: { contains: search.trim()} },
+        { full_name: { contains: search.trim() } },
+        { username: { contains: search.trim() } },
+        { email: { contains: search.trim() } },
+        { phone: { contains: search.trim() } },
+        { cnic: { contains: search.trim() } },
       ];
     }
 
@@ -833,7 +833,7 @@ const getUsers = async (req, res) => {
 
 const editUser = async (req, res) => {
   const { userId } = req.params;
-  const { full_name, username, role_id, cnic, phone, email, password, status,bio } = req.body;
+  const { full_name, username, role_id, cnic, phone, email, password, status, bio } = req.body;
 
   if (!full_name && !username && !role_id && !cnic && !phone && !email && !password && !status && !bio) {
     return res.status(400).json({
@@ -842,16 +842,16 @@ const editUser = async (req, res) => {
     });
   }
 
-   const files = req.files;
+  const files = req.files;
 
   let image = null;
   let coverImage = null;
 
-   if (files?.image?.[0]) {
+  if (files?.image?.[0]) {
     image = files.image[0].url;
   }
 
- if (files?.coverImage?.[0]) {
+  if (files?.coverImage?.[0]) {
     coverImage = files.coverImage[0].url;
   }
 
@@ -887,9 +887,9 @@ const editUser = async (req, res) => {
       ...(phone && { phone: phone.trim() }),
       ...(email !== undefined && { email: email ? email.toLowerCase().trim() : null }),
       ...(status && { status }),
-      ...(bio&&{bio:bio}),
-      ...(image &&{image:image}),
-      ...(coverImage &&{coverImage:coverImage}),
+      ...(bio && { bio: bio }),
+      ...(image && { image: image }),
+      ...(coverImage && { coverImage: coverImage }),
     };
 
     const updatedUser = await prisma.user.update({
@@ -1051,10 +1051,10 @@ const updateProfile = async (req, res) => {
   try {
     const updateData = {};
 
-    if (full_name !== undefined)    updateData.full_name = full_name.trim();
-    if (email !== undefined)        updateData.email = email ? email.toLowerCase().trim() : null;
-    if (phone !== undefined)        updateData.phone = phone.trim();
-    if (bio !== undefined)          updateData.bio = bio;
+    if (full_name !== undefined) updateData.full_name = full_name.trim();
+    if (email !== undefined) updateData.email = email ? email.toLowerCase().trim() : null;
+    if (phone !== undefined) updateData.phone = phone.trim();
+    if (bio !== undefined) updateData.bio = bio;
 
     if (image !== null || remove_image === 'true') {
       updateData.image = image;
@@ -1147,10 +1147,10 @@ const getVerificationOfficers = async (req, res) => {
 const getDeliveryOfficers = async (req, res) => {
   try {
     const officers = await prisma.user.findMany({
-      where: 
-      { 
-        role: { 
-          name: 'Delivery Agent' 
+      where:
+      {
+        role: {
+          name: 'Delivery Agent'
         },
         status: 'active'
       },
@@ -1177,224 +1177,13 @@ const getDeliveryOfficers = async (req, res) => {
   }
 };
 
-const requestAccountDeletion = async (req, res) => {
-  const userId = req.user.id;
-  const { reason } = req.body;
 
-  try {
-    const existingRequest = await prisma.accountDeletionRequest.findFirst({
-      where: {
-        userId,
-        status: { in: ['pending', 'approved'] }
-      }
-    });
-
-    if (existingRequest) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 400,
-          message: existingRequest.status === 'approved'
-            ? 'Your account deletion request has already been approved.'
-            : 'You already have a pending account deletion request.'
-        }
-      });
-    }
-
-    const deletionRequest = await prisma.accountDeletionRequest.create({
-      data: {
-        userId,
-        reason: reason || null,
-        status: 'pending',
-        requestedAt: new Date()
-      }
-    });
-
-    const io = req.app.get('io');
-    await notifyAdmins(
-      'New Account Deletion Request',
-      `Verification Officer ${req.user.full_name} (${req.user.username}) has requested account deletion. Reason: ${reason || 'Not provided'}`,
-      'account_deletion_request',
-      deletionRequest.id,
-      io
-    ).catch(err => {
-      console.error('Notification failed but request created:', err);
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Account deletion request submitted successfully. It will be reviewed by admin shortly.',
-      data: {
-        requestId: deletionRequest.id,
-        requestedAt: deletionRequest.requestedAt
-      }
-    });
-
-  } catch (error) {
-    console.error('Account deletion request error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Failed to submit deletion request. Please try again later.' }
-    });
-  }
-};
-
-const getMyDeletionRequest = async (req, res) => {
-  const userId = req.user.id;
-
-  try {
-    const request = await prisma.accountDeletionRequest.findFirst({
-      where: { userId },
-      orderBy: { requestedAt: 'desc' },
-      select: {
-        id: true,
-        reason: true,
-        status: true,
-        requestedAt: true,
-        reviewedAt: true,
-        reviewRemarks: true
-      }
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: { request: request || null }
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
-  }
-};
-
-// ───────────────────────────────────────────────
-// ADMIN ONLY ROUTES
-// ───────────────────────────────────────────────
-
-const getAllDeletionRequests = async (req, res) => {
-  const { status = 'pending', page = 1, limit = 10 } = req.query;
-
-  try {
-    const skip = (Number(page) - 1) * Number(limit);
-
-    const where = status ? { status } : {};
-
-    const [requests, total] = await Promise.all([
-      prisma.accountDeletionRequest.findMany({
-        where,
-        skip,
-        take: Number(limit),
-        orderBy: { requestedAt: 'desc' },
-        include: {
-          user: {
-            select: { id: true, full_name: true, username: true, phone: true, role: { select: { name: true } } }
-          },
-          reviewedBy: {
-            select: { full_name: true, username: true }
-          }
-        }
-      }),
-      prisma.accountDeletionRequest.count({ where })
-    ]);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        requests,
-        pagination: {
-          page: Number(page),
-          limit: Number(limit),
-          total,
-          totalPages: Math.ceil(total / limit),
-          hasNext: skip + Number(limit) < total
-        }
-      }
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
-  }
-};
-
-const reviewDeletionRequest = async (req, res) => {
-  const { requestId } = req.params;
-  const { action, remarks } = req.body; // action: "approve" | "reject"
-
-  if (!['approve', 'reject'].includes(action)) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: 'Action must be "approve" or "reject"' }
-    });
-  }
-
-  try {
-    const deletionRequest = await prisma.accountDeletionRequest.findUnique({
-      where: { id: Number(requestId) },
-      include: { user: true }
-    });
-
-    if (!deletionRequest) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Deletion request not found' }
-      });
-    }
-
-    if (deletionRequest.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: `Request is already ${deletionRequest.status}` }
-      });
-    }
-
-    let newStatus = action === 'approve' ? 'approved' : 'rejected';
-
-    await prisma.$transaction(async (tx) => {
-      // Update request
-      await tx.accountDeletionRequest.update({
-        where: { id: Number(requestId) },
-        data: {
-          status: newStatus,
-          reviewedAt: new Date(),
-          reviewedById: req.user.id,
-          reviewRemarks: remarks || null
-        }
-      });
-
-      // Agar approve → user ko inactive kar do
-      if (action === 'approve') {
-        await tx.user.update({
-          where: { id: deletionRequest.userId },
-          data: { status: 'inactive' }
-        });
-      }
-    });
-
-    // Optional: User ko notification bhej sakte hain
-
-    return res.status(200).json({
-      success: true,
-      message: `Request ${newStatus} successfully.`,
-      data: { status: newStatus }
-    });
-
-  } catch (error) {
-    console.error('Review deletion request error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
-  }
-};
 
 module.exports = {
   // OTP Login functions
   sendLoginOTP,
   verifyLoginOTP,
-  
+
   // Existing functions
   signup,
   loginWeb,
@@ -1409,9 +1198,5 @@ module.exports = {
   updateProfile,
   forgotPassword,
   resetPassword,
-  getDeliveryOfficers,
-  requestAccountDeletion,
-  getMyDeletionRequest,
-  getAllDeletionRequests,
-  reviewDeletionRequest
+  getDeliveryOfficers
 };

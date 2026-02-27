@@ -270,15 +270,6 @@ const createOrder = async (req, res) => {
     });
 
     if (assignedOfficerId) {
-      await prisma.order.update({
-        where: { id: order.id },
-        data: {
-          assigned_to_user_id: assignedOfficerId,
-          status: 'pending',
-          assigned_at: new Date(),
-          updated_at: new Date()
-        }
-      });
       // Send notification
       const io = req.app.get('io');
       await sendAssignmentNotification(order, order.assigned_to, io);
