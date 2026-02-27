@@ -7,16 +7,16 @@ const startVerification = async (req, res) => {
   const { order_id } = req.body;
 
   try {
-    const existingVerification = await prisma.verification.findUnique({
-      where: { order_id: parseInt(order_id) }
-    });
+    // const existingVerification = await prisma.verification.findUnique({
+    //   where: { order_id: parseInt(order_id) }
+    // });
 
-    if (existingVerification) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: 'Verification already started for this order' }
-      });
-    }
+    // if (existingVerification) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     error: { code: 400, message: 'Verification already started for this order' }
+    //   });
+    // }
 
     const order = await prisma.order.findUnique({
       where: { id: parseInt(order_id) }
