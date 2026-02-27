@@ -1059,6 +1059,13 @@ const getVerificationByOrderId = async (req, res) => {
     const verification = await prisma.verification.findUnique({
       where: { order_id: parseInt(order_id) },
       include: {
+        order: {
+          select: {
+            id: true,
+            order_ref: true,
+            status: true
+          }
+        },
         verification_officer: {
           select: { full_name: true, username: true }
         },
@@ -1067,24 +1074,20 @@ const getVerificationByOrderId = async (req, res) => {
         nextOfKin: true,
         locations: true,
         verification_locations: {
-          include: {
-            photos: true
-          }
+          include: { photos: true }
         },
         documents: true,
-        // ── IMPORTANT: This is what was missing ────────────────────────
         reviews: {
           include: {
             reviewer: {
               select: {
-                id: true,           // useful for frontend checks if needed
+                id: true,
                 full_name: true,
                 username: true
               }
             }
           }
         }
-        // ───────────────────────────────────────────────────────────────
       }
     });
 
@@ -1097,8 +1100,13 @@ const getVerificationByOrderId = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: { verification }
+      data: {
+        order_ref: verification.order.order_ref,
+        order_status: verification.order.status,
+        verification
+      }
     });
+
   } catch (error) {
     console.error('Get verification by order error:', error);
     return res.status(500).json({
