@@ -7,16 +7,16 @@ const startVerification = async (req, res) => {
   const { order_id } = req.body;
 
   try {
-    // const existingVerification = await prisma.verification.findUnique({
-    //   where: { order_id: parseInt(order_id) }
-    // });
+    const existingVerification = await prisma.verification.findUnique({
+      where: { order_id: parseInt(order_id) }
+    });
 
-    // if (existingVerification) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     error: { code: 400, message: 'Verification already started for this order' }
-    //   });
-    // }
+    if (existingVerification) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 400, message: 'Verification already started for this order' }
+      });
+    }
 
     const order = await prisma.order.findUnique({
       where: { id: parseInt(order_id) }
@@ -1133,23 +1133,23 @@ const submitVerificationReview = async (req, res) => {
     }
 
     if (verification.status !== 'completed') {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Verification must be completed before review' 
+      return res.status(400).json({
+        success: false,
+        error: 'Verification must be completed before review'
       });
     }
 
     if (verification.reviews.length >= 3) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Maximum of 3 reviews allowed' 
+      return res.status(400).json({
+        success: false,
+        error: 'Maximum of 3 reviews allowed'
       });
     }
 
     if (verification.reviews.some(r => r.reviewer_id === req.user.id)) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'You have already reviewed this verification' 
+      return res.status(400).json({
+        success: false,
+        error: 'You have already reviewed this verification'
       });
     }
 
@@ -1182,7 +1182,7 @@ const submitVerificationReview = async (req, res) => {
     // Reload verification with updated reviews
     const updated = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) },
-      include: { 
+      include: {
         reviews: true,
         order: { select: { id: true } }
       }
@@ -1226,7 +1226,7 @@ const submitVerificationReview = async (req, res) => {
       updates.push(
         prisma.order.update({
           where: { id: verification.order.id },
-          data: { 
+          data: {
             status: orderStatusUpdate,
             updated_at: new Date(),
           }
@@ -1263,9 +1263,9 @@ const submitVerificationReview = async (req, res) => {
 
   } catch (error) {
     console.error('Submit review error:', error);
-    return res.status(500).json({ 
-      success: false, 
-      error: { code: 500, message: 'Internal server error' } 
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
     });
   }
 };
