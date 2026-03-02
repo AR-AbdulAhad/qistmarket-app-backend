@@ -36,8 +36,8 @@ router.get('/officer/orders/confirmed', authenticateJWT, getMyConfirmedOrders);
 router.get('/officer/orders/cancelled', authenticateJWT, getMyCancelledOrders);
 
 router.get(
-  '/officer/customers', 
-  authenticateJWT, 
+  '/officer/customers',
+  authenticateJWT,
   getMyCustomersWithOrdersAndLedger
 );
 

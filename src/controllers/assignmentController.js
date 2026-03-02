@@ -4,7 +4,14 @@ const prisma = new PrismaClient();
 const getOfficerAssignments = async (req, res) => {
     const { role } = req.query;
     try {
-        const roleName = role === 'delivery' ? 'Delivery Agent' : 'Verification Officer';
+        let roleName;
+        if (role === 'delivery') {
+            roleName = 'Delivery Agent';
+        } else if (role === 'recovery') {
+            roleName = 'Recovery Officer';
+        } else {
+            roleName = 'Verification Officer';
+        }
         const officers = await prisma.user.findMany({
             where: { role: { name: roleName } },
             select: {

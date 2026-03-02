@@ -24,6 +24,7 @@ const notificationRoutes = require('./src/routes/notificationRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
 const addressRoutes = require('./src/routes/addressRoutes');
 const productRoutes = require('./src/routes/productRoutes');
+const recoveryRoutes = require('./src/routes/recoveryRoutes');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -346,6 +347,7 @@ app.use('/api', notificationRoutes);
 app.use('/api/assignments', assignmentRoutes);
 app.use('/api/address', addressRoutes);
 app.use('/api', productRoutes);
+app.use('/api/recovery', recoveryRoutes);
 
 // 404 handler
 app.use((req, res) => {

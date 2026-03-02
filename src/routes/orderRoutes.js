@@ -8,16 +8,25 @@ const {
   assignBulk,
   getOrderById,
   getVerificationOrders,
-  getMyDeliveryOrdersWithPagination,
   getApprovedOrders,
   assignDelivery,
   assignBulkDelivery,
   cancelOrder,
   updateOrderItem,
-  getDeliveryStatus
+  getDeliveryStatus,
+  getDeliveredOrders,
+  assignRecovery,
+  assignBulkRecovery,
+  getMyDeliveryOrdersWithPagination
 } = require('../controllers/ordersController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
+// Recovery Related Order Routes (Specific routes first)
+router.get('/orders/delivered-list', authenticateJWT, getDeliveredOrders);
+router.patch('/orders/:id/assign-recovery', authenticateJWT, assignRecovery);
+router.post('/orders/assign-bulk-recovery', authenticateJWT, assignBulkRecovery);
+
+// Standard Order Routes
 router.get('/orders/verification-pending', getVerificationOrders);
 router.get('/orders/delivery-pending', authenticateJWT, getApprovedOrders);
 router.get('/orders/delivery-status', authenticateJWT, getDeliveryStatus);

@@ -1429,8 +1429,6 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
 };
 
 const getMyCustomersWithOrdersAndLedger = async (req, res) => {
-  const officerId = req.user.id;
-
   const now = new Date();
   let startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   let endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
@@ -1443,16 +1441,13 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
       endOfMonth = new Date(y, m + 1, 1);
     }
   }
-
   try {
     const orders = await prisma.order.findMany({
-      where: {
-        assigned_to_user_id: officerId,
-        created_at: { gte: startOfMonth, lt: endOfMonth },
-      },
+      where: {}, // No filters - show all orders globally regardless of status or date
       include: {
         verification: { select: { status: true, start_time: true, end_time: true } },
         delivery: { select: { status: true, end_time: true, verified: true } },
+        payments: true,
       },
       orderBy: [{ customer_name: 'asc' }, { created_at: 'desc' }],
     });
@@ -1492,12 +1487,17 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
       const monthlyAmount = order.monthly_amount || 0;
       const totalMonths = order.months || 0;
 
+      // Actual payments from database
+      const dbPayments = order.payments || [];
+
+      const hasPaidAdvance = dbPayments.some(p => p.paymentType === 'advance') || isDelivered;
+
       let advancePayment = {
         amount: advanceAmount,
-        paid: isDelivered,
-        paidAt: deliveryDate ? deliveryDate.toISOString() : null,
-        status: isDelivered ? 'paid' : 'pending',
-        paidVia: isDelivered ? 'delivery' : null,
+        paid: hasPaidAdvance,
+        paidAt: dbPayments.find(p => p.paymentType === 'advance')?.paidAt || (isDelivered ? deliveryDate : null),
+        status: hasPaidAdvance ? 'paid' : 'pending',
+        paidVia: dbPayments.find(p => p.paymentType === 'advance')?.paymentMethod || (isDelivered ? 'delivery' : null),
       };
 
       let installmentLedger = [];
@@ -1507,20 +1507,27 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
       if (isDelivered && deliveryDate && totalMonths > 0) {
         let current = new Date(deliveryDate);
         current.setMonth(current.getMonth() + 1);
-        current.setDate(1);
-        const DUE_DAY = 5;
-        current.setDate(DUE_DAY);
+        current.setDate(5); // Qist Market standard due day
 
         for (let i = 0; i < totalMonths; i++) {
+          const mNum = i + 1;
           const dueDate = new Date(current);
+          const payment = dbPayments.find(p => p.paymentType === 'installment' && p.monthNumber === mNum);
+
+          if (payment) {
+            paidInstallments++;
+            pendingInstallments--;
+          }
+
           installmentLedger.push({
-            monthNumber: i + 1,
+            monthNumber: mNum,
             dueDate: dueDate.toISOString().split('T')[0],
             yearMonth: dueDate.toISOString().slice(0, 7),
             dueAmount: monthlyAmount,
-            paidAmount: 0,
-            remainingAmount: monthlyAmount,
-            status: 'pending',
+            paidAmount: payment ? payment.amount : 0,
+            remainingAmount: payment ? 0 : monthlyAmount,
+            status: payment ? 'paid' : (new Date() > dueDate ? 'overdue' : 'pending'),
+            paidAt: payment ? payment.paidAt : null,
           });
 
           // Move to next month
@@ -1528,9 +1535,9 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
         }
       }
 
+      const totalPaid = dbPayments.reduce((sum, p) => sum + p.amount, 0);
       const totalDue = advanceAmount + (monthlyAmount * totalMonths);
-      const totalPaid = isDelivered ? advanceAmount : 0;
-      const totalRemaining = totalDue - totalPaid;
+      const totalRemaining = Math.max(0, totalDue - totalPaid);
 
       const orderEntry = {
         order_id: order.id,

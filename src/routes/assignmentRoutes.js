@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const assignmentController = require('../controllers/assignmentController');
+const { getOfficerAssignments, updateOfficerAssignments } = require('../controllers/assignmentController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
-router.get('/officers', authenticateJWT, assignmentController.getOfficerAssignments);
-router.put('/:officerId', authenticateJWT, assignmentController.updateOfficerAssignments);
+router.get('/officers', authenticateJWT, getOfficerAssignments);
+router.put('/:officerId', authenticateJWT, updateOfficerAssignments);
 
 module.exports = router;

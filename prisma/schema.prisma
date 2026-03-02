@@ -1,22 +1,19 @@
-// prisma/schema.prisma
-
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   binaryTargets = ["native", "debian-openssl-1.0.x"]
 }
 
 datasource db {
   provider = "mysql"
-  url = env("DATABASE_URL")
+  url      = env("DATABASE_URL")
 }
 
-// Naya OTP model
 model Otp {
   id        Int      @id @default(autoincrement())
-  phone     String   // User ka phone number
-  otp       String   // 5-digit OTP
-  purpose   String   // 'login', 'verification', etc.
-  expiresAt DateTime // OTP expiry time
+  phone     String
+  otp       String
+  purpose   String
+  expiresAt DateTime
   isUsed    Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -27,46 +24,45 @@ model Otp {
 }
 
 model User {
-  id Int @id @default(autoincrement())
-  full_name String
-  role_id Int
-  username String @unique
-  password_hash String
-  email String? @unique
-  cnic String?
-  phone String?
-  device_id String?
-  status String @default("active")
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-  bio String? @db.Text
-  image String? @db.VarChar(255)
-  coverImage String? @db.VarChar(255)
-  permissions_json Json?
-  fcm_token String? @db.VarChar(255)
-  is_online            Boolean   @default(false)
-  last_known_latitude  Float?
-  last_known_longitude Float?
-  last_online_at       DateTime?
-  bike_km_range        Int?      // e.g. 50 km
-  working_hours_start  String?   @db.VarChar(30)  // "09:00"
-  working_hours_end    String?   @db.VarChar(30)  // "18:00"
-  // Relations
-  officerSessions OfficerSession[]
-  deletionRequests          AccountDeletionRequest[]   @relation("UserDeletionRequests")
-  reviewedDeletionRequests  AccountDeletionRequest[]   @relation("ReviewedBy")
-  notifications   Notification[]
-  role Role @relation(fields: [role_id], references: [id])
-  created_orders Order[]
-  assigned_orders Order[] @relation("assignedOrders")
-  verifications Verification[] @relation("verification_officer")
-  reset_token_hash String?
-  reset_token_expires DateTime?
-  verification_reviews VerificationReview[] @relation("verification_reviewer")
-  delivery_orders Order[] @relation("deliveryOrders")
-  deliveries Delivery[] @relation("delivery_agent")
-  officerAssignments OfficerAreaAssignment[] @relation("OfficerAssignments")
-  product_change_histories OrderProductHistory[] @relation("ProductChangeHistory")
+  id                       Int                     @id @default(autoincrement())
+  full_name                String
+  role_id                  Int
+  username                 String                  @unique
+  password_hash            String
+  email                    String?                 @unique
+  cnic                     String?
+  phone                    String?
+  device_id                String?
+  status                   String                  @default("active")
+  created_at               DateTime                @default(now())
+  updated_at               DateTime                @updatedAt
+  bio                      String?                 @db.Text
+  image                    String?                 @db.VarChar(255)
+  coverImage               String?                 @db.VarChar(255)
+  permissions_json         String?                 @db.LongText
+  fcm_token                String?                 @db.VarChar(255)
+  reset_token_expires      DateTime?
+  reset_token_hash         String?
+  bike_km_range            Int?
+  is_online                Boolean                 @default(false)
+  last_known_latitude      Float?
+  last_known_longitude     Float?
+  last_online_at           DateTime?
+  working_hours_end        String?                 @db.VarChar(30)
+  working_hours_start      String?                 @db.VarChar(30)
+  deliveries               Delivery[]              @relation("delivery_agent")
+  officerAssignments       OfficerAreaAssignment[] @relation("OfficerAssignments")
+  officerSessions          OfficerSession[]
+  assigned_orders          Order[]                 @relation("assignedOrders")
+  created_orders           Order[]
+  delivery_orders          Order[]                 @relation("deliveryOrders")
+  recovery_orders          Order[]                 @relation("recoveryOrders")
+  product_change_histories OrderProductHistory[]   @relation("ProductChangeHistory")
+  role                     Role                    @relation(fields: [role_id], references: [id])
+  verifications            Verification[]          @relation("verification_officer")
+  verification_reviews     VerificationReview[]    @relation("verification_reviewer")
+  notifications            Notification[]
+
   @@index([role_id])
   @@index([is_online])
   @@index([role_id, is_online])
@@ -74,307 +70,301 @@ model User {
 }
 
 model Role {
-  id Int @id @default(autoincrement())
-  name String
-  permissions_json Json?
-  // Relations
-  users User[]
+  id               Int     @id @default(autoincrement())
+  name             String
+  permissions_json String? @db.LongText
+  users            User[]
 }
 
 model Order {
-  id                  Int       @id @default(autoincrement())
-  order_ref           String    @unique
-  token_number        String    @unique
+  id                  Int                   @id @default(autoincrement())
+  order_ref           String                @unique
+  token_number        String                @unique
   customer_name       String
   whatsapp_number     String
   address             String
   city                String?
   area                String?
-  zone                String?
-  block               String?
-  street              String?
-  house_no            String?
-  gender              String? 
-  marital_status      String?
-  residential_type    String?
   product_name        String
   total_amount        Float
   advance_amount      Float
   monthly_amount      Float
   months              Int
   channel             String
-  status              String    @default("new")
-  created_at          DateTime  @default(now())
-  updated_at          DateTime  @updatedAt
+  status              String                @default("new")
+  created_at          DateTime              @default(now())
+  updated_at          DateTime              @updatedAt
   created_by_user_id  Int?
   assigned_to_user_id Int?
   delivery_officer_id Int?
-  is_delivered Boolean @default(false)
-  pickup_otp    String?     @db.VarChar(5)   // 6-digit OTP for pickup confirmation
-  otp_generated_at DateTime? 
-  otp_expires_at   DateTime?
-
-  cancelled_reason    String?   @db.Text
+  recovery_officer_id Int?
+  is_delivered        Boolean               @default(false)
+  otp_expires_at      DateTime?
+  otp_generated_at    DateTime?
+  pickup_otp          String?               @db.VarChar(5)
+  gender              String?
+  marital_status      String?
+  residential_type    String?
+  block               String?
+  house_no            String?
+  street              String?
+  zone                String?
   cancelled_at        DateTime?
-
-  // Relations (add this line)
-  delivery            Delivery? @relation("OrderDelivery")
-
-  created_by          User?     @relation(fields: [created_by_user_id], references: [id])
-  assigned_to         User?     @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
-  delivery_officer    User?     @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
-  verification        Verification? @relation("OrderVerification")
-  payments        OrderPayment[]
+  cancelled_reason    String?               @db.Text
+  delivery            Delivery?             @relation("OrderDelivery")
+  assigned_to         User?                 @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
+  created_by          User?                 @relation(fields: [created_by_user_id], references: [id])
+  delivery_officer    User?                 @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
+  recovery_officer    User?                 @relation("recoveryOrders", fields: [recovery_officer_id], references: [id])
+  payments            OrderPayment[]
   productHistories    OrderProductHistory[]
+  verification        Verification?         @relation("OrderVerification")
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
   @@index([delivery_officer_id])
+  @@index([recovery_officer_id])
 }
 
 model Verification {
-  id Int @id @default(autoincrement())
-  order_id Int @unique
+  id                      Int                    @id @default(autoincrement())
+  order_id                Int                    @unique
   verification_officer_id Int
-  status String @default("in_progress") // in_progress, completed, approved, rejected
-  start_time DateTime
-  end_time DateTime?
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-  // Relations
-  order Order @relation("OrderVerification", fields: [order_id], references: [id], onDelete: Cascade)
-  verification_officer User @relation("verification_officer", fields: [verification_officer_id], references: [id])
-  purchaser PurchaserVerification?
-  grantors GrantorVerification[]
-  nextOfKin NextOfKinVerification?
-  locations LocationTracking[]
-  verification_locations VerificationLocation[]
-  documents VerificationDocument[]
-  reviews VerificationReview[]
+  status                  String                 @default("in_progress")
+  start_time              DateTime
+  end_time                DateTime?
+  created_at              DateTime               @default(now())
+  updated_at              DateTime               @updatedAt
+  grantors                GrantorVerification[]
+  locations               LocationTracking[]
+  nextOfKin               NextOfKinVerification?
+  purchaser               PurchaserVerification?
+  order                   Order                  @relation("OrderVerification", fields: [order_id], references: [id], onDelete: Cascade)
+  verification_officer    User                   @relation("verification_officer", fields: [verification_officer_id], references: [id])
+  documents               VerificationDocument[]
+  verification_locations  VerificationLocation[]
+  reviews                 VerificationReview[]
+
   @@index([verification_officer_id])
 }
 
 model VerificationReview {
-  id Int @id @default(autoincrement())
+  id              Int          @id @default(autoincrement())
   verification_id Int
-  reviewer_id Int
-  approved Boolean
-  remarks String? @db.Text
-  created_at DateTime @default(now())
-  verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
-  reviewer User @relation("verification_reviewer", fields: [reviewer_id], references: [id])
+  reviewer_id     Int
+  approved        Boolean
+  remarks         String?      @db.Text
+  created_at      DateTime     @default(now())
+  reviewer        User         @relation("verification_reviewer", fields: [reviewer_id], references: [id])
+  verification    Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+
   @@index([verification_id])
   @@index([reviewer_id])
 }
 
-enum EmploymentType {
-  EMPLOYED
-  SELF_EMPLOYED
-}
-
 model PurchaserVerification {
-  id Int @id @default(autoincrement())
-  verification_id Int @unique
-  name String
-  father_husband_name String
-  present_address     String
-  present_zone        String?
-  present_area        String?
-  present_block       String?
-  present_street      String?
-  present_house_no    String?
-  present_period_of_stay String?
-  permanent_address   String
-  permanent_zone      String?
-  permanent_area      String?
-  permanent_block     String?
-  permanent_street    String?
-  permanent_house_no  String?
+  id                       Int             @id @default(autoincrement())
+  verification_id          Int             @unique
+  name                     String
+  father_husband_name      String
+  present_address          String
+  permanent_address        String
+  utility_bill_url         String?
+  cnic_number              String
+  cnic_front_url           String?
+  cnic_back_url            String?
+  telephone_number         String
+  employer_name            String
+  employer_address         String
+  designation              String
+  official_number          String?
+  service_card_url         String?
+  years_in_company         String?
+  gross_salary             String?
+  signature_url            String?
+  nearest_location         String
+  is_verified              Boolean         @default(false)
+  business_address         String?
+  business_name            String?
+  employment_type          EmploymentType? @default(EMPLOYED)
+  established_since        String?
+  job_type                 String?
+  net_income               String?
+  permanent_area           String?
+  permanent_block          String?
+  permanent_house_no       String?
   permanent_period_of_stay String?
-  utility_bill_url String?
-  cnic_number String
-  cnic_front_url String?
-  cnic_back_url String?
-  telephone_number String
-  employment_type     EmploymentType?   @default(EMPLOYED)
-  job_type            String?
-  employer_name String
-  employer_address String
-  designation String
-  official_number String?
-  business_name       String?
-  established_since   String?
-  business_address    String?
-  net_income          String?
-  service_card_url String?
-  years_in_company String?
-  gross_salary String?
+  permanent_street         String?
+  permanent_zone           String?
+  present_area             String?
+  present_block            String?
+  present_house_no         String?
+  present_period_of_stay   String?
+  present_street           String?
+  present_zone             String?
+  verification             Verification    @relation(fields: [verification_id], references: [id], onDelete: Cascade)
 
-  signature_url String?
-  nearest_location String
-  is_verified Boolean @default(false)
-  // Relations
-  verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
   @@index([verification_id])
 }
 
 model GrantorVerification {
-  id Int @id @default(autoincrement())
-  verification_id Int
-  grantor_number Int // 1 or 2
-  name String
-  father_husband_name String
-  present_address     String
-  present_zone        String?
-  present_area        String?
-  present_block       String?
-  present_street      String?
-  present_house_no    String?
-  present_period_of_stay String?
-  permanent_address   String
-  permanent_zone      String?
-  permanent_area      String?
-  permanent_block     String?
-  permanent_street    String?
-  permanent_house_no  String?
-  permanent_period_of_stay String?
-  utility_bill_url String?
-  cnic_number String
-  cnic_front_url String?
-  cnic_back_url String?
-  telephone_number String
-  employment_type     EmploymentType?   @default(EMPLOYED)
-  job_type            String?
-  designation String
-  official_number String?
-  service_card_url String?
-  office_address String
-  company_name String?
-  years_in_company String?
-  monthly_income String?
-  business_name       String?
-  established_since   String?
-  business_address    String?
-  net_income          String?
+  id                       Int             @id @default(autoincrement())
+  verification_id          Int
+  grantor_number           Int
+  name                     String
+  father_husband_name      String
+  present_address          String
+  permanent_address        String
+  utility_bill_url         String?
+  cnic_number              String
+  cnic_front_url           String?
+  cnic_back_url            String?
+  telephone_number         String
+  designation              String
+  official_number          String?
+  service_card_url         String?
+  office_address           String
+  company_name             String?
+  years_in_company         String?
+  monthly_income           String?
   full_residential_address String
-  relationship String
-  signature_url String?
-  nearest_location String
-  is_verified Boolean @default(false)
-  // Relations
-  verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  relationship             String
+  signature_url            String?
+  nearest_location         String
+  is_verified              Boolean         @default(false)
+  business_address         String?
+  business_name            String?
+  employment_type          EmploymentType? @default(EMPLOYED)
+  established_since        String?
+  job_type                 String?
+  net_income               String?
+  permanent_area           String?
+  permanent_block          String?
+  permanent_house_no       String?
+  permanent_period_of_stay String?
+  permanent_street         String?
+  permanent_zone           String?
+  present_area             String?
+  present_block            String?
+  present_house_no         String?
+  present_period_of_stay   String?
+  present_street           String?
+  present_zone             String?
+  verification             Verification    @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+
   @@unique([verification_id, grantor_number])
   @@index([verification_id])
 }
 
 model NextOfKinVerification {
-  id Int @id @default(autoincrement())
-  verification_id Int @unique
-  name String
-  cnic_number String
-  relation String
-  phone_number String
-  // Relations
-  verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  id              Int          @id @default(autoincrement())
+  verification_id Int          @unique
+  name            String
+  cnic_number     String
+  relation        String
+  phone_number    String
+  verification    Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+
   @@index([verification_id])
 }
 
 model LocationTracking {
-  id Int @id @default(autoincrement())
+  id              Int          @id @default(autoincrement())
   verification_id Int
-  latitude Float
-  longitude Float
-  accuracy Float?
-  label String
-  timestamp DateTime @default(now())
-  // Relations
-  verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  latitude        Float
+  longitude       Float
+  accuracy        Float?
+  label           String
+  timestamp       DateTime     @default(now())
+  verification    Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+
   @@index([verification_id])
 }
 
 model VerificationLocation {
-  id Int @id @default(autoincrement())
+  id              Int                         @id @default(autoincrement())
   verification_id Int
-  location_type String
-  latitude Float?
-  longitude Float?
-  address String?
-  label String
-  person_type String?
-  person_id Int?
-  created_at DateTime @default(now())
-  verification Verification @relation(fields: [verification_id], references: [id])
-  photos VerificationLocationPhoto[] // One-to-many relationship
+  location_type   String
+  latitude        Float?
+  longitude       Float?
+  address         String?
+  label           String
+  person_type     String?
+  person_id       Int?
+  created_at      DateTime                    @default(now())
+  verification    Verification                @relation(fields: [verification_id], references: [id])
+  photos          VerificationLocationPhoto[]
+
   @@index([verification_id])
   @@index([person_type, person_id])
 }
 
 model VerificationLocationPhoto {
-  id Int @id @default(autoincrement())
+  id                       Int                  @id @default(autoincrement())
   verification_location_id Int
-  file_url String
-  uploaded_at DateTime @default(now())
-  verification_location VerificationLocation @relation(fields: [verification_location_id], references: [id])
+  file_url                 String
+  uploaded_at              DateTime             @default(now())
+  verification_location    VerificationLocation @relation(fields: [verification_location_id], references: [id])
+
   @@index([verification_location_id])
 }
 
 model VerificationDocument {
-  id Int @id @default(autoincrement())
+  id              Int          @id @default(autoincrement())
   verification_id Int
-  document_type String // cnic_front, cnic_back, utility_bill, service_card, photo, signature
-  person_type String // purchaser, grantor1, grantor2, nextOfKin
-  person_id Int?
-  file_url String
-  label String?
-  uploaded_at DateTime @default(now())
-  // Relations
-  verification Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+  document_type   String
+  person_type     String
+  person_id       Int?
+  file_url        String
+  label           String?
+  uploaded_at     DateTime     @default(now())
+  verification    Verification @relation(fields: [verification_id], references: [id], onDelete: Cascade)
+
   @@index([verification_id])
   @@index([person_type, person_id])
 }
 
 model Delivery {
-  id Int @id @default(autoincrement())
-  order_id Int @unique
+  id                Int              @id @default(autoincrement())
+  order_id          Int              @unique
   delivery_agent_id Int
-  status String @default("pending") // pending, in_progress, completed
-  start_time DateTime?
-  end_time DateTime?
-  verified Boolean @default(false)
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-  // Relations
-  order Order @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
-  delivery_agent User @relation("delivery_agent", fields: [delivery_agent_id], references: [id])
-  uploads DeliveryUpload[]
+  status            String           @default("pending")
+  start_time        DateTime?
+  end_time          DateTime?
+  verified          Boolean          @default(false)
+  created_at        DateTime         @default(now())
+  updated_at        DateTime         @updatedAt
+  delivery_agent    User             @relation("delivery_agent", fields: [delivery_agent_id], references: [id])
+  order             Order            @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
+  uploads           DeliveryUpload[]
+
   @@index([delivery_agent_id])
 }
 
 model DeliveryUpload {
-  id Int @id @default(autoincrement())
+  id          Int      @id @default(autoincrement())
   delivery_id Int
-  upload_type String // face_photo, location_photo, house_photo, location_link
-  file_url String?
-  link String?
-  tag String?
+  upload_type String
+  file_url    String?
+  link        String?
+  tag         String?
   uploaded_at DateTime @default(now())
-  // Relations
-  delivery Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
+  delivery    Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
+
   @@index([delivery_id])
 }
 
 model Notification {
-  id          Int       @id @default(autoincrement())
-  userId      Int
-  title       String
-  message     String
-  type        String    // e.g. "verification_start", "verification_complete", "review_submitted", "cancelled"
-  relatedId   Int?      // verification.id ya order.id — deep linking ke liye
-  isRead      Boolean   @default(false)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  title     String
+  message   String
+  type      String
+  relatedId Int?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([createdAt])
@@ -382,34 +372,14 @@ model Notification {
   @@map("notifications")
 }
 
-model AccountDeletionRequest {
-  id              Int       @id @default(autoincrement())
-  userId          Int
-  reason          String?   @db.Text
-  status          String    @default("pending") // pending, approved, rejected
-  requestedAt     DateTime  @default(now())
-  reviewedAt      DateTime?
-  reviewedById    Int?
-  reviewRemarks   String?   @db.Text
-
-  // Relations – now properly connected both ways
-  user            User      @relation("UserDeletionRequests", fields: [userId], references: [id], onDelete: Cascade)
-  reviewedBy      User?     @relation("ReviewedBy", fields: [reviewedById], references: [id])
-
-  @@index([userId])
-  @@index([status])
-  @@index([requestedAt])
-}
-
 model OfficerSession {
-  id               Int      @id @default(autoincrement())
+  id               Int       @id @default(autoincrement())
   officer_id       Int
   start_time       DateTime
   end_time         DateTime?
   duration_minutes Int?
-  created_at       DateTime @default(now())
-
-  officer          User     @relation(fields: [officer_id], references: [id], onDelete: Cascade)
+  created_at       DateTime  @default(now())
+  officer          User      @relation(fields: [officer_id], references: [id], onDelete: Cascade)
 
   @@index([officer_id])
   @@index([start_time])
@@ -419,27 +389,29 @@ model OfficerSession {
 model OrderPayment {
   id            Int      @id @default(autoincrement())
   order_id      Int
-  order         Order    @relation(fields: [order_id], references: [id])
-  paymentType   String   // "advance" or "installment"
-  monthNumber   Int?     // null for advance
+  paymentType   String
+  monthNumber   Int?
   amount        Float
   paidAt        DateTime @default(now())
   paymentMethod String?
-  collectedBy   Int?     // user id of delivery/verification officer
+  collectedBy   Int?
+  is_submitted  Boolean  @default(false)
+  submitted_at  DateTime?
   created_at    DateTime @default(now())
+  order         Order    @relation(fields: [order_id], references: [id])
 
   @@index([order_id])
-    @@index([order_id, paymentType])
+  @@index([order_id, paymentType])
 }
 
 model OfficerAreaAssignment {
   id        Int      @id @default(autoincrement())
   user_id   Int
-  user      User     @relation("OfficerAssignments", fields: [user_id], references: [id], onDelete: Cascade)
   zone      String
   area      String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  user      User     @relation("OfficerAssignments", fields: [user_id], references: [id], onDelete: Cascade)
 
   @@unique([user_id, zone, area])
   @@index([user_id])
@@ -447,14 +419,14 @@ model OfficerAreaAssignment {
 }
 
 model OrderProductHistory {
-  id                Int      @id @default(autoincrement())
-  order_id          Int
-  previous_product  String
-  current_product   String
-  changed_at        DateTime @default(now())
+  id                 Int      @id @default(autoincrement())
+  order_id           Int
+  previous_product   String
+  current_product    String
+  changed_at         DateTime @default(now())
   changed_by_user_id Int
-  order             Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  changed_by        User     @relation("ProductChangeHistory", fields: [changed_by_user_id], references: [id])
+  changed_by         User     @relation("ProductChangeHistory", fields: [changed_by_user_id], references: [id])
+  order              Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
 
   @@index([order_id])
   @@index([changed_by_user_id])
@@ -472,10 +444,11 @@ model Zone {
   id      Int    @id @default(autoincrement())
   name    String
   city_id Int
-  city    City   @relation(fields: [city_id], references: [id], onDelete: Cascade)
   areas   Area[]
+  city    City   @relation(fields: [city_id], references: [id], onDelete: Cascade)
 
   @@unique([name, city_id])
+  @@index([city_id], map: "zones_city_id_fkey")
   @@map("zones")
 }
 
@@ -486,5 +459,11 @@ model Area {
   zone    Zone   @relation(fields: [zone_id], references: [id], onDelete: Cascade)
 
   @@unique([name, zone_id])
+  @@index([zone_id], map: "areas_zone_id_fkey")
   @@map("areas")
+}
+
+enum EmploymentType {
+  EMPLOYED
+  SELF_EMPLOYED
 }

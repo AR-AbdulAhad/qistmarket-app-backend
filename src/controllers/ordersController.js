@@ -1130,6 +1130,137 @@ const getDeliveryStatus = async (req, res) => {
   }
 };
 
+const getDeliveredOrders = async (req, res) => {
+  const { page = 1, limit = 10, search = '' } = req.query;
+  const skip = (Number(page) - 1) * Number(limit);
+  const take = Number(limit);
+
+  try {
+    const where = {
+      status: 'delivered',
+    };
+
+    if (search.trim()) {
+      where.OR = [
+        { customer_name: { contains: search } },
+        { whatsapp_number: { contains: search } },
+        { order_ref: { contains: search } },
+      ];
+    }
+
+    const [orders, total] = await prisma.$transaction([
+      prisma.order.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { updated_at: 'desc' },
+        include: {
+          recovery_officer: {
+            select: { id: true, full_name: true, username: true }
+          },
+          created_by: {
+            select: { id: true, full_name: true, username: true }
+          }
+        }
+      }),
+      prisma.order.count({ where }),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders,
+        pagination: {
+          total,
+          page: Number(page),
+          limit: Number(limit),
+          totalPages: Math.ceil(total / take),
+        },
+      },
+    });
+  } catch (error) {
+    console.error('getDeliveredOrders error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const assignRecovery = async (req, res) => {
+  const { id } = req.params;
+  const { user_id, action = 'assign' } = req.body;
+
+  try {
+    if (action === 'unassign') {
+      const updatedOrder = await prisma.order.update({
+        where: { id: Number(id) },
+        data: { recovery_officer_id: null },
+        include: { recovery_officer: { select: { id: true, username: true, full_name: true } } }
+      });
+      return res.status(200).json({
+        success: true,
+        message: 'Recovery officer unassigned successfully',
+        data: { order: updatedOrder }
+      });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'recovery_officer_id required' });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: Number(id) },
+      data: { recovery_officer_id: Number(user_id) },
+      include: { recovery_officer: { select: { id: true, username: true, full_name: true } } }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Recovery officer assigned successfully',
+      data: { order: updatedOrder }
+    });
+  } catch (error) {
+    console.error('assignRecovery error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const assignBulkRecovery = async (req, res) => {
+  const { order_ids, user_id, action = 'assign' } = req.body;
+
+  if (!Array.isArray(order_ids) || order_ids.length === 0) {
+    return res.status(400).json({ success: false, message: 'order_ids required' });
+  }
+
+  try {
+    if (action === 'unassign') {
+      await prisma.order.updateMany({
+        where: { id: { in: order_ids.map(Number) } },
+        data: { recovery_officer_id: null }
+      });
+      return res.status(200).json({
+        success: true,
+        message: `${order_ids.length} orders unassigned from recovery`
+      });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'user_id required' });
+    }
+
+    await prisma.order.updateMany({
+      where: { id: { in: order_ids.map(Number) } },
+      data: { recovery_officer_id: Number(user_id) }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `${order_ids.length} orders assigned for recovery`
+    });
+  } catch (error) {
+    console.error('assignBulkRecovery error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   createOrder,
   getOrders,
@@ -1144,5 +1275,8 @@ module.exports = {
   assignBulkDelivery,
   cancelOrder,
   updateOrderItem,
-  getDeliveryStatus
+  getDeliveryStatus,
+  getDeliveredOrders,
+  assignRecovery,
+  assignBulkRecovery
 };
