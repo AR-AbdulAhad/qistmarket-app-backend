@@ -7,19 +7,19 @@ const WATI_BROADCAST_NAME = process.env.WATI_BROADCAST_NAME;
 const WATI_BASE_URL = process.env.WATI_BASE_URL;
 
 const sendCode = async (req, res) => {
-  const { code, phone } = req.body;
+  const { code, phone, name } = req.body;
 
   if (!/^\d{5}$/.test(code)) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Code must be a 5-digit number.' 
+      error: 'Code must be a 5-digit number.'
     });
   }
 
   if (!/^03\d{9}$/.test(phone)) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Phone must be an 11-digit Pakistani number starting with 03.' 
+      error: 'Phone must be an 11-digit Pakistani number starting with 03.'
     });
   }
 
@@ -27,10 +27,20 @@ const sendCode = async (req, res) => {
 
   const url = `${WATI_BASE_URL}/api/v2/sendTemplateMessage?whatsappNumber=${whatsappNumber}`;
 
+  let template_name = WATI_TEMPLATE_NAME;
+  let broadcast_name = WATI_BROADCAST_NAME;
+  const parameters = [{ name: '1', value: code }];
+
+  if (name) {
+    template_name = process.env.WATI_GRANTORS_OTP_TEMPLATE_NAME;
+    broadcast_name = process.env.WATI_GRANTORS_OTP_BROADCAST_NAME;
+    parameters.push({ name: 'name', value: name });
+  }
+
   const payload = {
-    template_name: WATI_TEMPLATE_NAME,
-    broadcast_name: WATI_BROADCAST_NAME,
-    parameters: [{ name: '1', value: code }]
+    template_name,
+    broadcast_name,
+    parameters
   };
 
   try {
@@ -55,9 +65,9 @@ const sendCode = async (req, res) => {
 
     if (error.response) {
       status = error.response.status;
-      errorMessage = error.response.data?.error || 
-                     error.response.data?.info || 
-                     'Wati API returned an error.';
+      errorMessage = error.response.data?.error ||
+        error.response.data?.info ||
+        'Wati API returned an error.';
     } else if (error.request) {
       errorMessage = 'No response from Wati server. Check network or base URL.';
     } else {
