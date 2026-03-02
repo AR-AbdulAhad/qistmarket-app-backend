@@ -877,7 +877,7 @@ const getApprovedOrders = async (req, res) => {
 
   try {
     const where = {
-      status: "approved"
+      status: { in: ['picked', 'approved'] },
     };
 
     if (search.trim()) {
@@ -897,7 +897,16 @@ const getApprovedOrders = async (req, res) => {
         include: {
           verification: {
             include: {
-              verification_officer: { select: { full_name: true, username: true } }
+              verification_officer: {
+                select: { full_name: true, username: true }
+              }
+            }
+          },
+          created_by: {
+            select: {
+              id: true,
+              full_name: true,
+              username: true,
             }
           }
         }
@@ -944,7 +953,7 @@ const assignDelivery = async (req, res) => {
       where: { id: Number(id) },
       data: {
         delivery_officer_id: Number(user_id),
-        status: 'picked_up'
+        status: 'picked'
       },
       include: {
         delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
@@ -978,7 +987,7 @@ const assignBulkDelivery = async (req, res) => {
       where: { id: { in: order_ids.map(Number) } },
       data: {
         delivery_officer_id: Number(user_id),
-        status: 'picked_up'
+        status: 'picked'
       }
     });
 
