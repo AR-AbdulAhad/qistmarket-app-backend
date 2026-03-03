@@ -311,6 +311,19 @@ const markPaymentPaid = async (req, res) => {
   const { order_id, paymentType, monthNumber, amount, paymentMethod = 'cash' } = req.body;
 
   try {
+    // Check if already paid
+    const existingPayment = await prisma.orderPayment.findFirst({
+      where: {
+        order_id: parseInt(order_id),
+        paymentType,
+        monthNumber: monthNumber ? parseInt(monthNumber) : null,
+      },
+    });
+
+    if (existingPayment) {
+      return res.status(400).json({ success: false, error: 'Already paid' });
+    }
+
     const payment = await prisma.orderPayment.create({
       data: {
         order_id: parseInt(order_id),
@@ -322,7 +335,7 @@ const markPaymentPaid = async (req, res) => {
       }
     });
 
-    return res.json({ success: true, data: payment });
+    return res.json({ success: true, data: payment, message: 'Payment recorded successfully' });
   } catch (error) {
     console.error('markPaymentPaid error:', error);
     return res.status(500).json({ success: false, error: 'Failed to record payment' });
@@ -405,6 +418,28 @@ const getDueOverdueInstallments = async (req, res) => {
       }
     }
 
+    // Temporary test data
+    overdue.push({
+      order_id: 9991,
+      order_ref: 'TEST-001',
+      customer_name: 'Test Customer 1',
+      whatsapp_number: '03001234567',
+      address: 'House 123, Street 4, Test Colony',
+      monthNumber: 1,
+      dueDate: '2024-01-05',
+      amount: 5000,
+    });
+    overdue.push({
+      order_id: 9992,
+      order_ref: 'TEST-002',
+      customer_name: 'Test Customer 2',
+      whatsapp_number: '03007654321',
+      address: 'Plot 456, Area 51, Test City',
+      monthNumber: 2,
+      dueDate: '2024-02-05',
+      amount: 3500,
+    });
+
     return res.json({ success: true, data: { overdue } });
   } catch (error) {
     console.error('getDueOverdueInstallments error:', error);
@@ -416,6 +451,18 @@ const submitCollections = async (req, res) => {
   const officerId = req.user.id;
 
   try {
+    // Check if there are any unsubmitted collections
+    const unsubmitted = await prisma.orderPayment.count({
+      where: {
+        collectedBy: officerId,
+        is_submitted: false,
+      }
+    });
+
+    if (unsubmitted === 0) {
+      return res.status(400).json({ success: false, error: 'No unsubmitted collections found' });
+    }
+
     const updated = await prisma.orderPayment.updateMany({
       where: {
         collectedBy: officerId,
@@ -427,7 +474,7 @@ const submitCollections = async (req, res) => {
       }
     });
 
-    return res.json({ success: true, data: { count: updated.count } });
+    return res.json({ success: true, data: { count: updated.count, message: 'Collections submitted successfully' } });
   } catch (error) {
     console.error('submitCollections error:', error);
     return res.status(500).json({ success: false, error: 'Failed to submit collections' });
