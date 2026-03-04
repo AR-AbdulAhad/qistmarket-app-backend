@@ -451,7 +451,6 @@ const submitCollections = async (req, res) => {
   const officerId = req.user.id;
 
   try {
-    // Check if there are any unsubmitted collections
     const unsubmitted = await prisma.orderPayment.count({
       where: {
         collectedBy: officerId,

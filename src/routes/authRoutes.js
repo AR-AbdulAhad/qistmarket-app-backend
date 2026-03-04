@@ -4,14 +4,9 @@ const upload = require('../middlewares/uploadMiddleware');
 const fixUploadPath = require('../middlewares/fixUploadPath');
 
 const {
-  // OTP Login functions
   sendLoginOTP,
   verifyLoginOTP,
-
-  // Existing functions
   signup,
-  loginWeb,
-  loginApp,
   toggleUserStatus,
   getUsers,
   editUser,
@@ -20,26 +15,22 @@ const {
   getMe,
   updateProfile,
   getVerificationOfficers,
-  forgotPassword,
-  resetPassword,
-  getDeliveryOfficers
+  getDeliveryOfficers,
+  sendWebLoginOTP,
+  verifyWebLoginOTP
 } = require('../controllers/authController');
 
 const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
 
 // ==================== PUBLIC ROUTES ====================
 
-// OTP Login Routes (NO AUTHENTICATION REQUIRED)
+// OTP Web Login Routes
+router.post('/login/web/send-otp', sendWebLoginOTP);    // Step 1: Send OTP for Web
+router.post('/login/web/verify-otp', verifyWebLoginOTP); // Step 2: Verify OTP & Login for Web
+
+// OTP Login Routes for App (existing)
 router.post('/login/send-otp', sendLoginOTP);        // Step 1: Send OTP
 router.post('/login/verify-otp', verifyLoginOTP);    // Step 2: Verify OTP & Login
-
-// Password-based login (keep for backward compatibility)
-router.post('/login/web', loginWeb);
-router.post('/login/app', loginApp);
-
-// Password reset routes
-router.post('/forgot-password', forgotPassword);
-router.post('/reset-password', resetPassword);
 
 // ==================== PROTECTED ROUTES ====================
 

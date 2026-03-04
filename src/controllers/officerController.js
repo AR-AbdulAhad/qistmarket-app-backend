@@ -73,10 +73,10 @@ const getAllVerificationOfficers = async (req, res) => {
       last_known_location:
         !o.is_online && o.last_known_latitude
           ? {
-              latitude: o.last_known_latitude,
-              longitude: o.last_known_longitude,
-              timestamp: o.last_online_at,
-            }
+            latitude: o.last_known_latitude,
+            longitude: o.last_known_longitude,
+            timestamp: o.last_online_at,
+          }
           : null,
       bike_km_range: o.bike_km_range,
       working_hours:
@@ -95,10 +95,6 @@ const getAllVerificationOfficers = async (req, res) => {
 };
 
 const updateOfficerProfile = async (req, res) => {
-  if (req.user.role !== 'Verification Officer') {
-    return res.status(403).json({ success: false, error: { code: 403, message: 'Only Verification Officer can update profile' } });
-  }
-
   const { bike_km_range, working_hours_start, working_hours_end } = req.body;
 
   try {

@@ -28,7 +28,7 @@ model User {
   full_name                String
   role_id                  Int
   username                 String                  @unique
-  password_hash            String
+  password_hash            String?
   email                    String?                 @unique
   cnic                     String?
   phone                    String?

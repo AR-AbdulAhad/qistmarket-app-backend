@@ -1,7 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
-const bcrypt = require('bcrypt');
-const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { jwtSecret } = require('../config/jwtConfig');
 const sendEmail = require('../utils/sendEmail');
@@ -118,13 +116,9 @@ const sendLoginOTP = async (req, res) => {
     const otp = await saveOTP(identifier, 'login'); // Save with identifier (phone/email)
 
     // Send OTP based on identifier type
-    let deliveryMethod = '';
-    let deliveryResponse;
-
     if (isPhone) {
       // Send OTP via WhatsApp
-      deliveryResponse = await sendOTP(identifier, otp);
-      deliveryMethod = 'WhatsApp';
+      await sendOTP(identifier, otp);
     } else {
       // Send OTP via Email
       const emailHtml = `
@@ -142,16 +136,12 @@ const sendLoginOTP = async (req, res) => {
         </div>
       `;
 
-      deliveryResponse = await sendEmail({
+      await sendEmail({
         to: identifier,
         subject: 'Login OTP Verification',
         html: emailHtml
-      }).then(() => ({ success: true }))
-        .catch(error => ({ success: false, error: error.message }));
-
-      deliveryMethod = 'Email';
+      });
     }
-
 
     return res.status(200).json({
       success: true,
@@ -160,150 +150,200 @@ const sendLoginOTP = async (req, res) => {
     });
 
   } catch (error) {
+    console.error('sendLoginOTP error:', error);
     return res.status(500).json({
       success: false,
       error: { code: 500, message: 'Internal server error. Please try again.' }
     });
+  }
+};
+
+const sendWebLoginOTP = async (req, res) => {
+  const { identifier } = req.body;
+
+  if (!identifier) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Phone number or email is required.' }
+    });
+  }
+
+  const isPhone = /^03\d{9}$/.test(identifier);
+  const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
+
+  if (!isPhone && !isEmail) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Invalid phone or email format.' }
+    });
+  }
+
+  try {
+    let whereCondition = {};
+    if (isPhone) {
+      whereCondition = { phone: identifier, role_id: { in: [4, 5, 6, 7, 8] } };
+    } else {
+      whereCondition = { email: identifier.toLowerCase(), role_id: { in: [4, 5, 6, 7, 8] } };
+    }
+
+    const user = await prisma.user.findFirst({ where: whereCondition });
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Web account not found.' } });
+    }
+
+    if (user.status !== 'active') {
+      return res.status(403).json({ success: false, error: { code: 403, message: 'Account is not active.' } });
+    }
+
+    const otp = await saveOTP(identifier, 'web_login');
+
+    if (isPhone) {
+      await sendOTP(identifier, otp);
+    } else {
+      const emailHtml = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <h2>Dashboard Login OTP</h2>
+          <p>Your OTP for dashboard login is: <strong>${otp}</strong></p>
+          <p>This OTP is valid for 10 minutes.</p>
+        </div>
+      `;
+      await sendEmail({ to: identifier, subject: 'Dashboard Login OTP', html: emailHtml });
+    }
+
+    return res.json({ success: true, message: 'OTP sent successfully.' });
+  } catch (error) {
+    console.error('sendWebLoginOTP error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
 
 const verifyLoginOTP = async (req, res) => {
   const { identifier, otp, device_id, fcm_token } = req.body;
 
-  // Validate required fields
   if (!identifier || !otp) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: 'Phone number/email and OTP are required.' }
-    });
-  }
-
-  // Validate OTP format (5 digits)
-  if (!/^\d{5}$/.test(otp)) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: 'OTP must be a 5-digit number.' }
-    });
+    return res.status(400).json({ success: false, error: { code: 400, message: 'Identifier and OTP are required.' } });
   }
 
   try {
-    // Verify OTP
     const verification = await verifyOTP(identifier, otp, 'login');
-
     if (!verification.valid) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: verification.message }
-      });
+      return res.status(401).json({ success: false, error: { code: 401, message: verification.message } });
     }
 
-    // Determine if identifier is phone or email
     const isPhone = /^03\d{9}$/.test(identifier);
     const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
 
-    // Find user by phone or email
     let whereCondition = {};
     if (isPhone) {
-      whereCondition = {
-        phone: identifier,
-        role_id: { in: [1, 2, 3] }
-      };
+      whereCondition = { phone: identifier, role_id: { in: [1, 2, 3] } };
     } else if (isEmail) {
-      whereCondition = {
-        email: identifier.toLowerCase(),
-        role_id: { in: [1, 2, 3] }
-      };
-    } else {
-      return res.status(400).json({
-        success: false,
-        error: { code: 400, message: 'Invalid identifier format.' }
-      });
+      whereCondition = { email: identifier.toLowerCase(), role_id: { in: [1, 2, 3] } };
     }
 
     const user = await prisma.user.findFirst({
       where: whereCondition,
-      include: {
-        role: {
-          select: {
-            id: true,
-            name: true,
-            permissions_json: true
-          }
-        }
-      }
+      include: { role: true }
     });
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'User account not found.' }
-      });
+      return res.status(404).json({ success: false, error: { code: 404, message: 'User not found.' } });
     }
 
-    // Double-check account status
     if (user.status !== 'active') {
-      return res.status(403).json({
-        success: false,
-        error: { code: 403, message: 'Your account is not active.' }
-      });
+      return res.status(403).json({ success: false, error: { code: 403, message: 'Account is not active.' } });
     }
 
-    // Update device and FCM token if provided
     const updateData = {};
     if (device_id) updateData.device_id = device_id;
     if (fcm_token) updateData.fcm_token = fcm_token;
 
     if (Object.keys(updateData).length > 0) {
-      await prisma.user.update({
-        where: { id: user.id },
-        data: updateData
-      });
+      await prisma.user.update({ where: { id: user.id }, data: updateData });
     }
 
-    // Prepare JWT payload
     const payload = {
       id: user.id,
       full_name: user.full_name,
       email: user.email,
       username: user.username,
-      cnic: user.cnic,
       phone: user.phone,
       role_id: user.role_id,
       role: user.role.name,
-      device_id: user.device_id || device_id,
-      fcm_token: user.fcm_token || fcm_token,
-      bio: user.bio,
-      image: user.image,
-      coverImage: user.coverImage,
       permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
-      loginMethod: 'otp'
     };
 
-    // Generate JWT token (30 days expiry for mobile app)
     const token = jwt.sign(payload, jwtSecret);
 
-    return res.json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      user: payload,
-      expiresIn: '30 days'
+    return res.json({ success: true, message: 'Login successful.', token, user: payload });
+  } catch (error) {
+    console.error('verifyLoginOTP error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+const verifyWebLoginOTP = async (req, res) => {
+  const { identifier, otp } = req.body;
+
+  if (!identifier || !otp) {
+    return res.status(400).json({ success: false, error: { code: 400, message: 'Identifier and OTP are required.' } });
+  }
+
+  try {
+    const verification = await verifyOTP(identifier, otp, 'web_login');
+    if (!verification.valid) {
+      return res.status(401).json({ success: false, error: { code: 401, message: verification.message } });
+    }
+
+    const isPhone = /^03\d{9}$/.test(identifier);
+    const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
+
+    let whereCondition = {};
+    if (isPhone) {
+      whereCondition = { phone: identifier, role_id: { in: [4, 5, 6, 7, 8] } };
+    } else if (isEmail) {
+      whereCondition = { email: identifier.toLowerCase(), role_id: { in: [4, 5, 6, 7, 8] } };
+    }
+
+    const user = await prisma.user.findFirst({
+      where: whereCondition,
+      include: { role: true }
     });
 
+    if (!user) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Account not found.' } });
+    }
+
+    if (user.status !== 'active') {
+      return res.status(403).json({ success: false, error: { code: 403, message: 'Account is not active.' } });
+    }
+
+    const payload = {
+      id: user.id,
+      full_name: user.full_name,
+      email: user.email,
+      username: user.username,
+      phone: user.phone,
+      role_id: user.role_id,
+      role: user.role.name,
+      permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
+    };
+
+    const token = jwt.sign(payload, jwtSecret);
+
+    return res.json({ success: true, message: 'Login successful.', token, user: payload });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error. Please try again.' }
-    });
+    console.error('verifyWebLoginOTP error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
 
 // ==================== EXISTING FUNCTIONS (Keep as they are) ====================
 
 const signup = async (req, res) => {
-  const { full_name, username, password, role_id, cnic, phone, email } = req.body;
+  const { full_name, username, role_id, cnic, phone, email } = req.body;
 
-  if (!full_name || !username || !password || !role_id || !cnic || !phone) {
+  if (!full_name || !username || !role_id || !cnic || !phone) {
     return res.status(400).json({
       success: false,
       error: { code: 400, message: 'Required fields are missing.' },
@@ -342,14 +382,10 @@ const signup = async (req, res) => {
       return res.status(404).json({ success: false, error: { code: 404, message: 'Invalid role selected.' } });
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const password_hash = await bcrypt.hash(password, salt);
-
     const user = await prisma.user.create({
       data: {
         full_name,
         username: username.toLowerCase().trim(),
-        password_hash,
         role_id: parseInt(role_id),
         cnic: cnic.trim(),
         phone: phone.trim(),
@@ -379,310 +415,7 @@ const signup = async (req, res) => {
   }
 };
 
-const loginWeb = async (req, res) => {
-  const { identifier, password, device_id } = req.body;
-
-  if (!identifier || !password) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: 'Identifier and password are required.' },
-    });
-  }
-
-  try {
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { username: identifier },
-          { email: identifier },
-          { cnic: identifier },
-          { phone: identifier },
-        ],
-        role_id: { in: [4, 5, 6, 7, 8] }, // ALLOWED_WEB_ROLE_IDS
-      },
-      include: { role: true },
-    });
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: 'No account found with these credentials.' },
-      });
-    }
-
-    if (user.status !== 'active') {
-      return res.status(403).json({
-        success: false,
-        error: { code: 403, message: 'Account is not active.' },
-      });
-    }
-
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-    if (!isPasswordValid) {
-      return res.status(401).json({ success: false, error: { code: 401, message: 'Invalid credentials.' } });
-    }
-
-    if (device_id && user.device_id !== device_id) {
-      await prisma.user.update({ where: { id: user.id }, data: { device_id } });
-    }
-
-    const payload = {
-      id: user.id,
-      full_name: user.full_name,
-      email: user.email,
-      username: user.username,
-      cnic: user.cnic,
-      phone: user.phone,
-      role_id: user.role_id,
-      role: user.role.name,
-      device_id: user.device_id || device_id,
-      bio: user.bio,
-      image: user.image,
-      coverImage: user.coverImage,
-      permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
-    };
-
-    const token = jwt.sign(payload, jwtSecret);
-
-    return res.json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      user: payload,
-    });
-  } catch (error) {
-    console.error('Web login error:', error);
-    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
-  }
-};
-
-// Keep original loginApp for backward compatibility
-const loginApp = async (req, res) => {
-  const { identifier, password, device_id, fcm_token } = req.body;
-
-  if (!identifier || !password) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: 'Identifier and password are required.' }
-    });
-  }
-
-  try {
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { username: identifier },
-          { email: identifier },
-          { cnic: identifier },
-          { phone: identifier },
-        ],
-        role_id: { in: [1, 2, 3] },
-      },
-      include: { role: true },
-    });
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: 'No account found with these credentials.' }
-      });
-    }
-
-    if (user.status !== 'active') {
-      return res.status(403).json({
-        success: false,
-        error: { code: 403, message: 'Account is not active.' }
-      });
-    }
-
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-    if (!isPasswordValid) {
-      return res.status(401).json({ success: false, error: { code: 401, message: 'Invalid credentials.' } });
-    }
-
-    if (device_id && user.device_id !== device_id) {
-      await prisma.user.update({ where: { id: user.id }, data: { device_id } });
-    }
-
-    if (fcm_token && user.fcm_token !== fcm_token) {
-      await prisma.user.update({ where: { id: user.id }, data: { fcm_token } });
-    }
-
-    const payload = {
-      id: user.id,
-      full_name: user.full_name,
-      email: user.email,
-      username: user.username,
-      cnic: user.cnic,
-      phone: user.phone,
-      role_id: user.role_id,
-      role: user.role.name,
-      device_id: user.device_id || device_id,
-      fcm_token: user.fcm_token || fcm_token,
-      bio: user.bio,
-      image: user.image,
-      coverImage: user.coverImage,
-      permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
-      loginMethod: 'password'
-    };
-
-    const token = jwt.sign(payload, jwtSecret);
-
-    return res.json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      user: payload,
-    });
-  } catch (error) {
-    console.error('App login error:', error);
-    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
-  }
-};
-
-const forgotPassword = async (req, res) => {
-  const { identifier } = req.body;
-
-  if (!identifier) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: "Identifier is required." },
-    });
-  }
-
-  try {
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { email: identifier },
-          { username: identifier },
-          { cnic: identifier },
-        ],
-      },
-    });
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: "No account found." },
-      });
-    }
-
-    if (user.status !== "active") {
-      return res.status(403).json({
-        success: false,
-        error: { code: 403, message: "Account is not active." },
-      });
-    }
-
-    // Generate reset token
-    const resetToken = crypto.randomBytes(32).toString("hex");
-
-    // Hash token before saving
-    const resetTokenHash = crypto
-      .createHash("sha256")
-      .update(resetToken)
-      .digest("hex");
-
-    // Save token + expiry (15 minutes)
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        reset_token_hash: resetTokenHash,
-        reset_token_expires: new Date(Date.now() + 15 * 60 * 1000),
-      },
-    });
-
-    // Reset link
-    const resetLink = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
-
-    // Send email
-    await sendEmail({
-      to: user.email,
-      subject: "Password Reset Request",
-      html: `
-        <p>Hello ${user.full_name},</p>
-        <p>You requested to reset your password.</p>
-        <p>
-          <a href="${resetLink}">Click here to reset your password</a>
-        </p>
-        <p>This link will expire in 15 minutes.</p>
-        <p>If you did not request this, please ignore this email.</p>
-      `,
-    });
-
-    return res.json({
-      success: true,
-      message: "Password reset link has been sent to your email.",
-    });
-  } catch (error) {
-    console.error("Forgot password error:", error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: "Internal server error" },
-    });
-  }
-};
-
-const resetPassword = async (req, res) => {
-  const { token, newPassword } = req.body;
-
-  if (!token || !newPassword) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: "Token and new password are required." },
-    });
-  }
-
-  try {
-    // Hash received token
-    const tokenHash = crypto
-      .createHash("sha256")
-      .update(token)
-      .digest("hex");
-
-    // Find valid token
-    const user = await prisma.user.findFirst({
-      where: {
-        reset_token_hash: tokenHash,
-        reset_token_expires: {
-          gt: new Date(),
-        },
-      },
-    });
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: "Invalid or expired reset token." },
-      });
-    }
-
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(newPassword, 12);
-
-    // Update password + clear token
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        password_hash: hashedPassword,
-        reset_token_hash: null,
-        reset_token_expires: null,
-      },
-    });
-
-    return res.json({
-      success: true,
-      message: "Password has been reset successfully.",
-    });
-  } catch (error) {
-    console.error("Reset password error:", error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: "Internal server error" },
-    });
-  }
-};
+// forgotPassword and resetPassword removed as they are no longer needed for OTP login.
 
 const toggleUserStatus = async (req, res) => {
   const { userId } = req.params;
@@ -833,9 +566,9 @@ const getUsers = async (req, res) => {
 
 const editUser = async (req, res) => {
   const { userId } = req.params;
-  const { full_name, username, role_id, cnic, phone, email, password, status, bio } = req.body;
+  const { full_name, username, role_id, cnic, phone, email, status, bio } = req.body;
 
-  if (!full_name && !username && !role_id && !cnic && !phone && !email && !password && !status && !bio) {
+  if (!full_name && !username && !role_id && !cnic && !phone && !email && !status && !bio) {
     return res.status(400).json({
       success: false,
       error: { code: 400, message: 'No fields provided to update.' },
@@ -843,17 +576,8 @@ const editUser = async (req, res) => {
   }
 
   const files = req.files;
-
-  let image = null;
-  let coverImage = null;
-
-  if (files?.image?.[0]) {
-    image = files.image[0].url;
-  }
-
-  if (files?.coverImage?.[0]) {
-    coverImage = files.coverImage[0].url;
-  }
+  let image = files?.image?.[0]?.url;
+  let coverImage = files?.coverImage?.[0]?.url;
 
   try {
     const targetUser = await prisma.user.findUnique({
@@ -872,24 +596,17 @@ const editUser = async (req, res) => {
       });
     }
 
-    let password_hash = targetUser.password_hash;
-    if (password) {
-      const salt = await bcrypt.genSalt(10);
-      password_hash = await bcrypt.hash(password, salt);
-    }
-
     const updateData = {
       ...(full_name && { full_name: full_name.trim() }),
       ...(username && { username: username.toLowerCase().trim() }),
-      ...(password && { password_hash }),
       ...(role_id && { role_id: parseInt(role_id) }),
       ...(cnic && { cnic: cnic.trim() }),
       ...(phone && { phone: phone.trim() }),
       ...(email !== undefined && { email: email ? email.toLowerCase().trim() : null }),
       ...(status && { status }),
-      ...(bio && { bio: bio }),
-      ...(image && { image: image }),
-      ...(coverImage && { coverImage: coverImage }),
+      ...(bio && { bio }),
+      ...(image && { image }),
+      ...(coverImage && { coverImage }),
     };
 
     const updatedUser = await prisma.user.update({
@@ -1183,11 +900,11 @@ module.exports = {
   // OTP Login functions
   sendLoginOTP,
   verifyLoginOTP,
+  sendWebLoginOTP,
+  verifyWebLoginOTP,
 
   // Existing functions
   signup,
-  loginWeb,
-  loginApp,
   toggleUserStatus,
   getUsers,
   editUser,
@@ -1196,7 +913,5 @@ module.exports = {
   getVerificationOfficers,
   getMe,
   updateProfile,
-  forgotPassword,
-  resetPassword,
   getDeliveryOfficers
 };
