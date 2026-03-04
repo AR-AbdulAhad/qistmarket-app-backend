@@ -7,6 +7,17 @@ const WATI_ACCESS_TOKEN = process.env.WATI_ACCESS_TOKEN;
 const WATI_TEMPLATE_NAME = process.env.WATI_TEMPLATE_NAME;
 const WATI_BROADCAST_NAME = process.env.WATI_BROADCAST_NAME;
 
+const getExpectedWorkMinutes = (startStr, endStr) => {
+  if (!startStr || !endStr) return 480; // 8h default
+  const parseTime = (t) => {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  };
+  let diff = parseTime(endStr) - parseTime(startStr);
+  if (diff < 0) diff += 24 * 60;
+  return diff;
+};
+
 const getDeliveryBoysOverview = async (req, res) => {
   try {
     const today = new Date();
@@ -23,8 +34,14 @@ const getDeliveryBoysOverview = async (req, res) => {
         username: true,
         image: true,
         phone: true,
+        status: true,
         is_online: true,
+        last_known_latitude: true,
+        last_known_longitude: true,
         last_online_at: true,
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true,
         _count: {
           select: {
             delivery_orders: {
@@ -39,10 +56,33 @@ const getDeliveryBoysOverview = async (req, res) => {
           select: {
             status: true
           }
+        },
+        assigned_orders: {
+          where: { status: { in: ['picked', 'in_transit'] } },
+          select: {
+            id: true,
+            status: true,
+            order_ref: true,
+            customer_name: true,
+          },
+          take: 1,
         }
       },
       orderBy: { full_name: 'asc' }
     });
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const monthlyStatsRaw = await prisma.officerSession.groupBy({
+      by: ['officer_id'],
+      where: { start_time: { gte: startOfMonth } },
+      _sum: { duration_minutes: true },
+    });
+
+    const monthlyStatsMap = new Map(
+      monthlyStatsRaw.map((s) => [s.officer_id, ((s._sum.duration_minutes || 0) / 60).toFixed(2)])
+    );
 
     const data = boys.map(b => {
       const deliveredToday = b.delivery_orders.filter(o => o.status === 'delivered').length;
@@ -57,8 +97,35 @@ const getDeliveryBoysOverview = async (req, res) => {
         delivered_today: deliveredToday,
         returned_today: returnedToday,
         whatsapp: b.phone || null,
+        account_status: b.status,
         is_online: b.is_online,
-        last_online_at: b.last_online_at
+        last_online_at: b.last_online_at,
+        current_location:
+          b.is_online && b.last_known_latitude
+            ? { latitude: b.last_known_latitude, longitude: b.last_known_longitude }
+            : null,
+        last_known_location:
+          !b.is_online && b.last_known_latitude
+            ? {
+              latitude: b.last_known_latitude,
+              longitude: b.last_known_longitude,
+              timestamp: b.last_online_at,
+            }
+            : null,
+        bike_km_range: b.bike_km_range,
+        working_hours:
+          b.working_hours_start && b.working_hours_end
+            ? `${b.working_hours_start} - ${b.working_hours_end}`
+            : null,
+        current_assignment: b.assigned_orders[0] ? {
+          id: b.assigned_orders[0].id,
+          status: b.assigned_orders[0].status,
+          order: {
+            order_ref: b.assigned_orders[0].order_ref,
+            customer_name: b.assigned_orders[0].customer_name
+          }
+        } : null,
+        monthly_online_hours: monthlyStatsMap.get(b.id) || '0.00',
       };
     });
 
@@ -66,6 +133,78 @@ const getDeliveryBoysOverview = async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
+const getDeliveryBoyStats = async (req, res) => {
+  const { id } = req.params;
+  const { month, year } = req.query;
+
+  try {
+    const officer = await prisma.user.findUnique({
+      where: { id: parseInt(id) },
+      select: { working_hours_start: true, working_hours_end: true },
+    });
+
+    if (!officer) return res.status(404).json({ success: false, error: 'Officer not found' });
+
+    let startDate, endDate;
+    if (year && month) {
+      startDate = new Date(Number(year), Number(month) - 1, 1);
+      endDate = new Date(Number(year), Number(month), 0);
+    } else {
+      const now = new Date();
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    }
+
+    const sessions = await prisma.officerSession.findMany({
+      where: {
+        officer_id: parseInt(id),
+        start_time: { gte: startDate, lte: endDate },
+      },
+      select: { start_time: true, duration_minutes: true },
+    });
+
+    const dailyMap = new Map();
+    sessions.forEach((s) => {
+      const dateKey = s.start_time.toISOString().split('T')[0];
+      dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + (s.duration_minutes || 0));
+    });
+
+    const expectedDailyMin = getExpectedWorkMinutes(officer.working_hours_start, officer.working_hours_end);
+    const expectedDailyHours = (expectedDailyMin / 60).toFixed(2);
+
+    const dailyStats = [];
+    let current = new Date(startDate);
+    while (current <= endDate) {
+      const dateKey = current.toISOString().split('T')[0];
+      const onlineMin = dailyMap.get(dateKey) || 0;
+      const onlineHours = (onlineMin / 60).toFixed(2);
+      const offlineDuringWork = Math.max(0, Number(expectedDailyHours) - Number(onlineHours)).toFixed(2);
+
+      dailyStats.push({
+        date: dateKey,
+        online_hours: onlineHours,
+        worked_hours: onlineHours,
+        offline_during_work_hours: offlineDuringWork,
+      });
+
+      current.setDate(current.getDate() + 1);
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        officer_id: Number(id),
+        month: startDate.toISOString().slice(0, 7),
+        daily_stats: dailyStats,
+        expected_daily_hours: expectedDailyHours,
+      },
+    });
+  } catch (error) {
+    console.error('getDeliveryBoyStats error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
   }
 };
 
@@ -81,7 +220,15 @@ const getDeliveryBoyDetails = async (req, res) => {
         full_name: true,
         username: true,
         image: true,
-        phone: true
+        phone: true,
+        status: true,
+        is_online: true,
+        last_online_at: true,
+        last_known_latitude: true,
+        last_known_longitude: true,
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true
       }
     });
 
@@ -102,6 +249,20 @@ const getDeliveryBoyDetails = async (req, res) => {
         months: true
       }
     });
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const monthlyStatsRaw = await prisma.officerSession.groupBy({
+      by: ['officer_id'],
+      where: {
+        officer_id: Number(boyId),
+        start_time: { gte: startOfMonth }
+      },
+      _sum: { duration_minutes: true },
+    });
+
+    const monthlyOnlineHours = ((monthlyStatsRaw[0]?._sum.duration_minutes || 0) / 60).toFixed(2);
 
     // Grouping logic
     const grouped = {};
@@ -141,7 +302,28 @@ const getDeliveryBoyDetails = async (req, res) => {
           name: boy.full_name,
           username: boy.username,
           profile_image: boy.image,
-          whatsapp: boy.phone
+          whatsapp: boy.phone,
+          account_status: boy.status,
+          is_online: boy.is_online,
+          last_online_at: boy.last_online_at,
+          current_location:
+            boy.is_online && boy.last_known_latitude
+              ? { latitude: boy.last_known_latitude, longitude: boy.last_known_longitude }
+              : null,
+          last_known_location:
+            !boy.is_online && boy.last_known_latitude
+              ? {
+                latitude: boy.last_known_latitude,
+                longitude: boy.last_known_longitude,
+                timestamp: boy.last_online_at,
+              }
+              : null,
+          bike_km_range: boy.bike_km_range,
+          working_hours:
+            boy.working_hours_start && boy.working_hours_end
+              ? `${boy.working_hours_start} - ${boy.working_hours_end}`
+              : null,
+          monthly_online_hours: monthlyOnlineHours
         },
         pending_products: products
       }
@@ -274,5 +456,6 @@ module.exports = {
   getDeliveryBoysOverview,
   getDeliveryBoyDetails,
   generatePickupOtp,
-  verifyPickupOtp
+  verifyPickupOtp,
+  getDeliveryBoyStats
 };

@@ -417,29 +417,6 @@ const getDueOverdueInstallments = async (req, res) => {
         current.setMonth(current.getMonth() + 1);
       }
     }
-
-    // Temporary test data
-    overdue.push({
-      order_id: 9991,
-      order_ref: 'TEST-001',
-      customer_name: 'Test Customer 1',
-      whatsapp_number: '03001234567',
-      address: 'House 123, Street 4, Test Colony',
-      monthNumber: 1,
-      dueDate: '2024-01-05',
-      amount: 5000,
-    });
-    overdue.push({
-      order_id: 9992,
-      order_ref: 'TEST-002',
-      customer_name: 'Test Customer 2',
-      whatsapp_number: '03007654321',
-      address: 'Plot 456, Area 51, Test City',
-      monthNumber: 2,
-      dueDate: '2024-02-05',
-      amount: 3500,
-    });
-
     return res.json({ success: true, data: { overdue } });
   } catch (error) {
     console.error('getDueOverdueInstallments error:', error);
