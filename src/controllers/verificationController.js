@@ -249,16 +249,16 @@ const savePurchaserVerification = async (req, res) => {
       data.business_address = business_address || null;
       data.net_income = net_income || null;
 
-      data.employer_name = null;
-      data.employer_address = null;
-      data.designation = null;
+      data.employer_name = '';
+      data.employer_address = '';
+      data.designation = '';
       data.official_number = null;
       data.years_in_company = null;
       data.gross_salary = null;
     } else {
-      data.employer_name = employer_name || null;
-      data.employer_address = employer_address || null;
-      data.designation = designation || null;
+      data.employer_name = employer_name || '';
+      data.employer_address = employer_address || '';
+      data.designation = designation || '';
       data.official_number = official_number || null;
       data.years_in_company = years_in_company || null;
       data.gross_salary = gross_salary || null;
@@ -273,7 +273,7 @@ const savePurchaserVerification = async (req, res) => {
       where: { verification_id: parseInt(verification_id) },
       update: data,
       create: {
-        verification_id: parseInt(verification_id),
+        verification: { connect: { id: parseInt(verification_id) } },
         ...data
       }
     });
@@ -376,13 +376,13 @@ const saveGrantorVerification = async (req, res) => {
       data.business_address = business_address || null;
       data.net_income = net_income || null;
 
-      data.designation = null;
+      data.designation = '';
       data.official_number = null;
       data.company_name = null;
       data.years_in_company = null;
       data.monthly_income = null;
     } else {
-      data.designation = designation || null;
+      data.designation = designation || '';
       data.official_number = official_number || null;
       data.company_name = company_name || null;
       data.years_in_company = years_in_company || null;
@@ -416,7 +416,7 @@ const saveGrantorVerification = async (req, res) => {
     } else {
       grantor = await prisma.grantorVerification.create({
         data: {
-          verification_id: parseInt(verification_id),
+          verification: { connect: { id: parseInt(verification_id) } },
           grantor_number: grantorNum,
           ...data
         }

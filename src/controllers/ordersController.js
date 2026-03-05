@@ -825,7 +825,8 @@ const assignBulk = async (req, res) => {
 };
 
 const getVerificationOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '' } = req.query;
+  const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
+
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
 
@@ -858,9 +859,12 @@ const getVerificationOrders = async (req, res) => {
       data: {
         orders,
         pagination: {
-          total,
           page: Number(page),
+          limit: take,
+          total,
           totalPages: Math.ceil(total / take),
+          hasNext: skip + take < total,
+          hasPrev: Number(page) > 1,
         },
       },
     });
