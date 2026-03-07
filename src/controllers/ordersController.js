@@ -849,7 +849,15 @@ const getVerificationOrders = async (req, res) => {
         skip,
         take,
         orderBy: { created_at: 'desc' },
-        include: { created_by: { select: { username: true } } },
+        include: {
+          created_by: { select: { username: true, full_name: true } },
+          assigned_to: { select: { username: true, full_name: true } },
+          verification: {
+            include: {
+              verification_officer: { select: { username: true, full_name: true } }
+            }
+          }
+        },
       }),
       prisma.order.count({ where }),
     ]);
@@ -907,11 +915,10 @@ const getApprovedOrders = async (req, res) => {
             }
           },
           created_by: {
-            select: {
-              id: true,
-              full_name: true,
-              username: true,
-            }
+            select: { id: true, full_name: true, username: true }
+          },
+          assigned_to: {
+            select: { id: true, full_name: true, username: true }
           }
         }
       }),

@@ -4,7 +4,11 @@ const prisma = new PrismaClient();
 // City Operations
 const getCities = async (req, res) => {
     try {
+        const { all } = req.query;
+        const where = all === 'true' ? {} : { status: 'active' };
+
         const cities = await prisma.city.findMany({
+            where,
             include: { _count: { select: { zones: true } } },
             orderBy: { name: 'asc' }
         });
@@ -16,10 +20,13 @@ const getCities = async (req, res) => {
 };
 
 const createCity = async (req, res) => {
-    const { name } = req.body;
+    const { name, status } = req.body;
     if (!name) return res.status(400).json({ success: false, error: 'Name is required' });
     try {
-        const city = await prisma.city.create({ data: { name } });
+        const data = { name };
+        if (status) data.status = status;
+
+        const city = await prisma.city.create({ data });
         return res.json({ success: true, data: city });
     } catch (error) {
         console.error('createCity error:', error);
@@ -30,12 +37,15 @@ const createCity = async (req, res) => {
 
 const updateCity = async (req, res) => {
     const { id } = req.params;
-    const { name } = req.body;
+    const { name, status } = req.body;
     if (!name) return res.status(400).json({ success: false, error: 'Name is required' });
     try {
+        const data = { name };
+        if (status) data.status = status;
+
         const city = await prisma.city.update({
             where: { id: parseInt(id) },
-            data: { name }
+            data
         });
         return res.json({ success: true, data: city });
     } catch (error) {
@@ -47,9 +57,12 @@ const updateCity = async (req, res) => {
 
 // Zone Operations
 const getZones = async (req, res) => {
-    const { cityId } = req.query;
+    const { cityId, all } = req.query;
     try {
-        const where = cityId ? { city_id: parseInt(cityId) } : {};
+        const where = {};
+        if (cityId) where.city_id = parseInt(cityId);
+        if (all !== 'true') where.status = 'active';
+
         const zones = await prisma.zone.findMany({
             where,
             include: { city: true, _count: { select: { areas: true } } },
@@ -63,10 +76,13 @@ const getZones = async (req, res) => {
 };
 
 const createZone = async (req, res) => {
-    const { name, city_id } = req.body;
+    const { name, city_id, status } = req.body;
     if (!name || !city_id) return res.status(400).json({ success: false, error: 'Name and city_id are required' });
     try {
-        const zone = await prisma.zone.create({ data: { name, city_id: parseInt(city_id) } });
+        const data = { name, city_id: parseInt(city_id) };
+        if (status) data.status = status;
+
+        const zone = await prisma.zone.create({ data });
         return res.json({ success: true, data: zone });
     } catch (error) {
         console.error('createZone error:', error);
@@ -76,12 +92,15 @@ const createZone = async (req, res) => {
 
 const updateZone = async (req, res) => {
     const { id } = req.params;
-    const { name, city_id } = req.body;
+    const { name, city_id, status } = req.body;
     if (!name || !city_id) return res.status(400).json({ success: false, error: 'Name and city_id are required' });
     try {
+        const data = { name, city_id: parseInt(city_id) };
+        if (status) data.status = status;
+
         const zone = await prisma.zone.update({
             where: { id: parseInt(id) },
-            data: { name, city_id: parseInt(city_id) }
+            data
         });
         return res.json({ success: true, data: zone });
     } catch (error) {
@@ -92,9 +111,12 @@ const updateZone = async (req, res) => {
 
 // Area Operations
 const getAreas = async (req, res) => {
-    const { zoneId } = req.query;
+    const { zoneId, all } = req.query;
     try {
-        const where = zoneId ? { zone_id: parseInt(zoneId) } : {};
+        const where = {};
+        if (zoneId) where.zone_id = parseInt(zoneId);
+        if (all !== 'true') where.status = 'active';
+
         const areas = await prisma.area.findMany({
             where,
             include: { zone: { include: { city: true } } },
@@ -108,10 +130,13 @@ const getAreas = async (req, res) => {
 };
 
 const createArea = async (req, res) => {
-    const { name, zone_id } = req.body;
+    const { name, zone_id, status } = req.body;
     if (!name || !zone_id) return res.status(400).json({ success: false, error: 'Name and zone_id are required' });
     try {
-        const area = await prisma.area.create({ data: { name, zone_id: parseInt(zone_id) } });
+        const data = { name, zone_id: parseInt(zone_id) };
+        if (status) data.status = status;
+
+        const area = await prisma.area.create({ data });
         return res.json({ success: true, data: area });
     } catch (error) {
         console.error('createArea error:', error);
@@ -121,12 +146,15 @@ const createArea = async (req, res) => {
 
 const updateArea = async (req, res) => {
     const { id } = req.params;
-    const { name, zone_id } = req.body;
+    const { name, zone_id, status } = req.body;
     if (!name || !zone_id) return res.status(400).json({ success: false, error: 'Name and zone_id are required' });
     try {
+        const data = { name, zone_id: parseInt(zone_id) };
+        if (status) data.status = status;
+
         const area = await prisma.area.update({
             where: { id: parseInt(id) },
-            data: { name, zone_id: parseInt(zone_id) }
+            data
         });
         return res.json({ success: true, data: area });
     } catch (error) {
@@ -138,11 +166,18 @@ const updateArea = async (req, res) => {
 // Hierarchical Fetch
 const getAddressHierarchy = async (req, res) => {
     try {
+        const { all } = req.query;
+        const statusFilter = all === 'true' ? {} : { status: 'active' };
+
         const hierarchy = await prisma.city.findMany({
+            where: statusFilter,
             include: {
                 zones: {
+                    where: statusFilter,
                     include: {
-                        areas: true
+                        areas: {
+                            where: statusFilter
+                        }
                     }
                 }
             },

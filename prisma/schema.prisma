@@ -387,18 +387,18 @@ model OfficerSession {
 }
 
 model OrderPayment {
-  id            Int      @id @default(autoincrement())
+  id            Int       @id @default(autoincrement())
   order_id      Int
   paymentType   String
   monthNumber   Int?
   amount        Float
-  paidAt        DateTime @default(now())
+  paidAt        DateTime  @default(now())
   paymentMethod String?
   collectedBy   Int?
-  is_submitted  Boolean  @default(false)
+  is_submitted  Boolean   @default(false)
   submitted_at  DateTime?
-  created_at    DateTime @default(now())
-  order         Order    @relation(fields: [order_id], references: [id])
+  created_at    DateTime  @default(now())
+  order         Order     @relation(fields: [order_id], references: [id])
 
   @@index([order_id])
   @@index([order_id, paymentType])
@@ -433,9 +433,10 @@ model OrderProductHistory {
 }
 
 model City {
-  id    Int    @id @default(autoincrement())
-  name  String @unique
-  zones Zone[]
+  id     Int    @id @default(autoincrement())
+  name   String @unique
+  status String @default("active")
+  zones  Zone[]
 
   @@map("cities")
 }
@@ -444,6 +445,7 @@ model Zone {
   id      Int    @id @default(autoincrement())
   name    String
   city_id Int
+  status  String @default("active")
   areas   Area[]
   city    City   @relation(fields: [city_id], references: [id], onDelete: Cascade)
 
@@ -456,6 +458,7 @@ model Area {
   id      Int    @id @default(autoincrement())
   name    String
   zone_id Int
+  status  String @default("active")
   zone    Zone   @relation(fields: [zone_id], references: [id], onDelete: Cascade)
 
   @@unique([name, zone_id])
