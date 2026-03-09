@@ -25,6 +25,7 @@ const assignmentRoutes = require('./src/routes/assignmentRoutes');
 const addressRoutes = require('./src/routes/addressRoutes');
 const productRoutes = require('./src/routes/productRoutes');
 const recoveryRoutes = require('./src/routes/recoveryRoutes');
+const customerRoutes = require('./src/routes/customerRoutes');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -348,6 +349,7 @@ app.use('/api/assignments', assignmentRoutes);
 app.use('/api/address', addressRoutes);
 app.use('/api', productRoutes);
 app.use('/api/recovery', recoveryRoutes);
+app.use('/api/customers', customerRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -369,7 +371,7 @@ app.use((err, req, res, next) => {
 // ────────────────────────────────────────────────
 // Start Server
 // ────────────────────────────────────────────────
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT;
 
 server.listen(PORT, () => {
   console.log(`═══════════════════════════════════════════════════════`);

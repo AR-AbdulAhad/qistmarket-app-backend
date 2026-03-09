@@ -930,9 +930,12 @@ const getApprovedOrders = async (req, res) => {
       data: {
         orders,
         pagination: {
-          total,
           page: Number(page),
+          limit: take,
+          total,
           totalPages: Math.ceil(total / take),
+          hasNext: skip + take < total,
+          hasPrev: Number(page) > 1,
         },
       },
     });
@@ -944,13 +947,9 @@ const getApprovedOrders = async (req, res) => {
 
 const assignDelivery = async (req, res) => {
   const { id } = req.params;
-  const { user_id } = req.body;
+  const { user_id, action = 'assign' } = req.body;
 
   try {
-    if (!user_id) {
-      return res.status(400).json({ success: false, message: 'delivery_officer_id required' });
-    }
-
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
       include: { verification: true }
@@ -958,6 +957,25 @@ const assignDelivery = async (req, res) => {
 
     if (!order || order.verification?.status !== 'approved') {
       return res.status(400).json({ success: false, message: 'Order not found or not approved' });
+    }
+
+    if (action === 'unassign') {
+      const updatedOrder = await prisma.order.update({
+        where: { id: Number(id) },
+        data: {
+          delivery_officer_id: null,
+          status: 'pending' // or whatever the correct state is before assignment
+        }
+      });
+      return res.status(200).json({
+        success: true,
+        message: 'Delivery officer unassigned successfully',
+        data: { order: updatedOrder }
+      });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'delivery_officer_id (user_id) required' });
     }
 
     const updatedOrder = await prisma.order.update({
@@ -973,7 +991,9 @@ const assignDelivery = async (req, res) => {
 
     // Send notification
     const io = req.app.get('io');
-    await sendDeliveryAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, io);
+    if (updatedOrder.delivery_officer) {
+      await sendDeliveryAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, io);
+    }
 
     return res.status(200).json({
       success: true,
@@ -987,13 +1007,31 @@ const assignDelivery = async (req, res) => {
 };
 
 const assignBulkDelivery = async (req, res) => {
-  const { order_ids, user_id } = req.body;
+  const { order_ids, user_id, action = 'assign' } = req.body;
 
-  if (!Array.isArray(order_ids) || order_ids.length === 0 || !user_id) {
-    return res.status(400).json({ success: false, message: 'order_ids and user_id required' });
+  if (!Array.isArray(order_ids) || order_ids.length === 0) {
+    return res.status(400).json({ success: false, message: 'order_ids required' });
   }
 
   try {
+    if (action === 'unassign') {
+      await prisma.order.updateMany({
+        where: { id: { in: order_ids.map(Number) } },
+        data: {
+          delivery_officer_id: null,
+          status: 'pending'
+        }
+      });
+      return res.status(200).json({
+        success: true,
+        message: `${order_ids.length} orders unassigned from delivery`
+      });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'user_id required' });
+    }
+
     await prisma.order.updateMany({
       where: { id: { in: order_ids.map(Number) } },
       data: {
