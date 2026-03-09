@@ -23,6 +23,7 @@ const officerRoutes = require('./src/routes/officerRoutes');      // ← new off
 const notificationRoutes = require('./src/routes/notificationRoutes');
 const assignmentRoutes = require('./src/routes/assignmentRoutes');
 const addressRoutes = require('./src/routes/addressRoutes');
+const reportRoutes = require('./src/routes/reportRoutes');
 const productRoutes = require('./src/routes/productRoutes');
 const recoveryRoutes = require('./src/routes/recoveryRoutes');
 const customerRoutes = require('./src/routes/customerRoutes');
@@ -350,6 +351,7 @@ app.use('/api/address', addressRoutes);
 app.use('/api', productRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/customers', customerRoutes);
+app.use('/api', reportRoutes);
 
 // 404 handler
 app.use((req, res) => {

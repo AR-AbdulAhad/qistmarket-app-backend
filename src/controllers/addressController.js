@@ -226,13 +226,24 @@ const deleteArea = async (req, res) => {
 
 const bulkUploadAddresses = async (req, res) => {
     const { data } = req.body; // Expecting array of { city, zone, area }
-    if (!data || !Array.isArray(data)) return res.status(400).json({ success: false, error: 'Invalid data format' });
+    if (!data || !Array.isArray(data)) {
+        return res.status(400).json({ success: false, error: 'Invalid data format' });
+    }
 
     try {
         let createdCount = 0;
+        let skippedExisting = 0;
+        let invalidRows = 0;
+        let totalRows = 0;
+
         for (const row of data) {
             const { city: cityName, zone: zoneName, area: areaName } = row;
-            if (!cityName || !zoneName || !areaName) continue;
+            if (!cityName || !zoneName || !areaName) {
+                invalidRows++;
+                continue;
+            }
+
+            totalRows++;
 
             // 1. Find or create city
             let city = await prisma.city.findUnique({ where: { name: cityName.trim() } });
@@ -251,17 +262,29 @@ const bulkUploadAddresses = async (req, res) => {
             }
 
             // 3. Find or create area
-            let area = await prisma.area.findFirst({
+            const existingArea = await prisma.area.findFirst({
                 where: { name: areaName.trim(), zone_id: zone.id }
             });
-            if (!area) {
+            if (!existingArea) {
                 await prisma.area.create({
                     data: { name: areaName.trim(), zone_id: zone.id }
                 });
                 createdCount++;
+            } else {
+                skippedExisting++;
             }
         }
-        return res.json({ success: true, message: `Successfully processed. New areas created: ${createdCount}` });
+
+        return res.json({
+            success: true,
+            message: `Processed ${totalRows} rows. New areas created: ${createdCount}.`,
+            stats: {
+                totalRows,
+                createdCount,
+                skippedExisting,
+                invalidRows,
+            },
+        });
     } catch (error) {
         console.error('bulkUploadAddresses error:', error);
         return res.status(500).json({ success: false, error: 'Internal server error' });
