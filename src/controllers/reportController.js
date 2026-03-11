@@ -128,12 +128,13 @@ const getReportSummary = async (req, res) => {
         where: baseWhere,
         _count: { _all: true },
       }),
-      prisma.payment
-        ? prisma.payment.groupBy({
-            by: ['paymentType'],
-            _sum: { amount: true },
-          })
-        : [],
+      prisma.orderPayment.groupBy({
+        by: ['paymentType'],
+        _sum: { amount: true },
+        where: {
+          order: baseWhere,
+        },
+      }),
     ]);
 
     const dailyMap = {};

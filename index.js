@@ -27,6 +27,11 @@ const reportRoutes = require('./src/routes/reportRoutes');
 const productRoutes = require('./src/routes/productRoutes');
 const recoveryRoutes = require('./src/routes/recoveryRoutes');
 const customerRoutes = require('./src/routes/customerRoutes');
+const outletRoutes = require('./src/routes/outletRoutes');
+const cashRegisterRoutes = require('./src/routes/cashRegisterRoutes');
+const expenseRoutes = require('./src/routes/expenseRoutes');
+const vendorRoutes = require('./src/routes/vendorRoutes');
+const inventoryRoutes = require('./src/routes/inventoryRoutes');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -352,6 +357,11 @@ app.use('/api', productRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api', reportRoutes);
+app.use('/api', outletRoutes);
+app.use('/api', cashRegisterRoutes);
+app.use('/api', expenseRoutes);
+app.use('/api', vendorRoutes);
+app.use('/api', inventoryRoutes);
 
 // 404 handler
 app.use((req, res) => {

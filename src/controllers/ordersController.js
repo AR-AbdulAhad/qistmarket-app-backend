@@ -114,6 +114,7 @@ const createOrder = async (req, res) => {
   const {
     customer_name,
     whatsapp_number,
+    alternate_contact,
     address,
     city,
     area,
@@ -130,6 +131,7 @@ const createOrder = async (req, res) => {
     block,
     street,
     house_no,
+    order_notes,
   } = req.body;
 
   if (!customer_name || !whatsapp_number || !address || !product_name ||
@@ -241,6 +243,7 @@ const createOrder = async (req, res) => {
         token_number,
         customer_name: customer_name.trim(),
         whatsapp_number: whatsapp_number.trim(),
+        alternate_contact: alternate_contact ? alternate_contact.trim() : null,
         address: address.trim(),
         city: city ? city.trim() : null,
         area: area ? area.trim() : null,
@@ -248,6 +251,7 @@ const createOrder = async (req, res) => {
         block: block ? block.trim() : null,
         street: street ? street.trim() : null,
         house_no: house_no ? house_no.trim() : null,
+        order_notes: order_notes ? order_notes.trim() : null,
 
         gender: gender || null,
         marital_status: marital_status || null,
@@ -286,6 +290,7 @@ const createOrder = async (req, res) => {
           status: order.status,
           customer_name: order.customer_name,
           whatsapp_number: order.whatsapp_number,
+          alternate_contact: order.alternate_contact,
           address: order.address,
           city: order.city,
           area: order.area,
@@ -293,6 +298,7 @@ const createOrder = async (req, res) => {
           block: order.block,
           street: order.street,
           house_no: order.house_no,
+          order_notes: order.order_notes,
 
           gender: order.gender,
           marital_status: order.marital_status,

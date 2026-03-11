@@ -33,6 +33,7 @@ model User {
   cnic                     String?
   phone                    String?
   device_id                String?
+  outlet_id                Int?
   status                   String                  @default("active")
   created_at               DateTime                @default(now())
   updated_at               DateTime                @updatedAt
@@ -62,11 +63,13 @@ model User {
   verifications            Verification[]          @relation("verification_officer")
   verification_reviews     VerificationReview[]    @relation("verification_reviewer")
   notifications            Notification[]
+  outlet                   Outlet?                 @relation(fields: [outlet_id], references: [id])
 
   @@index([role_id])
   @@index([is_online])
   @@index([role_id, is_online])
   @@index([last_online_at])
+  @@index([outlet_id])
 }
 
 model Role {
@@ -82,7 +85,9 @@ model Order {
   token_number        String                @unique
   customer_name       String
   whatsapp_number     String
+  alternate_contact   String?
   address             String
+  order_notes         String?               @db.Text
   city                String?
   area                String?
   product_name        String
@@ -98,6 +103,7 @@ model Order {
   assigned_to_user_id Int?
   delivery_officer_id Int?
   recovery_officer_id Int?
+  outlet_id           Int?
   is_delivered        Boolean               @default(false)
   otp_expires_at      DateTime?
   otp_generated_at    DateTime?
@@ -116,6 +122,7 @@ model Order {
   created_by          User?                 @relation(fields: [created_by_user_id], references: [id])
   delivery_officer    User?                 @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
   recovery_officer    User?                 @relation("recoveryOrders", fields: [recovery_officer_id], references: [id])
+  outlet              Outlet?               @relation(fields: [outlet_id], references: [id])
   payments            OrderPayment[]
   productHistories    OrderProductHistory[]
   verification        Verification?         @relation("OrderVerification")
@@ -124,6 +131,127 @@ model Order {
   @@index([assigned_to_user_id])
   @@index([delivery_officer_id])
   @@index([recovery_officer_id])
+  @@index([outlet_id])
+}
+
+model Outlet {
+  id           Int             @id @default(autoincrement())
+  code         String          @unique
+  name         String
+  address      String?
+  status       String          @default("active")
+  created_at   DateTime        @default(now())
+  updated_at   DateTime        @updatedAt
+  users        User[]
+  orders       Order[]
+  cashRegisters CashRegister[]
+  expenses     Expense[]
+  inventories  OutletInventory[]
+  vendorPurchases VendorPurchase[]
+  vendorPayments  VendorPayment[]
+
+  @@map("outlets")
+}
+
+model CashRegister {
+  id                    Int      @id @default(autoincrement())
+  outlet_id             Int
+  date                  DateTime
+  opening_cash          Float    @default(0)
+  down_payments         Float    @default(0)
+  installments_received Float    @default(0)
+  cash_from_recovery    Float    @default(0)
+  cash_from_delivery    Float    @default(0)
+  expenses              Float    @default(0)
+  closing_cash          Float    @default(0)
+  created_at            DateTime @default(now())
+  updated_at            DateTime @updatedAt
+  outlet                Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+
+  @@unique([outlet_id, date])
+  @@index([outlet_id])
+  @@index([date])
+  @@map("cash_registers")
+}
+
+model Expense {
+  id           Int      @id @default(autoincrement())
+  outlet_id    Int
+  expense_type String
+  amount       Float
+  description  String?
+  created_at   DateTime @default(now())
+  outlet       Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+
+  @@index([outlet_id])
+  @@index([created_at])
+  @@map("expenses")
+}
+
+model VendorPurchase {
+  id             Int      @id @default(autoincrement())
+  outlet_id      Int
+  vendor_name    String
+  product_name   String
+  imei_serial    String   @unique
+  quantity       Int      @default(1)
+  purchase_price Float
+  created_at     DateTime @default(now())
+  outlet         Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+
+  @@index([outlet_id])
+  @@index([vendor_name])
+  @@index([created_at])
+  @@map("vendor_purchases")
+}
+
+model VendorPayment {
+  id             Int      @id @default(autoincrement())
+  outlet_id      Int
+  vendor_name    String
+  amount         Float
+  payment_method String?
+  created_at     DateTime @default(now())
+  outlet         Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+
+  @@index([outlet_id])
+  @@index([vendor_name])
+  @@index([created_at])
+  @@map("vendor_payments")
+}
+
+model OutletInventory {
+  id                Int      @id @default(autoincrement())
+  outlet_id          Int
+  product_name       String
+  category           String?
+  imei_serial        String   @unique
+  purchase_price     Float
+  installment_price  Float
+  status             String   @default("In Stock")
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+  outlet             Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  stockTransfers     StockTransfer[]
+
+  @@index([outlet_id])
+  @@index([status])
+  @@map("outlet_inventories")
+}
+
+model StockTransfer {
+  id           Int      @id @default(autoincrement())
+  from_type    String
+  from_id      Int
+  to_type      String
+  to_id        Int
+  inventory_id Int
+  created_at   DateTime @default(now())
+  inventory    OutletInventory @relation(fields: [inventory_id], references: [id], onDelete: Cascade)
+
+  @@index([inventory_id])
+  @@index([created_at])
+  @@map("stock_transfers")
 }
 
 model Verification {
