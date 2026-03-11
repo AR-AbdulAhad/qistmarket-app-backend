@@ -970,7 +970,6 @@ const assignDelivery = async (req, res) => {
         where: { id: Number(id) },
         data: {
           delivery_officer_id: null,
-          status: 'pending' // or whatever the correct state is before assignment
         }
       });
       return res.status(200).json({
@@ -1025,7 +1024,6 @@ const assignBulkDelivery = async (req, res) => {
         where: { id: { in: order_ids.map(Number) } },
         data: {
           delivery_officer_id: null,
-          status: 'pending'
         }
       });
       return res.status(200).json({
