@@ -25,7 +25,10 @@ const {
   getMyPendingOrders,
   getMyConfirmedOrders,
   getMyCancelledOrders,
-  getMyCustomersWithOrdersAndLedger
+  getMyCustomersWithOrdersAndLedger,
+  updatePurchaserField,
+  updateGrantorField,
+  getEditHistory
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -51,6 +54,13 @@ router.get('/verification/order/:order_id', getVerificationByOrderId);
 router.post('/verification/:verification_id/purchaser', authenticateJWT, savePurchaserVerification);
 router.post('/verification/:verification_id/grantor/:grantor_number', authenticateJWT, saveGrantorVerification);
 router.post('/verification/:verification_id/next-of-kin', authenticateJWT, saveNextOfKin);
+
+// NEW: Update single field (for editing)
+router.put('/verification/:verification_id/purchaser/field', authenticateJWT, updatePurchaserField);
+router.put('/verification/:verification_id/grantor/:grantor_id/field', authenticateJWT, updateGrantorField);
+
+// NEW: Get edit history
+router.get('/verification/:verification_id/history/:entity_type/:entity_id', authenticateJWT, getEditHistory);
 
 // Save location (old)
 router.post('/verification/:verification_id/location', authenticateJWT, saveLocation);

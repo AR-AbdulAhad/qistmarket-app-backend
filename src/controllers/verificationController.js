@@ -1067,7 +1067,7 @@ const getVerificationByOrderId = async (req, res) => {
           }
         },
         verification_officer: {
-          select: { full_name: true, username: true }
+          select: { full_name: true, username: true, id: true }
         },
         purchaser: true,
         grantors: true,
@@ -1087,6 +1087,14 @@ const getVerificationByOrderId = async (req, res) => {
               }
             }
           }
+        },
+        edit_history: {
+          include: {
+            edited_by: {
+              select: { full_name: true, username: true }
+            }
+          },
+          orderBy: { edited_at: 'desc' }
         }
       }
     });
@@ -1097,6 +1105,25 @@ const getVerificationByOrderId = async (req, res) => {
         error: { code: 404, message: 'Verification not found for this order' }
       });
     }
+
+    // Organize edit history by entity
+    const purchaserHistory = verification.edit_history.filter(h => h.entity_type === 'purchaser');
+    const grantor1History = verification.edit_history.filter(h => h.entity_type === 'grantor' && h.entity_id === verification.grantors[0]?.id);
+    const grantor2History = verification.edit_history.filter(h => h.entity_type === 'grantor' && h.entity_id === verification.grantors[1]?.id);
+
+    // Attach history to respective entities
+    if (verification.purchaser) {
+      verification.purchaser.edit_history = purchaserHistory;
+    }
+    
+    verification.grantors = verification.grantors.map(grantor => {
+      if (grantor.id === verification.grantors[0]?.id) {
+        return { ...grantor, edit_history: grantor1History };
+      } else if (grantor.id === verification.grantors[1]?.id) {
+        return { ...grantor, edit_history: grantor2History };
+      }
+      return grantor;
+    });
 
     return res.status(200).json({
       success: true,
@@ -1113,6 +1140,7 @@ const getVerificationByOrderId = async (req, res) => {
     });
   }
 };
+
 
 // Submit Verification Review
 const submitVerificationReview = async (req, res) => {
@@ -1602,6 +1630,234 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
   }
 };
 
+// Helper function to record edit history
+const recordEditHistory = async (
+  verification_id,
+  entity_type,
+  entity_id,
+  field_name,
+  old_value,
+  new_value,
+  edited_by_id,
+  edited_by_name
+) => {
+  try {
+    // Don't record if values are the same
+    if (old_value === new_value) return null;
+
+    const history = await prisma.verificationEditHistory.create({
+      data: {
+        verification_id: parseInt(verification_id),
+        entity_type,
+        entity_id: parseInt(entity_id),
+        field_name,
+        old_value: old_value ? String(old_value) : null,
+        new_value: new_value ? String(new_value) : null,
+        edited_by_id: parseInt(edited_by_id),
+        edited_by_name,
+        edited_at: new Date()
+      }
+    });
+
+    return history;
+  } catch (error) {
+    console.error('Error recording edit history:', error);
+    return null;
+  }
+};
+
+// Update Purchaser Field (New API for single field update)
+const updatePurchaserField = async (req, res) => {
+  const { verification_id } = req.params;
+  const { field_name, new_value } = req.body;
+
+  try {
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) },
+      include: { purchaser: true }
+    });
+
+    if (!verification) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Verification not found' }
+      });
+    }
+
+    if (!verification.purchaser) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Purchaser record not found' }
+      });
+    }
+
+    // Get old value
+    const old_value = verification.purchaser[field_name];
+
+    // Update the field
+    const updatedPurchaser = await prisma.purchaserVerification.update({
+      where: { id: verification.purchaser.id },
+      data: { [field_name]: new_value }
+    });
+
+    // Record edit history
+    await recordEditHistory(
+      verification_id,
+      'purchaser',
+      verification.purchaser.id,
+      field_name,
+      old_value,
+      new_value,
+      req.user.id,
+      req.user.full_name
+    );
+
+    // Get updated verification with history
+    const updatedVerification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) },
+      include: {
+        purchaser: true,
+        grantors: true,
+        edit_history: {
+          where: { entity_type: 'purchaser', entity_id: verification.purchaser.id },
+          orderBy: { edited_at: 'desc' }
+        }
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Purchaser field updated successfully',
+      data: {
+        purchaser: updatedPurchaser,
+        edit_history: updatedVerification.edit_history
+      }
+    });
+
+  } catch (error) {
+    console.error('Update purchaser field error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+// Update Grantor Field (New API for single field update)
+const updateGrantorField = async (req, res) => {
+  const { verification_id, grantor_id } = req.params;
+  const { field_name, new_value } = req.body;
+
+  try {
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) }
+    });
+
+    if (!verification) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Verification not found' }
+      });
+    }
+
+    const grantor = await prisma.grantorVerification.findFirst({
+      where: {
+        id: parseInt(grantor_id),
+        verification_id: parseInt(verification_id)
+      }
+    });
+
+    if (!grantor) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Grantor not found' }
+      });
+    }
+
+    // Get old value
+    const old_value = grantor[field_name];
+
+    // Update the field
+    const updatedGrantor = await prisma.grantorVerification.update({
+      where: { id: grantor.id },
+      data: { [field_name]: new_value }
+    });
+
+    // Record edit history
+    await recordEditHistory(
+      verification_id,
+      'grantor',
+      grantor.id,
+      field_name,
+      old_value,
+      new_value,
+      req.user.id,
+      req.user.full_name
+    );
+
+    // Get updated verification with history
+    const updatedVerification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) },
+      include: {
+        grantors: true,
+        edit_history: {
+          where: { entity_type: 'grantor', entity_id: grantor.id },
+          orderBy: { edited_at: 'desc' }
+        }
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Grantor field updated successfully',
+      data: {
+        grantor: updatedGrantor,
+        edit_history: updatedVerification.edit_history
+      }
+    });
+
+  } catch (error) {
+    console.error('Update grantor field error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+// Get Edit History for an entity
+const getEditHistory = async (req, res) => {
+  const { verification_id, entity_type, entity_id } = req.params;
+
+  try {
+    const history = await prisma.verificationEditHistory.findMany({
+      where: {
+        verification_id: parseInt(verification_id),
+        entity_type,
+        entity_id: parseInt(entity_id)
+      },
+      orderBy: { edited_at: 'desc' },
+      include: {
+        edited_by: {
+          select: { full_name: true, username: true }
+        }
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: { history }
+    });
+
+  } catch (error) {
+    console.error('Get edit history error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
 module.exports = {
   getVerifications,
   startVerification,
@@ -1620,6 +1876,9 @@ module.exports = {
   completeVerification,
   getVerificationByOrderId,
   submitVerificationReview,
+  updateGrantorField,
+  getEditHistory,
+  updatePurchaserField,
   getMyPendingOrders: getMyAssignedOrdersCursorPaginated('pending'),
   getMyConfirmedOrders: getMyAssignedOrdersCursorPaginated('confirmed'),
   getMyCancelledOrders: getMyAssignedOrdersCursorPaginated('cancelled'),

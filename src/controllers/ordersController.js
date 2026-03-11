@@ -925,6 +925,13 @@ const getApprovedOrders = async (req, res) => {
           },
           assigned_to: {
             select: { id: true, full_name: true, username: true }
+          },
+          delivery_officer: {
+            select: { 
+              id: true,
+              username: true,
+              full_name: true
+            }
           }
         }
       }),
@@ -970,8 +977,13 @@ const assignDelivery = async (req, res) => {
         where: { id: Number(id) },
         data: {
           delivery_officer_id: null,
+          status: 'approved'
+        },
+        include: {
+          delivery_officer: { select: { username: true } }
         }
       });
+
       return res.status(200).json({
         success: true,
         message: 'Delivery officer unassigned successfully',
@@ -1024,6 +1036,7 @@ const assignBulkDelivery = async (req, res) => {
         where: { id: { in: order_ids.map(Number) } },
         data: {
           delivery_officer_id: null,
+          status: 'approved'
         }
       });
       return res.status(200).json({

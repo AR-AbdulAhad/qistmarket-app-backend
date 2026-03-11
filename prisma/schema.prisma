@@ -64,6 +64,7 @@ model User {
   verification_reviews     VerificationReview[]    @relation("verification_reviewer")
   notifications            Notification[]
   outlet                   Outlet?                 @relation(fields: [outlet_id], references: [id])
+  verification_edit_history VerificationEditHistory[] @relation("user_edits")
 
   @@index([role_id])
   @@index([is_online])
@@ -267,6 +268,7 @@ model Verification {
   locations               LocationTracking[]
   nextOfKin               NextOfKinVerification?
   purchaser               PurchaserVerification?
+  edit_history            VerificationEditHistory[] @relation("verification_edits")
   order                   Order                  @relation("OrderVerification", fields: [order_id], references: [id], onDelete: Cascade)
   verification_officer    User                   @relation("verification_officer", fields: [verification_officer_id], references: [id])
   documents               VerificationDocument[]
@@ -597,4 +599,25 @@ model Area {
 enum EmploymentType {
   EMPLOYED
   SELF_EMPLOYED
+}
+
+model VerificationEditHistory {
+  id              Int          @id @default(autoincrement())
+  verification_id Int
+  entity_type     String      
+  entity_id       Int         
+  field_name      String      
+  old_value       String?      @db.Text
+  new_value       String?      @db.Text
+  edited_by_id    Int
+  edited_by_name  String
+  edited_at       DateTime     @default(now())
+  
+  verification    Verification @relation("verification_edits", fields: [verification_id], references: [id], onDelete: Cascade)
+  edited_by       User         @relation("user_edits", fields: [edited_by_id], references: [id])
+
+  @@index([verification_id])
+  @@index([entity_type, entity_id])
+  @@index([edited_by_id])
+  @@map("verification_edit_history")
 }
