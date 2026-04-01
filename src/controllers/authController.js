@@ -5,6 +5,7 @@ const { jwtSecret } = require('../config/jwtConfig');
 const sendEmail = require('../utils/sendEmail');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP } = require('../services/watiService');
+const { getOTPEmailTemplate } = require('../utils/emailTemplates');
 
 const notifyAdmins = async (title, message, type, relatedId = null, io = null) => {
   try {
@@ -121,25 +122,10 @@ const sendLoginOTP = async (req, res) => {
       await sendOTP(identifier, otp);
     } else {
       // Send OTP via Email
-      const emailHtml = `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
-          <h2 style="color: #333; text-align: center;">Login OTP Verification</h2>
-          <p style="font-size: 16px; color: #555;">Hello ${user.full_name || 'User'},</p>
-          <p style="font-size: 16px; color: #555;">Your OTP for login is:</p>
-          <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #0066cc; border-radius: 5px; margin: 20px 0;">
-            ${otp}
-          </div>
-          <p style="font-size: 14px; color: #777;">This OTP is valid for 10 minutes. Please do not share it with anyone.</p>
-          <p style="font-size: 14px; color: #777;">If you didn't request this OTP, please ignore this email.</p>
-          <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
-          <p style="font-size: 12px; color: #999; text-align: center;">© ${new Date().getFullYear()} Your Company. All rights reserved.</p>
-        </div>
-      `;
-
       await sendEmail({
         to: identifier,
         subject: 'Login OTP Verification',
-        html: emailHtml
+        html: getOTPEmailTemplate(otp, 'login', user.full_name)
       });
     }
 
@@ -201,14 +187,11 @@ const sendWebLoginOTP = async (req, res) => {
     if (isPhone) {
       await sendOTP(identifier, otp);
     } else {
-      const emailHtml = `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <h2>Dashboard Login OTP</h2>
-          <p>Your OTP for dashboard login is: <strong>${otp}</strong></p>
-          <p>This OTP is valid for 10 minutes.</p>
-        </div>
-      `;
-      await sendEmail({ to: identifier, subject: 'Dashboard Login OTP', html: emailHtml });
+      await sendEmail({ 
+        to: identifier, 
+        subject: 'Dashboard Login OTP', 
+        html: getOTPEmailTemplate(otp, 'web_login', user.full_name) 
+      });
     }
 
     return res.json({ success: true, message: 'OTP sent successfully.' });
@@ -338,10 +321,8 @@ const verifyWebLoginOTP = async (req, res) => {
   }
 };
 
-// ==================== EXISTING FUNCTIONS (Keep as they are) ====================
-
 const signup = async (req, res) => {
-  const { full_name, username, role_id, cnic, phone, email } = req.body;
+  const { full_name, username, role_id, cnic, phone, email, password, outlet_id } = req.body;
 
   if (!full_name || !username || !role_id || !cnic || !phone) {
     return res.status(400).json({
@@ -382,6 +363,12 @@ const signup = async (req, res) => {
       return res.status(404).json({ success: false, error: { code: 404, message: 'Invalid role selected.' } });
     }
 
+    let hashedPassword = null;
+    if (password) {
+      const bcrypt = require('bcryptjs');
+      hashedPassword = await bcrypt.hash(password, 10);
+    }
+
     const user = await prisma.user.create({
       data: {
         full_name,
@@ -390,9 +377,11 @@ const signup = async (req, res) => {
         cnic: cnic.trim(),
         phone: phone.trim(),
         email: email ? email.toLowerCase().trim() : null,
+        password_hash: hashedPassword,
+        outlet_id: outlet_id ? parseInt(outlet_id) : null,
         status: 'active',
       },
-      include: { role: true },
+      include: { role: true, outlet: true },
     });
 
     return res.status(201).json({
@@ -406,6 +395,7 @@ const signup = async (req, res) => {
           role: user.role.name,
           phone: user.phone,
           cnic: user.cnic,
+          outlet: user.outlet,
         },
       },
     });
@@ -467,6 +457,7 @@ const toggleUserStatus = async (req, res) => {
   }
 };
 
+
 const getUsers = async (req, res) => {
   try {
     const {
@@ -486,7 +477,6 @@ const getUsers = async (req, res) => {
       role_id: { not: 7 },
     };
 
-    // Global search
     if (search.trim()) {
       where.OR = [
         { full_name: { contains: search.trim() } },
@@ -497,30 +487,28 @@ const getUsers = async (req, res) => {
       ];
     }
 
-    // Status filter
     if (status && ['active', 'inactive'].includes(status.toLowerCase())) {
       where.status = status.toLowerCase();
     }
 
-    // Role filter
     if (role.trim()) {
       where.role = {
         name: { equals: role.trim() },
       };
     }
 
-    // Sorting
     const orderBy = {};
     const validSortFields = ['full_name', 'username', 'email', 'phone', 'cnic', 'status', 'created_at'];
     orderBy[validSortFields.includes(sortBy) ? sortBy : 'created_at'] = sortDir === 'asc' ? 'asc' : 'desc';
 
-    // Total count for pagination
     const total = await prisma.user.count({ where });
 
-    // Fetch paginated data
     const users = await prisma.user.findMany({
       where,
-      include: { role: true },
+      include: { 
+        role: true,
+        outlet: true
+      },
       skip: (pageNum - 1) * limitNum,
       take: limitNum,
       orderBy,
@@ -539,6 +527,8 @@ const getUsers = async (req, res) => {
       image: user.image,
       coverImage: user.coverImage,
       permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
+      outlet_id: user.outlet_id,
+      outlet: user.outlet,
     }));
 
     return res.json({
@@ -564,11 +554,12 @@ const getUsers = async (req, res) => {
   }
 };
 
+
 const editUser = async (req, res) => {
   const { userId } = req.params;
-  const { full_name, username, role_id, cnic, phone, email, status, bio } = req.body;
+  const { full_name, username, role_id, cnic, phone, email, status, bio, outlet_id, password } = req.body;
 
-  if (!full_name && !username && !role_id && !cnic && !phone && !email && !status && !bio) {
+  if (!full_name && !username && !role_id && !cnic && !phone && !email && !status && !bio && !outlet_id && !password) {
     return res.status(400).json({
       success: false,
       error: { code: 400, message: 'No fields provided to update.' },
@@ -609,10 +600,20 @@ const editUser = async (req, res) => {
       ...(coverImage && { coverImage }),
     };
 
+    if (outlet_id !== undefined) {
+      updateData.outlet_id = outlet_id ? parseInt(outlet_id) : null;
+    }
+
+    if (password && password.trim() !== '') {
+      const bcrypt = require('bcryptjs');
+      const hashedPassword = await bcrypt.hash(password.trim(), 10);
+      updateData.password_hash = hashedPassword;
+    }
+
     const updatedUser = await prisma.user.update({
       where: { id: parseInt(userId) },
       data: updateData,
-      include: { role: true },
+      include: { role: true, outlet: true },
     });
 
     return res.json({
@@ -628,6 +629,7 @@ const editUser = async (req, res) => {
           cnic: updatedUser.cnic,
           role: updatedUser.role.name,
           status: updatedUser.status,
+          outlet: updatedUser.outlet,
         },
       },
     });
@@ -718,6 +720,7 @@ const getMe = async (req, res) => {
         image: true,
         coverImage: true,
         status: true,
+        officer_profile_history: true,
         created_at: true,
         updated_at: true,
         role: {

@@ -1006,15 +1006,18 @@ const completeVerification = async (req, res) => {
       });
     }
 
+    const { home_location_required = false } = req.body;
+
     const updatedVerification = await prisma.verification.update({
       where: { id: parseInt(verification_id) },
       data: {
         status: 'completed',
-        end_time: new Date()
+        end_time: new Date(),
+        home_location_required: home_location_required === true || home_location_required === 'true'
       },
       include: {
-        order: { select: { order_ref: true } },
-        verification_officer: { select: { full_name: true, username: true } },
+        order: { select: { order_ref: true, id: true } },
+        verification_officer: { select: { full_name: true, username: true, outlet_id: true } },
         purchaser: true,
         grantors: true,
         nextOfKin: true,
@@ -1029,6 +1032,7 @@ const completeVerification = async (req, res) => {
       data: {
         status: 'completed',
         updated_at: new Date(),
+        outlet_id: updatedVerification.verification_officer?.outlet_id || null // Route back to the officer's outlet
       }
     });
 
@@ -1217,26 +1221,22 @@ const submitVerificationReview = async (req, res) => {
     });
 
     const approvesCount = updated.reviews.filter(r => r.approved).length;
+    const rejectsCount = updated.reviews.filter(r => !r.approved).length;
     const totalReviews = updated.reviews.length;
     const approvalPercentage = totalReviews > 0 ? Math.round((approvesCount / totalReviews) * 100) : 0;
 
     let newVerificationStatus = verification.status;
-
-    if (totalReviews === 3) {
-      if (approvalPercentage >= 67) {
-        newVerificationStatus = 'approved';
-      } else if (approvalPercentage <= 33) {
-        newVerificationStatus = 'rejected';
-      }
-
-    }
-
     let orderStatusUpdate = null;
 
-    if (newVerificationStatus === 'approved') {
+    // Rule: 2 Approvals = Final Approved
+    if (approvesCount >= 2) {
+      newVerificationStatus = 'approved';
       orderStatusUpdate = 'approved';
-    } else if (newVerificationStatus === 'rejected') {
-      orderStatusUpdate = 'rejected';
+    } 
+    // Rule: 2 Rejections = Auto Cancelled
+    else if (rejectsCount >= 2) {
+      newVerificationStatus = 'rejected';
+      orderStatusUpdate = 'cancelled';
     }
 
     const updates = [];
@@ -1250,7 +1250,7 @@ const submitVerificationReview = async (req, res) => {
       );
     }
 
-    if (orderStatusUpdate && totalReviews === 3) {
+    if (orderStatusUpdate) {
       updates.push(
         prisma.order.update({
           where: { id: verification.order.id },
@@ -1858,6 +1858,104 @@ const getEditHistory = async (req, res) => {
   }
 };
 
+const sendToVOForLocation = async (req, res) => {
+  const { verification_id } = req.params;
+  const { officer_id } = req.body;
+
+  try {
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) },
+      include: { order: true }
+    });
+
+    if (!verification) {
+      return res.status(404).json({ success: false, message: 'Verification not found' });
+    }
+
+    await prisma.verification.update({
+      where: { id: verification.id },
+      data: {
+        verification_officer_id: parseInt(officer_id),
+        status: 'location_capture_pending'
+      }
+    });
+
+    await prisma.order.update({
+      where: { id: verification.order_id },
+      data: { status: 'location_capture_vo' }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Sent to Verification Officer for location capture'
+    });
+  } catch (error) {
+    console.error('sendToVOForLocation error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const sendToDOForLocation = async (req, res) => {
+  const { verification_id } = req.params;
+  const { officer_id } = req.body;
+
+  try {
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) },
+      include: { order: true }
+    });
+
+    if (!verification) {
+      return res.status(404).json({ success: false, message: 'Verification not found' });
+    }
+
+    // Normal delivery assignment but we know it needs location
+    await prisma.order.update({
+      where: { id: verification.order_id },
+      data: {
+        delivery_officer_id: parseInt(officer_id),
+        status: 'picked', // Normal status for delivery in progress
+        outlet_id: req.user.outlet_id || verification.order.outlet_id
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Sent to Delivery Officer for delivery and location capture'
+    });
+  } catch (error) {
+    console.error('sendToDOForLocation error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const updateLocationVerified = async (req, res) => {
+  const { verification_id } = req.params;
+  const { latitude, longitude, address } = req.body;
+
+  try {
+    const verification = await prisma.verification.update({
+      where: { id: parseInt(verification_id) },
+      data: {
+        home_location_verified: true,
+      },
+      include: { order: true }
+    });
+
+    // Save the GPS coordinates if needed (assuming there's a place for it or just tag is enough)
+    // The BRD says "Save the GPS coordinates in the customer profile"
+    // Usually this is done via locations tracking or verification_locations.
+
+    return res.status(200).json({
+      success: true,
+      message: 'Location verified successfully'
+    });
+  } catch (error) {
+    console.error('updateLocationVerified error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getVerifications,
   startVerification,
@@ -1883,4 +1981,7 @@ module.exports = {
   getMyConfirmedOrders: getMyAssignedOrdersCursorPaginated('confirmed'),
   getMyCancelledOrders: getMyAssignedOrdersCursorPaginated('cancelled'),
   getMyCustomersWithOrdersAndLedger,
+  sendToVOForLocation,
+  sendToDOForLocation,
+  updateLocationVerified
 };

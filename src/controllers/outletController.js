@@ -93,6 +93,8 @@ const loginOutletUser = async (req, res) => {
             include: { role: true }
         });
 
+        console.log('loginOutletUser found user:', username.toLowerCase().trim(), outlet.id);
+
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found or not assigned to this outlet.' });
         }

@@ -15,6 +15,7 @@ const jwt = require('jsonwebtoken');
 // ────────────────────────────────────────────────
 const authRoutes = require('./src/routes/authRoutes');
 const orderRoutes = require('./src/routes/orderRoutes');
+const { expireOrders } = require('./src/controllers/ordersController');
 const verificationRoutes = require('./src/routes/verificationRoutes');
 const appVerificationOtpRoutes = require('./src/routes/appVerificationOtpRoutes');
 const deliveryRoutes = require('./src/routes/deliveryRoutes');
@@ -32,6 +33,7 @@ const cashRegisterRoutes = require('./src/routes/cashRegisterRoutes');
 const expenseRoutes = require('./src/routes/expenseRoutes');
 const vendorRoutes = require('./src/routes/vendorRoutes');
 const inventoryRoutes = require('./src/routes/inventoryRoutes');
+const outletReportRoutes = require('./src/routes/outletReportRoutes');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -356,12 +358,15 @@ app.use('/api/address', addressRoutes);
 app.use('/api', productRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/customers', customerRoutes);
+const complaintRoutes = require('./src/routes/complaintRoutes');
+app.use('/api/complaints', complaintRoutes);
 app.use('/api', reportRoutes);
 app.use('/api', outletRoutes);
 app.use('/api', cashRegisterRoutes);
 app.use('/api', expenseRoutes);
 app.use('/api', vendorRoutes);
 app.use('/api', inventoryRoutes);
+app.use('/api', outletReportRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -392,6 +397,20 @@ server.listen(PORT, () => {
   console.log(`CORS origins    : ${io.engine.opts.cors.origin}`);
   console.log(`Time            : ${new Date().toLocaleString('en-PK')}`);
   console.log(`═══════════════════════════════════════════════════════`);
+
+  const runExpiryTask = async () => {
+    try {
+      const result = await expireOrders(io);
+      if (result.expiredCount > 0) {
+        console.log(`Order expiry task: expired ${result.expiredCount} order(s)`);
+      }
+    } catch (err) {
+      console.error('Order expiry task failed:', err);
+    }
+  };
+
+  runExpiryTask();
+  setInterval(runExpiryTask, 5 * 60 * 1000);
 });
 
 // Graceful shutdown

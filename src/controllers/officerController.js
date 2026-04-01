@@ -98,17 +98,70 @@ const updateOfficerProfile = async (req, res) => {
   const { bike_km_range, working_hours_start, working_hours_end } = req.body;
 
   try {
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true,
+        officer_profile_history: true,
+      },
+    });
+
+    if (!currentUser) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'User not found' } });
+    }
+
+    const updatedBikeKmRange =
+      bike_km_range !== undefined && bike_km_range !== null && bike_km_range !== ''
+        ? parseInt(bike_km_range, 10)
+        : currentUser.bike_km_range;
+    const updatedStart = working_hours_start !== undefined ? working_hours_start : currentUser.working_hours_start;
+    const updatedEnd = working_hours_end !== undefined ? working_hours_end : currentUser.working_hours_end;
+
+    const hasChange =
+      updatedBikeKmRange !== currentUser.bike_km_range ||
+      updatedStart !== currentUser.working_hours_start ||
+      updatedEnd !== currentUser.working_hours_end;
+
+    const historyEntry = hasChange
+      ? {
+          updatedAt: new Date().toISOString(),
+          previous: {
+            bike_km_range: currentUser.bike_km_range,
+            working_hours_start: currentUser.working_hours_start,
+            working_hours_end: currentUser.working_hours_end,
+          },
+          updated: {
+            bike_km_range: updatedBikeKmRange,
+            working_hours_start: updatedStart,
+            working_hours_end: updatedEnd,
+          },
+        }
+      : null;
+
     const updated = await prisma.user.update({
       where: { id: req.user.id },
       data: {
-        ...(bike_km_range !== undefined && { bike_km_range: parseInt(bike_km_range) }),
-        ...(working_hours_start && { working_hours_start }),
-        ...(working_hours_end && { working_hours_end }),
+        ...(bike_km_range !== undefined && bike_km_range !== null && bike_km_range !== '' && {
+          bike_km_range: updatedBikeKmRange,
+        }),
+        ...(working_hours_start !== undefined && { working_hours_start: updatedStart }),
+        ...(working_hours_end !== undefined && { working_hours_end: updatedEnd }),
+        ...(historyEntry && {
+          officer_profile_history: [
+            ...(Array.isArray(currentUser.officer_profile_history)
+              ? currentUser.officer_profile_history
+              : []),
+            historyEntry,
+          ],
+        }),
       },
       select: {
         bike_km_range: true,
         working_hours_start: true,
         working_hours_end: true,
+        officer_profile_history: true,
       },
     });
 
@@ -131,6 +184,7 @@ const getMyOfficerStatus = async (req, res) => {
         bike_km_range: true,
         working_hours_start: true,
         working_hours_end: true,
+        officer_profile_history: true,
       },
     });
 

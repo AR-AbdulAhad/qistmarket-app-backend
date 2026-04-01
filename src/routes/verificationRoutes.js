@@ -28,7 +28,10 @@ const {
   getMyCustomersWithOrdersAndLedger,
   updatePurchaserField,
   updateGrantorField,
-  getEditHistory
+  getEditHistory,
+  sendToVOForLocation,
+  sendToDOForLocation,
+  updateLocationVerified
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -124,5 +127,10 @@ router.post('/verification/:verification_id/complete', authenticateJWT, complete
 
 // Submit review (replaces admin approval)
 router.post('/verification/:verification_id/approve', authenticateJWT, submitVerificationReview);
+
+// NEW: Location Handling
+router.post('/verification/:verification_id/send-to-vo', authenticateJWT, sendToVOForLocation);
+router.post('/verification/:verification_id/send-to-do', authenticateJWT, sendToDOForLocation);
+router.patch('/verification/:verification_id/location-verified', authenticateJWT, updateLocationVerified);
 
 module.exports = router;

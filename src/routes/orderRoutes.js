@@ -17,7 +17,15 @@ const {
   getDeliveredOrders,
   assignRecovery,
   assignBulkRecovery,
-  getMyDeliveryOrdersWithPagination
+  getMyDeliveryOrdersWithPagination,
+  initiateHandover,
+  verifyHandover,
+  getOutletDeliveryOfficers,
+  getOfficerApprovedOrders,
+  getHandoverHistory,
+  takeOrder,
+  getCsrDashboardStats,
+  getExpiredAssignedOrders
 } = require('../controllers/ordersController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -32,6 +40,8 @@ router.get('/orders/delivery-pending', authenticateJWT, getApprovedOrders);
 router.get('/orders/delivery-status', authenticateJWT, getDeliveryStatus);
 router.post('/orders/create', authenticateJWT, createOrder);
 router.get('/orders', authenticateJWT, getOrders);
+router.get('/orders/csr-dashboard-stats', authenticateJWT, getCsrDashboardStats);
+router.get('/orders/expired/assigned', authenticateJWT, getExpiredAssignedOrders);
 router.get('/orders/scroll', authenticateJWT, getOrdersWithPagination);
 router.get('/orders/deliver/scroll', authenticateJWT, getMyDeliveryOrdersWithPagination);
 router.patch('/orders/:id/assign', authenticateJWT, assignOrder);
@@ -41,5 +51,15 @@ router.patch('/orders/:id/assign-delivery', authenticateJWT, assignDelivery);
 router.post('/orders/assign-bulk-delivery', authenticateJWT, assignBulkDelivery);
 router.patch('/orders/:id/cancel', authenticateJWT, cancelOrder);
 router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
+router.patch('/orders/:id/take', authenticateJWT, takeOrder);
+
+// Handover Routes
+router.post('/orders/:id/initiate-handover', authenticateJWT, initiateHandover);
+router.post('/orders/:id/verify-handover', authenticateJWT, verifyHandover);
+
+// Outlet Handover Management
+router.get('/orders/handover/history', authenticateJWT, getHandoverHistory);
+router.get('/orders/outlet/officers', authenticateJWT, getOutletDeliveryOfficers);
+router.get('/orders/outlet/officers/:officerId/approved', authenticateJWT, getOfficerApprovedOrders);
 
 module.exports = router;

@@ -334,122 +334,20 @@ const getDeliveryBoyDetails = async (req, res) => {
   }
 };
 
-// 3. Generate & send OTP to delivery boy for all his pending orders
+// 3. Generate & send OTP to delivery boy for all his pending orders (DISABLED: REPLACED BY HANDOVER WORKFLOW)
 const generatePickupOtp = async (req, res) => {
-  const { deliveryBoyId } = req.body;
-
-  if (!deliveryBoyId) {
-    return res.status(400).json({ success: false, error: 'deliveryBoyId required' });
-  }
-
-  try {
-    const boy = await prisma.user.findUnique({
-      where: { id: Number(deliveryBoyId) },
-      select: { phone: true }
-    });
-
-    if (!boy) return res.status(404).json({ success: false, error: 'Delivery boy not found' });
-
-    const whatsapp = boy.phone;
-    if (!whatsapp) {
-      return res.status(400).json({ success: false, error: 'No WhatsApp or phone number' });
-    }
-
-    const otp = Math.floor(10000 + Math.random() * 90000).toString();
-    const expiresAt = new Date(Date.now() + 20 * 60 * 1000); // 20 minutes
-
-    // Find pending orders without OTP
-    const pending = await prisma.order.findMany({
-      where: {
-        delivery_officer_id: Number(deliveryBoyId),
-        is_delivered: false,
-        pickup_otp: null
-      },
-      select: { id: true }
-    });
-
-    if (pending.length === 0) {
-      return res.status(400).json({ success: false, error: 'No pending orders available' });
-    }
-
-    const ids = pending.map(o => o.id);
-
-    await prisma.order.updateMany({
-      where: { id: { in: ids } },
-      data: {
-        pickup_otp: otp,
-        otp_generated_at: new Date(),
-        otp_expires_at: expiresAt
-      }
-    });
-
-    // Send via WATI
-    const url = `${WATI_BASE_URL}/api/v2/sendTemplateMessage?whatsappNumber=+92${whatsapp.slice(1)}`;
-    await axios.post(url, {
-      template_name: WATI_TEMPLATE_NAME,
-      broadcast_name: WATI_BROADCAST_NAME,
-      parameters: [{ name: '1', value: otp }]
-    }, {
-      headers: {
-        Authorization: `Bearer ${WATI_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    return res.json({
-      success: true,
-      message: 'OTP generated and sent via WhatsApp',
-      // otp: otp   // ← comment out or remove in production!
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: 'Failed to send OTP' });
-  }
+  return res.status(410).json({ 
+    success: false, 
+    message: 'This feature is disabled. Please use the Stock Handover workflow from the Outlet portal.' 
+  });
 };
 
-// 4. Verify OTP and mark orders as picked
+// 4. Verify OTP and mark orders as picked (DISABLED: REPLACED BY HANDOVER WORKFLOW)
 const verifyPickupOtp = async (req, res) => {
-  const { deliveryBoyId, otp } = req.body;
-
-  if (!deliveryBoyId || !otp || otp.length !== 5) {
-    return res.status(400).json({ success: false, error: 'Invalid request' });
-  }
-
-  try {
-    const orders = await prisma.order.findMany({
-      where: {
-        delivery_officer_id: Number(deliveryBoyId),
-        pickup_otp: otp,
-        is_delivered: false,
-        otp_expires_at: { gt: new Date() }
-      },
-      select: { id: true }
-    });
-
-    if (orders.length === 0) {
-      return res.status(400).json({ success: false, error: 'Invalid or expired OTP' });
-    }
-
-    const ids = orders.map(o => o.id);
-
-    await prisma.order.updateMany({
-      where: { id: { in: ids } },
-      data: {
-        status: 'picked',
-        pickup_otp: null,
-        otp_generated_at: null,
-        otp_expires_at: null
-      }
-    });
-
-    return res.json({
-      success: true,
-      message: `${orders.length} orders marked as picked`
-    });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: 'Server error' });
-  }
+  return res.status(410).json({ 
+    success: false, 
+    message: 'This feature is disabled. Please use the Stock Handover workflow from the Outlet portal.' 
+  });
 };
 
 module.exports = {

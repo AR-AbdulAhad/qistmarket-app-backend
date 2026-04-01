@@ -15,14 +15,28 @@ if (!admin.apps.length) {
   });
 }
 
-async function sendAssignmentNotification(order, user, io = null) {
-  const title = 'New Order Assigned';
-  const message = `Order ${order.order_ref} has been assigned to you for verification.`;
-  const type = 'order_assignment';
+async function sendOrderAssignmentNotification(order, user, type, io = null) {
+  let title = 'New Order Assigned';
+  let message = `Order ${order.order_ref} has been assigned to you.`;
+  let notificationType = 'order_assignment';
+
+  if (type === 'verification') {
+    title = 'New Order Assigned';
+    message = `Order ${order.order_ref} has been assigned to you for verificationss.`;
+    notificationType = 'order_assignment';
+  } else if (type === 'delivery') {
+    title = 'New Order Assigned for Delivery';
+    message = `Order ${order.order_ref} has been assigned to you for Delivery.`;
+    notificationType = 'delivery_assignment';
+  } else if (type === 'recovery') {
+    title = 'New Order Assigned for Recovery';
+    message = `Order ${order.order_ref} has been assigned to you for Recovery.`;
+    notificationType = 'recovery_assignment';
+  }
 
   // Save to DB and emit Socket.io
   if (user?.id) {
-    await notifyUser(user.id, title, message, type, order.id, io);
+    await notifyUser(user.id, title, message, notificationType, order.id, io);
   }
 
   if (!user?.fcm_token) return;
@@ -34,6 +48,7 @@ async function sendAssignmentNotification(order, user, io = null) {
       data: {
         order_id: order.id.toString(),
         order_ref: order.order_ref,
+        type: notificationType,
       },
     });
   } catch (fcmError) {
@@ -41,31 +56,67 @@ async function sendAssignmentNotification(order, user, io = null) {
   }
 }
 
-async function sendDeliveryAssignmentNotification(order, user, io = null) {
-  const title = 'New Order Assigned for Delivery';
-  const message = `Order ${order.order_ref} has been assigned to you for Delivery.`;
-  const type = 'delivery_assignment';
+const expireOrders = async (io = null) => {
+  const now = new Date();
+  const pendingExpiry = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+  const inProgressExpiry = new Date(now.getTime() - 48 * 60 * 60 * 1000);
 
-  // Save to DB and emit Socket.io
-  if (user?.id) {
-    await notifyUser(user.id, title, message, type, order.id, io);
+  const pendingOrders = await prisma.order.findMany({
+    where: {
+      status: 'pending',
+      updated_at: { lt: pendingExpiry },
+    },
+    include: { assigned_to: true },
+  });
+
+  const inProgressOrders = await prisma.order.findMany({
+    where: {
+      status: 'in_progress',
+      updated_at: { lt: inProgressExpiry },
+    },
+    include: { assigned_to: true },
+  });
+
+  const ordersToExpire = [...pendingOrders, ...inProgressOrders];
+  if (ordersToExpire.length === 0) {
+    return { expiredCount: 0 };
   }
 
-  if (!user?.fcm_token) return;
+  const orderIds = ordersToExpire.map((order) => order.id);
+  await prisma.order.updateMany({
+    where: { id: { in: orderIds } },
+    data: { status: 'expired' },
+  });
 
-  try {
-    await admin.messaging().send({
-      token: user.fcm_token,
-      notification: { title, body: message },
-      data: {
-        order_id: order.id.toString(),
-        order_ref: order.order_ref,
-      },
-    });
-  } catch (fcmError) {
-    console.error('FCM send failed:', fcmError);
+  for (const order of ordersToExpire) {
+    const orderData = {
+      id: order.id,
+      order_ref: order.order_ref,
+      previous_status: order.status,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (io) {
+      if (order.assigned_to?.id) {
+        io.to(`user_${order.assigned_to.id}`).emit('order_expired', orderData);
+      }
+      io.to('admins').emit('order_expired', orderData);
+    }
+
+    if (order.assigned_to?.id) {
+      await notifyUser(
+        order.assigned_to.id,
+        'Order Expired',
+        `Order ${order.order_ref} has been marked expired due to inactivity.`,
+        'order_expired',
+        order.id,
+        io,
+      );
+    }
   }
-}
+
+  return { expiredCount: ordersToExpire.length };
+};
 
 function getDateRangeFilter(range, start, end) {
   const now = new Date();
@@ -276,7 +327,7 @@ const createOrder = async (req, res) => {
     if (assignedOfficerId) {
       // Send notification
       const io = req.app.get('io');
-      await sendAssignmentNotification(order, order.assigned_to, io);
+      await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
     }
 
     return res.status(201).json({
@@ -447,6 +498,13 @@ const getOrdersWithPagination = async (req, res) => {
           } else {
             baseWhere.status = value;
           }
+        } else if (key === 'channel') {
+          const channelList = value.split(',').map(s => s.trim());
+          if (channelList.length > 1) {
+            baseWhere.channel = { in: channelList };
+          } else {
+            baseWhere.channel = value;
+          }
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
@@ -509,6 +567,194 @@ const getOrdersWithPagination = async (req, res) => {
       success: false,
       error: { code: 500, message: 'Internal server error' },
     });
+  }
+};
+
+const takeOrder = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+    });
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    if (order.channel !== 'website' && order.channel !== 'Website') {
+      return res.status(400).json({ success: false, message: 'Only website orders can be taken here' });
+    }
+
+    if (order.status !== 'new' && order.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Order cannot be taken in its current status' });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: Number(id) },
+      data: {
+        assigned_to_user_id: req.user.id,
+        status: 'pending',
+      },
+      include: {
+        assigned_to: { select: { id: true, username: true } },
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Website order taken successfully',
+      data: { order: updatedOrder },
+    });
+  } catch (error) {
+    console.error('takeOrder error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const getCsrDashboardStats = async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const [totalToday, websitePending, repeatCustomerGroups, clearAccountsCount, statusCounts] = await Promise.all([
+      prisma.order.count({
+        where: {
+          created_at: { gte: today, lt: tomorrow },
+        },
+      }),
+      prisma.order.count({
+        where: {
+          channel: { in: ['website', 'Website'] },
+          status: { in: ['new', 'pending'] },
+        },
+      }),
+      prisma.order.groupBy({
+        by: ['whatsapp_number'],
+        where: {
+          created_at: { gte: today, lt: tomorrow },
+          whatsapp_number: { not: '' },
+        },
+        _count: { whatsapp_number: true },
+      }),
+      prisma.order.count({
+        where: {
+          status: { in: ['delivered', 'completed'] },
+        }
+      }),
+      prisma.order.groupBy({
+        by: ['status'],
+        _count: { id: true },
+      }),
+    ]);
+
+    const [dailySalesSum, weeklySalesSum, monthlySalesSum] = await Promise.all([
+      prisma.order.aggregate({
+        _sum: { total_amount: true },
+        where: {
+          created_at: { gte: today, lt: tomorrow },
+          status: { not: 'cancelled' },
+        },
+      }),
+      prisma.order.aggregate({
+        _sum: { total_amount: true },
+        where: {
+          created_at: { gte: new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6), lt: tomorrow },
+          status: { not: 'cancelled' },
+        },
+      }),
+      prisma.order.aggregate({
+        _sum: { total_amount: true },
+        where: {
+          created_at: { gte: new Date(today.getFullYear(), today.getMonth(), 1), lt: tomorrow },
+          status: { not: 'cancelled' },
+        },
+      }),
+    ]);
+
+    const repeatCustomers = repeatCustomerGroups.filter(group => group._count.whatsapp_number > 1).length;
+    const statuses = statusCounts.reduce((acc, item) => {
+      acc[item.status] = item._count.id;
+      return acc;
+    }, {});
+
+    const dailySales = dailySalesSum._sum.total_amount || 0;
+    const weeklySales = weeklySalesSum._sum.total_amount || 0;
+    const monthlySales = monthlySalesSum._sum.total_amount || 0;
+    const target = Number(process.env.CSR_SALES_TARGET || 0);
+    const remainingTarget = target > 0 ? Math.max(0, target - dailySales) : 0;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        totalOrdersToday: totalToday,
+        websiteOrdersPending: websitePending,
+        repeatCustomersToday: repeatCustomers,
+        clearAccountsCount,
+        statusCounts: {
+          new: statuses.new || 0,
+          pending: statuses.pending || 0,
+          in_progress: statuses.in_progress || 0,
+          expired: statuses.expired || 0,
+          picked: statuses.picked || 0,
+          delivered: statuses.delivered || 0,
+          cancelled: statuses.cancelled || 0,
+          approved: statuses.approved || 0,
+        },
+        dailySales,
+        weeklySales,
+        monthlySales,
+        remainingTarget,
+      },
+    });
+  } catch (error) {
+    console.error('getCsrDashboardStats error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const getExpiredAssignedOrders = async (req, res) => {
+  const userRole = (req.user.role || '').toLowerCase();
+  const isVerificationOfficer = req.user.role_id === 1 || userRole.includes('verification');
+
+  if (!isVerificationOfficer) {
+    return res.status(403).json({ success: false, message: 'Access denied. Verification officers only.' });
+  }
+
+  const page = Number(req.query.page || 1);
+  const limit = Number(req.query.limit || 20);
+  const skip = (page - 1) * limit;
+
+  try {
+    const where = {
+      assigned_to_user_id: req.user.id,
+      status: 'expired',
+    };
+
+    const total = await prisma.order.count({ where });
+    const orders = await prisma.order.findMany({
+      where,
+      orderBy: { updated_at: 'desc' },
+      skip,
+      take: limit,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        orders,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 1,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('getExpiredAssignedOrders error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
@@ -750,7 +996,7 @@ const assignOrder = async (req, res) => {
     });
 
     const io = req.app.get('io');
-    await sendAssignmentNotification(updatedOrder, updatedOrder.assigned_to, io);
+    await sendOrderAssignmentNotification(updatedOrder, updatedOrder.assigned_to, 'verification', io);
 
     return res.status(200).json({
       success: true,
@@ -803,7 +1049,7 @@ const assignBulk = async (req, res) => {
       order_id: parseInt(id),
       verification_officer_id: parseInt(user_id),
       status: 'in_progress',
-      start_time: new Date(),
+      start_time: new Date()
     }));
 
     await prisma.$transaction([
@@ -819,6 +1065,19 @@ const assignBulk = async (req, res) => {
         skipDuplicates: true
       })
     ]);
+
+    // Send notifications for bulk assignment
+    const io = req.app.get('io');
+    const updatedOrders = await prisma.order.findMany({
+      where: { id: { in: order_ids.map(Number) } },
+      include: { assigned_to: { select: { id: true, username: true, fcm_token: true } } }
+    });
+
+    for (const order of updatedOrders) {
+      if (order.assigned_to) {
+        await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -927,7 +1186,7 @@ const getApprovedOrders = async (req, res) => {
             select: { id: true, full_name: true, username: true }
           },
           delivery_officer: {
-            select: { 
+            select: {
               id: true,
               username: true,
               full_name: true
@@ -977,6 +1236,7 @@ const assignDelivery = async (req, res) => {
         where: { id: Number(id) },
         data: {
           delivery_officer_id: null,
+          outlet_id: null, // Also unassign from outlet
           status: 'approved'
         },
         include: {
@@ -995,11 +1255,18 @@ const assignDelivery = async (req, res) => {
       return res.status(400).json({ success: false, message: 'delivery_officer_id (user_id) required' });
     }
 
+    // Connect to specific Outlet based on delivery officer
+    const officer = await prisma.user.findUnique({
+      where: { id: Number(user_id) },
+      select: { outlet_id: true }
+    });
+
     const updatedOrder = await prisma.order.update({
       where: { id: Number(id) },
       data: {
         delivery_officer_id: Number(user_id),
-        status: 'picked'
+        outlet_id: officer?.outlet_id || null, // Connects order to the outlet
+        status: 'approved' // Assignment starts from approved (ready for outlet handover)
       },
       include: {
         delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
@@ -1009,7 +1276,7 @@ const assignDelivery = async (req, res) => {
     // Send notification
     const io = req.app.get('io');
     if (updatedOrder.delivery_officer) {
-      await sendDeliveryAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, io);
+      await sendOrderAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, 'delivery', io);
     }
 
     return res.status(200).json({
@@ -1036,6 +1303,7 @@ const assignBulkDelivery = async (req, res) => {
         where: { id: { in: order_ids.map(Number) } },
         data: {
           delivery_officer_id: null,
+          outlet_id: null, // Also unassign from outlet
           status: 'approved'
         }
       });
@@ -1049,13 +1317,33 @@ const assignBulkDelivery = async (req, res) => {
       return res.status(400).json({ success: false, message: 'user_id required' });
     }
 
+    // Get the officer's outlet ID
+    const officer = await prisma.user.findUnique({
+      where: { id: Number(user_id) },
+      select: { outlet_id: true }
+    });
+
     await prisma.order.updateMany({
       where: { id: { in: order_ids.map(Number) } },
       data: {
         delivery_officer_id: Number(user_id),
-        status: 'picked'
+        outlet_id: officer?.outlet_id || null, // Connects order to the outlet
+        status: 'approved'
       }
     });
+
+    // Send notifications for bulk delivery assignment
+    const io = req.app.get('io');
+    const updatedOrders = await prisma.order.findMany({
+      where: { id: { in: order_ids.map(Number) } },
+      include: { delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } } }
+    });
+
+    for (const order of updatedOrders) {
+      if (order.delivery_officer) {
+        await sendOrderAssignmentNotification(order, order.delivery_officer, 'delivery', io);
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -1069,260 +1357,411 @@ const assignBulkDelivery = async (req, res) => {
 
 const cancelOrder = async (req, res) => {
   const { id } = req.params;
-  const { reason = 'Cancelled by admin' } = req.body;
+  const { reason } = req.body;
 
   try {
     const updatedOrder = await prisma.order.update({
-      where: { id: Number(id) },
+      where: { id: parseInt(id) },
       data: {
         status: 'cancelled',
-        cancelled_reason: reason,
-        cancelled_at: new Date()
-      }
+        cancelled_at: new Date(),
+        cancelled_reason: reason || 'Cancelled by admin',
+      },
     });
 
     return res.status(200).json({
       success: true,
       message: 'Order cancelled successfully',
-      data: { order: updatedOrder }
+      data: { order: updatedOrder },
     });
   } catch (error) {
-    console.error(error);
+    console.error('Cancel order error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 const updateOrderItem = async (req, res) => {
   const { id } = req.params;
-  const { product_name } = req.body;
-
-  if (!product_name) {
-    return res.status(400).json({
-      success: false,
-      error: { code: 400, message: 'Product name is required' }
-    });
-  }
+  const { product_name, total_amount, advance_amount, monthly_amount, months } = req.body;
 
   try {
-    const order = await prisma.order.findUnique({
-      where: { id: parseInt(id) }
-    });
+    const order = await prisma.order.findUnique({ where: { id: parseInt(id) } });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        error: { code: 404, message: 'Order not found' }
-      });
-    }
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      if (product_name && product_name !== order.product_name) {
+        await tx.orderProductHistory.create({
+          data: {
+            order_id: order.id,
+            previous_product: order.product_name,
+            current_product: product_name,
+            changed_by_user_id: req.user.id,
+          },
+        });
+      }
 
-    const previous_product = order.product_name;
-
-    const [updatedOrder, history] = await prisma.$transaction([
-      prisma.order.update({
+      return tx.order.update({
         where: { id: parseInt(id) },
-        data: { product_name }
-      }),
-      prisma.orderProductHistory.create({
         data: {
-          order_id: parseInt(id),
-          previous_product,
-          current_product: product_name,
-          changed_by_user_id: req.user.id
-        }
-      })
-    ]);
+          product_name,
+          total_amount: total_amount ? parseFloat(total_amount) : undefined,
+          advance_amount: advance_amount ? parseFloat(advance_amount) : undefined,
+          monthly_amount: monthly_amount ? parseFloat(monthly_amount) : undefined,
+          months: months ? parseInt(months) : undefined,
+        },
+      });
+    });
 
     return res.status(200).json({
       success: true,
       message: 'Order item updated successfully',
-      data: { order: updatedOrder, history }
+      data: { order: updatedOrder },
     });
   } catch (error) {
     console.error('Update order item error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 const getDeliveryStatus = async (req, res) => {
   try {
-    const orders = await prisma.order.findMany({
-      where: {
-        delivery_officer_id: { not: null }
-      },
-      select: {
-        id: true,
-        order_ref: true,
-        customer_name: true,
-        address: true,
-        product_name: true,
-        advance_amount: true,
-        status: true,
-        updated_at: true,
-        delivery_officer: {
-          select: {
-            username: true,
-            full_name: true
-          }
-        }
-      },
-      orderBy: { updated_at: 'desc' }
+    const counts = await prisma.order.groupBy({
+      by: ['status'],
+      _count: { id: true },
     });
 
-    const formattedOrders = orders.map(o => ({
-      id: o.id,
-      order_ref: o.order_ref,
-      customer_name: o.customer_name,
-      address: o.address,
-      product_name: o.product_name,
-      amount: o.advance_amount,
-      status: o.status,
-      delivery_officer: o.delivery_officer,
-      updated_at: o.updated_at
-    }));
+    const stats = {
+      pending: 0,
+      approved: 0,
+      picked: 0,
+      delivered: 0,
+      cancelled: 0,
+    };
 
-    return res.status(200).json({
-      success: true,
-      data: formattedOrders
+    counts.forEach((c) => {
+      if (stats.hasOwnProperty(c.status)) {
+        stats[c.status] = c._count.id;
+      }
     });
+
+    return res.status(200).json({ success: true, data: stats });
   } catch (error) {
-    console.error('getDeliveryStatus error:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    console.error('Get delivery status error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 const getDeliveredOrders = async (req, res) => {
-  const { page = 1, limit = 10, search = '' } = req.query;
+  const { page = 1, limit = 10 } = req.query;
   const skip = (Number(page) - 1) * Number(limit);
   const take = Number(limit);
 
   try {
-    const where = {
-      status: 'delivered',
-    };
+    const orders = await prisma.order.findMany({
+      where: { status: 'delivered' },
+      skip,
+      take,
+      orderBy: { updated_at: 'desc' },
+      include: {
+        created_by: { select: { username: true } },
+        delivery_officer: { select: { username: true, full_name: true } },
+      },
+    });
 
-    if (search.trim()) {
-      where.OR = [
-        { customer_name: { contains: search } },
-        { whatsapp_number: { contains: search } },
-        { order_ref: { contains: search } },
-      ];
-    }
-
-    const [orders, total] = await prisma.$transaction([
-      prisma.order.findMany({
-        where,
-        skip,
-        take,
-        orderBy: { updated_at: 'desc' },
-        include: {
-          recovery_officer: {
-            select: { id: true, full_name: true, username: true }
-          },
-          created_by: {
-            select: { id: true, full_name: true, username: true }
-          }
-        }
-      }),
-      prisma.order.count({ where }),
-    ]);
+    const total = await prisma.order.count({ where: { status: 'delivered' } });
 
     return res.status(200).json({
       success: true,
       data: {
         orders,
         pagination: {
-          total,
           page: Number(page),
-          limit: Number(limit),
+          total,
           totalPages: Math.ceil(total / take),
         },
       },
     });
   } catch (error) {
-    console.error('getDeliveredOrders error:', error);
+    console.error('Get delivered orders error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 const assignRecovery = async (req, res) => {
   const { id } = req.params;
-  const { user_id, action = 'assign' } = req.body;
+  const { user_id } = req.body;
 
   try {
-    if (action === 'unassign') {
-      const updatedOrder = await prisma.order.update({
-        where: { id: Number(id) },
-        data: { recovery_officer_id: null },
-        include: { recovery_officer: { select: { id: true, username: true, full_name: true } } }
-      });
-      return res.status(200).json({
-        success: true,
-        message: 'Recovery officer unassigned successfully',
-        data: { order: updatedOrder }
-      });
-    }
-
-    if (!user_id) {
-      return res.status(400).json({ success: false, message: 'recovery_officer_id required' });
-    }
-
     const updatedOrder = await prisma.order.update({
-      where: { id: Number(id) },
-      data: { recovery_officer_id: Number(user_id) },
-      include: { recovery_officer: { select: { id: true, username: true, full_name: true } } }
+      where: { id: parseInt(id) },
+      data: { recovery_officer_id: parseInt(user_id) },
+      include: {
+        recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
+      }
     });
+
+    // Send notification
+    const io = req.app.get('io');
+    if (updatedOrder.recovery_officer) {
+      await sendOrderAssignmentNotification(updatedOrder, updatedOrder.recovery_officer, 'recovery', io);
+    }
 
     return res.status(200).json({
       success: true,
       message: 'Recovery officer assigned successfully',
-      data: { order: updatedOrder }
+      data: { order: updatedOrder },
     });
   } catch (error) {
-    console.error('assignRecovery error:', error);
+    console.error('Assign recovery error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
 
 const assignBulkRecovery = async (req, res) => {
-  const { order_ids, user_id, action = 'assign' } = req.body;
-
-  if (!Array.isArray(order_ids) || order_ids.length === 0) {
-    return res.status(400).json({ success: false, message: 'order_ids required' });
-  }
+  const { order_ids, user_id } = req.body;
 
   try {
-    if (action === 'unassign') {
-      await prisma.order.updateMany({
-        where: { id: { in: order_ids.map(Number) } },
-        data: { recovery_officer_id: null }
-      });
-      return res.status(200).json({
-        success: true,
-        message: `${order_ids.length} orders unassigned from recovery`
-      });
-    }
-
-    if (!user_id) {
-      return res.status(400).json({ success: false, message: 'user_id required' });
-    }
-
     await prisma.order.updateMany({
       where: { id: { in: order_ids.map(Number) } },
-      data: { recovery_officer_id: Number(user_id) }
+      data: { recovery_officer_id: parseInt(user_id) },
     });
+
+    // Send notifications for bulk recovery assignment
+    const io = req.app.get('io');
+    const updatedOrders = await prisma.order.findMany({
+      where: { id: { in: order_ids.map(Number) } },
+      include: { recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } } }
+    });
+
+    for (const order of updatedOrders) {
+      if (order.recovery_officer) {
+        await sendOrderAssignmentNotification(order, order.recovery_officer, 'recovery', io);
+      }
+    }
 
     return res.status(200).json({
       success: true,
-      message: `${order_ids.length} orders assigned for recovery`
+      message: `${order_ids.length} orders assigned for recovery`,
     });
   } catch (error) {
-    console.error('assignBulkRecovery error:', error);
+    console.error('Assign bulk recovery error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const initiateHandover = async (req, res) => {
+  const { id } = req.params; // Order ID
+  const { saveOTP } = require('../utils/otpUtils');
+  const axios = require('axios');
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+      include: { delivery_officer: true }
+    });
+
+    if (!order || order.status !== 'approved') {
+      return res.status(400).json({ success: false, message: 'Order must be in APPROVED status for handover' });
+    }
+
+    if (!order.delivery_officer || !order.delivery_officer.phone) {
+      return res.status(400).json({ success: false, message: 'No delivery officer assigned or phone missing' });
+    }
+
+    const otp = await saveOTP(order.delivery_officer.phone, 'handover');
+
+    // Send via WATI
+    const WATI_BASE_URL = process.env.WATI_BASE_URL;
+    const WATI_ACCESS_TOKEN = process.env.WATI_ACCESS_TOKEN;
+    const WATI_TEMPLATE_NAME = process.env.WATI_TEMPLATE_NAME;
+
+    if (WATI_BASE_URL && WATI_ACCESS_TOKEN) {
+      const url = `${WATI_BASE_URL}/api/v2/sendTemplateMessage?whatsappNumber=+92${order.delivery_officer.phone.slice(1)}`;
+      try {
+        await axios.post(url, {
+          template_name: WATI_TEMPLATE_NAME || 'otp_verification',
+          broadcast_name: 'Handover_OTP',
+          parameters: [{ name: '1', value: otp }]
+        }, {
+          headers: {
+            Authorization: `Bearer ${WATI_ACCESS_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        });
+      } catch (watiErr) {
+        console.error('WATI Error details:', watiErr.response?.data || watiErr.message);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Handover OTP initiated',
+      otp: process.env.NODE_ENV === 'development' ? otp : undefined
+    });
+  } catch (error) {
+    console.error('initiateHandover error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const verifyHandover = async (req, res) => {
+  const { id } = req.params; // Order ID
+  const { otp, imei_serial } = req.body;
+  const { verifyOTP } = require('../utils/otpUtils');
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: Number(id) },
+      include: { delivery_officer: true }
+    });
+
+    if (!order || order.status !== 'approved') {
+      return res.status(400).json({ success: false, message: 'Order must be in APPROVED status for handover' });
+    }
+
+    // Verify OTP
+    const otpResult = await verifyOTP(order.delivery_officer.phone, otp, 'handover');
+    if (!otpResult.valid) {
+      return res.status(400).json({ success: false, message: otpResult.message });
+    }
+
+    // Check IMEI in inventory
+    const inventoryItem = await prisma.outletInventory.findUnique({
+      where: { imei_serial }
+    });
+
+    if (!inventoryItem || inventoryItem.status !== 'In Stock') {
+      return res.status(400).json({ success: false, message: 'IMEI not found or not in stock' });
+    }
+
+    if (inventoryItem.outlet_id !== req.user.outlet_id) {
+      return res.status(400).json({ success: false, message: 'This item does not belong to your outlet' });
+    }
+
+    // Atomic update
+    await prisma.$transaction([
+      prisma.order.update({
+        where: { id: order.id },
+        data: {
+          status: 'picked',
+          imei_serial: imei_serial,
+        }
+      }),
+      prisma.outletInventory.update({
+        where: { id: inventoryItem.id },
+        data: { status: 'Sold' }
+      }),
+      prisma.stockTransfer.create({
+        data: {
+          from_type: 'Outlet',
+          from_id: order.outlet_id || 0,
+          to_type: 'Delivery Officer',
+          to_id: order.delivery_officer_id || 0,
+          inventory_id: inventoryItem.id
+        }
+      })
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Stock handover verified and completed'
+    });
+  } catch (error) {
+    console.error('verifyHandover error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const getOutletDeliveryOfficers = async (req, res) => {
+  try {
+    const outlet_id = req.user.outlet_id;
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Forbidden: No outlet assigned' });
+
+    const officers = await prisma.user.findMany({
+      where: {
+        outlet_id: outlet_id,
+        role: { name: 'Delivery Agent' },
+        status: 'active'
+      },
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+        phone: true,
+        is_online: true,
+        image: true
+      }
+    });
+
+    return res.status(200).json({ success: true, data: officers });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const getOfficerApprovedOrders = async (req, res) => {
+  const { officerId } = req.params;
+  try {
+    const orders = await prisma.order.findMany({
+      where: {
+        delivery_officer_id: Number(officerId),
+        status: 'approved',
+        outlet_id: req.user.outlet_id
+      },
+      orderBy: { created_at: 'desc' }
+    });
+
+    return res.status(200).json({ success: true, data: orders });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const getHandoverHistory = async (req, res) => {
+  try {
+    const outlet_id = req.user.outlet_id;
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Forbidden' });
+
+    const transfers = await prisma.stockTransfer.findMany({
+      where: {
+        from_type: 'Outlet',
+        from_id: outlet_id
+      },
+      include: {
+        inventory: {
+          select: {
+            imei_serial: true,
+            product_name: true
+          }
+        }
+      },
+      orderBy: { created_at: 'desc' },
+      take: 100
+    });
+
+    const imeis = transfers.map(t => t.inventory.imei_serial);
+    const orders = await prisma.order.findMany({
+      where: { imei_serial: { in: imeis } },
+      select: {
+        imei_serial: true,
+        customer_name: true,
+        order_ref: true,
+        delivery_officer: { select: { full_name: true } }
+      }
+    });
+
+    const orderMap = new Map(orders.map(o => [o.imei_serial, o]));
+
+    const data = transfers.map(t => ({
+      ...t,
+      order: orderMap.get(t.inventory.imei_serial) || null
+    }));
+
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error(error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
@@ -1340,9 +1779,18 @@ module.exports = {
   assignDelivery,
   assignBulkDelivery,
   cancelOrder,
+  initiateHandover,
+  verifyHandover,
   updateOrderItem,
+  takeOrder,
+  getCsrDashboardStats,
+  getExpiredAssignedOrders,
   getDeliveryStatus,
   getDeliveredOrders,
   assignRecovery,
-  assignBulkRecovery
+  assignBulkRecovery,
+  getOutletDeliveryOfficers,
+  getOfficerApprovedOrders,
+  getHandoverHistory,
+  expireOrders
 };

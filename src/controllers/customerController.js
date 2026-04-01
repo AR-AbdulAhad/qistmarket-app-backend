@@ -21,8 +21,6 @@ const getCustomers = async (req, res) => {
             ];
         }
 
-        // Apply any additional filters directly checking the customer
-        // The requirement says "strong filteration ... search kar ske har chiz se"
         Object.entries(filters).forEach(([key, value]) => {
             if (value) {
                 if (key === 'status') {
@@ -39,8 +37,6 @@ const getCustomers = async (req, res) => {
             }
         });
 
-        // To do pagination over distinct customers, we first need to identify the distinct customers matching the criteria.
-        // The most reliable way in Prisma to get distinct counts AND records is grouping or finding distinct whatsapp_numbers.
 
         // First, find distinct whatsapp_numbers matching the criteria
         const distinctCustomers = await prisma.order.findMany({
@@ -72,11 +68,7 @@ const getCustomers = async (req, res) => {
                 },
             });
         }
-
-        // Now query ALL orders for these paginated customers so we can build the full ledger.
-        // If the original filter included 'search', we might want to still retrieve all their orders
-        // to build an accurate generalized ledger for these customers, but we must only apply the strict
-        // pagination condition to them.
+        
         const orders = await prisma.order.findMany({
             where: {
                 whatsapp_number: {

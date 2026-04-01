@@ -242,7 +242,6 @@ const getPendingDeliveryProducts = async (req, res) => {
       });
     }
 
-    // Group by product_name (case-insensitive + trimmed)
     const grouped = {};
 
     orders.forEach((order) => {
@@ -255,7 +254,7 @@ const getPendingDeliveryProducts = async (req, res) => {
           total_amount: 0,
           advance_amount: 0,
           monthly_amount: 0,
-          months: 0, // we take the most common value or first one
+          months: 0,
           sample_months: order.months ?? 0,
         };
       }
@@ -266,7 +265,6 @@ const getPendingDeliveryProducts = async (req, res) => {
       group.advance_amount += order.advance_amount ?? 0;
       group.monthly_amount += order.monthly_amount ?? 0;
 
-      // Keep the most common months value (simple approach: take first non-zero)
       if (group.months === 0 && order.months > 0) {
         group.months = order.months;
       }
@@ -276,13 +274,12 @@ const getPendingDeliveryProducts = async (req, res) => {
     const result = Object.values(grouped).map((group) => ({
       product_name: group.product_name,
       count: group.count,
-      total_amount: Math.round(group.total_amount * 100) / 100, // avoid floating point issues
+      total_amount: Math.round(group.total_amount * 100) / 100,
       advance_amount: Math.round(group.advance_amount * 100) / 100,
       monthly_amount: Math.round(group.monthly_amount * 100) / 100,
       months: group.months || group.sample_months,
     }));
 
-    // Optional: sort by count descending or by name
     result.sort((a, b) => b.count - a.count || a.product_name.localeCompare(b.product_name));
 
     return res.status(200).json({
@@ -341,9 +338,9 @@ const getCashInHand = async (req, res) => {
       order_id: d.order.id,
       product_name: d.order.product_name,
       amount: d.order.advance_amount,
-      status: 'unpaid',  // Hardcoded as per current requirements; can be made dynamic later
-      created_at: d.end_time,  // Use createdAt if auto-generated, else end_time
-      updated_at: d.end_time   // Use updatedAt if auto-generated, else end_time
+      status: 'unpaid',
+      created_at: d.end_time,
+      updated_at: d.end_time
     }));
 
     const totalUnpaid = cashEntries.reduce((sum, entry) => sum + (entry.amount || 0), 0);

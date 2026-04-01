@@ -41,6 +41,7 @@ model User {
   image                    String?                 @db.VarChar(255)
   coverImage               String?                 @db.VarChar(255)
   permissions_json         String?                 @db.LongText
+  officer_profile_history  Json?
   fcm_token                String?                 @db.VarChar(255)
   reset_token_expires      DateTime?
   reset_token_hash         String?
@@ -63,6 +64,7 @@ model User {
   verifications            Verification[]          @relation("verification_officer")
   verification_reviews     VerificationReview[]    @relation("verification_reviewer")
   notifications            Notification[]
+  complaints               Complaint[]
   outlet                   Outlet?                 @relation(fields: [outlet_id], references: [id])
   verification_edit_history VerificationEditHistory[] @relation("user_edits")
 
@@ -127,12 +129,33 @@ model Order {
   payments            OrderPayment[]
   productHistories    OrderProductHistory[]
   verification        Verification?         @relation("OrderVerification")
+  imei_serial         String?
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
   @@index([delivery_officer_id])
   @@index([recovery_officer_id])
   @@index([outlet_id])
+  @@index([imei_serial])
+}
+
+model Complaint {
+  id                  Int      @id @default(autoincrement())
+  complaint_id        String   @unique
+  customer_name       String
+  customer_cnic       String?
+  mobile_number       String
+  description         String   @db.Text
+  status              String   @default("open")
+  resolution_note     String?  @db.Text
+  created_by_user_id  Int?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+  created_by          User?    @relation(fields: [created_by_user_id], references: [id])
+
+  @@index([mobile_number])
+  @@index([status])
+  @@map("complaints")
 }
 
 model Outlet {
@@ -274,6 +297,8 @@ model Verification {
   documents               VerificationDocument[]
   verification_locations  VerificationLocation[]
   reviews                 VerificationReview[]
+  home_location_required  Boolean                @default(false)
+  home_location_verified  Boolean                @default(false)
 
   @@index([verification_officer_id])
 }
