@@ -52,6 +52,8 @@ model User {
   last_online_at           DateTime?
   working_hours_end        String?                 @db.VarChar(30)
   working_hours_start      String?                 @db.VarChar(30)
+  current_active_verification_id Int?    @unique
+  current_active_verification    Verification? @relation("active_verification", fields: [current_active_verification_id], references: [id])
   deliveries               Delivery[]              @relation("delivery_agent")
   officerAssignments       OfficerAreaAssignment[] @relation("OfficerAssignments")
   officerSessions          OfficerSession[]
@@ -299,6 +301,7 @@ model Verification {
   reviews                 VerificationReview[]
   home_location_required  Boolean                @default(false)
   home_location_verified  Boolean                @default(false)
+  active_user             User?                  @relation("active_verification")
 
   @@index([verification_officer_id])
 }

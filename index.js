@@ -68,7 +68,53 @@ const io = new Server(server, {
 
 app.set('io', io);
 
+// Shared in-memory map to track which officer is currently active in a verification screen
+const officerVerificationActiveMap = require('./src/utils/officerVerificationActiveMap');
+
 io.on('connection', (socket) => {
+    // Officer marks a verification as active (enters verification screen)
+    socket.on('officer_verification_active', async ({ officerId, verificationId }) => {
+      try {
+        // Persist in DB
+        await prisma.user.update({
+          where: { id: officerId },
+          data: { current_active_verification_id: verificationId },
+        });
+        const verification = await prisma.verification.findUnique({
+          where: { id: verificationId },
+          include: { order: { select: { order_ref: true, customer_name: true } } }
+        });
+        if (verification) {
+          io.to('admins').emit('officer_current_verification_update', {
+            officerId,
+            current_verification: {
+              id: verification.id,
+              status: verification.status,
+              order: verification.order,
+            },
+          });
+        }
+      } catch (err) {
+        console.error('officer_verification_active error:', err.message);
+      }
+    });
+
+    // Officer leaves verification screen (becomes inactive)
+    socket.on('officer_verification_inactive', async ({ officerId }) => {
+      try {
+        // Persist in DB
+        await prisma.user.update({
+          where: { id: officerId },
+          data: { current_active_verification_id: null },
+        });
+        io.to('admins').emit('officer_current_verification_update', {
+          officerId,
+          current_verification: null,
+        });
+      } catch (err) {
+        console.error('officer_verification_inactive error:', err.message);
+      }
+    });
   console.log(`Client connected → ${socket.id}`);
 
   // Admin joins notifications room

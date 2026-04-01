@@ -33,14 +33,14 @@ const getAllVerificationOfficers = async (req, res) => {
         bike_km_range: true,
         working_hours_start: true,
         working_hours_end: true,
-        verifications: {
-          where: { status: 'in_progress' },
+        officer_profile_history: true,
+        current_active_verification_id: true,
+        current_active_verification: {
           select: {
             id: true,
             status: true,
             order: { select: { order_ref: true, customer_name: true } },
           },
-          take: 1,
         },
       },
       orderBy: { full_name: 'asc' },
@@ -59,37 +59,98 @@ const getAllVerificationOfficers = async (req, res) => {
       monthlyStatsRaw.map((s) => [s.officer_id, ((s._sum.duration_minutes || 0) / 60).toFixed(2)])
     );
 
-    const formatted = officers.map((o) => ({
-      id: o.id,
-      full_name: o.full_name,
-      username: o.username,
-      phone: o.phone,
-      account_status: o.status,
-      is_online: o.is_online,
-      current_location:
-        o.is_online && o.last_known_latitude
-          ? { latitude: o.last_known_latitude, longitude: o.last_known_longitude }
-          : null,
-      last_known_location:
-        !o.is_online && o.last_known_latitude
-          ? {
-            latitude: o.last_known_latitude,
-            longitude: o.last_known_longitude,
-            timestamp: o.last_online_at,
-          }
-          : null,
-      bike_km_range: o.bike_km_range,
-      working_hours:
-        o.working_hours_start && o.working_hours_end
-          ? `${o.working_hours_start} - ${o.working_hours_end}`
-          : null,
-      current_verification: o.verifications[0] || null,
-      monthly_online_hours: monthlyStatsMap.get(o.id) || '0.00',
-    }));
+
+    // Import the shared in-memory map
+    const officerVerificationActiveMap = require('../utils/officerVerificationActiveMap');
+
+    const formatted = officers.map((o) => {
+      return {
+        id: o.id,
+        full_name: o.full_name,
+        username: o.username,
+        phone: o.phone,
+        account_status: o.status,
+        is_online: o.is_online,
+        last_online_at: o.last_online_at,
+        current_location:
+          o.is_online && o.last_known_latitude
+            ? { latitude: o.last_known_latitude, longitude: o.last_known_longitude }
+            : null,
+        last_known_location:
+          !o.is_online && o.last_known_latitude
+            ? {
+              latitude: o.last_known_latitude,
+              longitude: o.last_known_longitude,
+              timestamp: o.last_online_at,
+            }
+            : null,
+        bike_km_range: o.bike_km_range,
+        working_hours:
+          o.working_hours_start && o.working_hours_end
+            ? `${o.working_hours_start} - ${o.working_hours_end}`
+            : null,
+        current_verification: o.current_active_verification,
+        monthly_online_hours: monthlyStatsMap.get(o.id) || '0.00',
+        profile_history: Array.isArray(o.officer_profile_history) ? o.officer_profile_history : [],
+      };
+    });
 
     return res.json({ success: true, data: { officers: formatted } });
   } catch (error) {
     console.error('getAllVerificationOfficers error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+const getOfficerProfileDetail = async (req, res) => {
+  const { officerId } = req.params;
+
+  if (![4, 5, 6, 7, 8].includes(req.user.role_id)) {
+    return res.status(403).json({ success: false, error: { code: 403, message: 'Access denied. Admin only.' } });
+  }
+
+  try {
+    const officer = await prisma.user.findUnique({
+      where: { id: parseInt(officerId) },
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+        phone: true,
+        status: true,
+        is_online: true,
+        last_known_latitude: true,
+        last_known_longitude: true,
+        last_online_at: true,
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true,
+        officer_profile_history: true,
+      },
+    });
+
+    if (!officer) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Officer not found' } });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: officer.id,
+        full_name: officer.full_name,
+        username: officer.username,
+        phone: officer.phone,
+        account_status: officer.status,
+        is_online: officer.is_online,
+        last_online_at: officer.last_online_at,
+        bike_km_range: officer.bike_km_range,
+        working_hours_start: officer.working_hours_start,
+        working_hours_end: officer.working_hours_end,
+        profile_history: Array.isArray(officer.officer_profile_history) ? officer.officer_profile_history : [],
+      },
+    });
+  } catch (error) {
+    console.error('getOfficerProfileDetail error:', error);
     return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
   }
 };
@@ -165,6 +226,19 @@ const updateOfficerProfile = async (req, res) => {
       },
     });
 
+    // Emit socket event if profile was updated
+    if (hasChange) {
+      const io = req.app.get('io');
+      if (io) {
+        io.to('admins').emit('officer_profile_updated', {
+          officerId: req.user.id,
+          profile_history: Array.isArray(updated.officer_profile_history)
+            ? updated.officer_profile_history
+            : [],
+        });
+      }
+    }
+
     return res.json({ success: true, message: 'Profile updated', data: updated });
   } catch (error) {
     console.error('updateOfficerProfile error:', error);
@@ -230,33 +304,30 @@ const getOfficerDailyStats = async (req, res) => {
         officer_id: parseInt(id),
         start_time: { gte: startDate, lte: endDate },
       },
-      select: { start_time: true, duration_minutes: true },
+      select: { start_time: true, end_time: true, duration_minutes: true },
+      orderBy: { start_time: 'asc' },
     });
 
+    // Group sessions by date
     const dailyMap = new Map();
     sessions.forEach((s) => {
       const dateKey = s.start_time.toISOString().split('T')[0];
-      dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + (s.duration_minutes || 0));
+      if (!dailyMap.has(dateKey)) dailyMap.set(dateKey, []);
+      dailyMap.get(dateKey).push({
+        start_time: s.start_time,
+        end_time: s.end_time,
+        duration_minutes: s.duration_minutes,
+      });
     });
-
-    const expectedDailyMin = getExpectedWorkMinutes(officer.working_hours_start, officer.working_hours_end);
-    const expectedDailyHours = (expectedDailyMin / 60).toFixed(2);
 
     const dailyStats = [];
     let current = new Date(startDate);
     while (current <= endDate) {
       const dateKey = current.toISOString().split('T')[0];
-      const onlineMin = dailyMap.get(dateKey) || 0;
-      const onlineHours = (onlineMin / 60).toFixed(2);
-      const offlineDuringWork = Math.max(0, Number(expectedDailyHours) - Number(onlineHours)).toFixed(2);
-
       dailyStats.push({
         date: dateKey,
-        online_hours: onlineHours,
-        worked_hours: onlineHours,
-        offline_during_work_hours: offlineDuringWork,
+        sessions: dailyMap.get(dateKey) || [],
       });
-
       current.setDate(current.getDate() + 1);
     }
 
@@ -266,7 +337,6 @@ const getOfficerDailyStats = async (req, res) => {
         officer_id: Number(id),
         month: startDate.toISOString().slice(0, 7),
         daily_stats: dailyStats,
-        expected_daily_hours: expectedDailyHours,
       },
     });
   } catch (error) {
@@ -275,8 +345,290 @@ const getOfficerDailyStats = async (req, res) => {
   }
 };
 
+const getAllDeliveryOfficers = async (req, res) => {
+  if (![4, 5, 6, 7, 8].includes(req.user.role_id)) {
+    return res.status(403).json({ success: false, error: { code: 403, message: 'Access denied. Admin only.' } });
+  }
+
+  try {
+    const officers = await prisma.user.findMany({
+      where: { role: { name: 'Delivery Officer' } },
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+        phone: true,
+        status: true,
+        is_online: true,
+        last_known_latitude: true,
+        last_known_longitude: true,
+        last_online_at: true,
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true,
+        officer_profile_history: true,
+        deliveries: {
+          where: { status: 'in_progress' },
+          select: {
+            id: true,
+            status: true,
+            order: { select: { order_ref: true, customer_name: true } },
+          },
+          take: 1,
+        },
+      },
+      orderBy: { full_name: 'asc' },
+    });
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const monthlyStatsRaw = await prisma.officerSession.groupBy({
+      by: ['officer_id'],
+      where: { start_time: { gte: startOfMonth } },
+      _sum: { duration_minutes: true },
+    });
+
+    const monthlyStatsMap = new Map(
+      monthlyStatsRaw.map((s) => [s.officer_id, ((s._sum.duration_minutes || 0) / 60).toFixed(2)])
+    );
+
+    const formatted = officers.map((o) => ({
+      id: o.id,
+      full_name: o.full_name,
+      username: o.username,
+      phone: o.phone,
+      account_status: o.status,
+      is_online: o.is_online,
+      last_online_at: o.last_online_at,
+      current_location:
+        o.is_online && o.last_known_latitude
+          ? { latitude: o.last_known_latitude, longitude: o.last_known_longitude }
+          : null,
+      last_known_location:
+        !o.is_online && o.last_known_latitude
+          ? {
+            latitude: o.last_known_latitude,
+            longitude: o.last_known_longitude,
+            timestamp: o.last_online_at,
+          }
+          : null,
+      bike_km_range: o.bike_km_range,
+      working_hours:
+        o.working_hours_start && o.working_hours_end
+          ? `${o.working_hours_start} - ${o.working_hours_end}`
+          : null,
+      current_delivery: o.deliveries[0] || null,
+      monthly_online_hours: monthlyStatsMap.get(o.id) || '0.00',
+      profile_history: Array.isArray(o.officer_profile_history) ? o.officer_profile_history : [],
+    }));
+
+    return res.json({ success: true, data: { officers: formatted } });
+  } catch (error) {
+    console.error('getAllDeliveryOfficers error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+const getAllRecoveryOfficers = async (req, res) => {
+  if (![4, 5, 6, 7, 8].includes(req.user.role_id)) {
+    return res.status(403).json({ success: false, error: { code: 403, message: 'Access denied. Admin only.' } });
+  }
+
+  try {
+    const officers = await prisma.user.findMany({
+      where: { role: { name: 'Recovery Officer' } },
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+        phone: true,
+        status: true,
+        is_online: true,
+        last_known_latitude: true,
+        last_known_longitude: true,
+        last_online_at: true,
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true,
+        officer_profile_history: true,
+        recovery_orders: {
+          where: { status: 'in_progress' },
+          select: {
+            id: true,
+            status: true,
+            order_ref: true,
+            customer_name: true,
+          },
+          take: 1,
+        },
+      },
+      orderBy: { full_name: 'asc' },
+    });
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const monthlyStatsRaw = await prisma.officerSession.groupBy({
+      by: ['officer_id'],
+      where: { start_time: { gte: startOfMonth } },
+      _sum: { duration_minutes: true },
+    });
+
+    const monthlyStatsMap = new Map(
+      monthlyStatsRaw.map((s) => [s.officer_id, ((s._sum.duration_minutes || 0) / 60).toFixed(2)])
+    );
+
+    const formatted = officers.map((o) => ({
+      id: o.id,
+      full_name: o.full_name,
+      username: o.username,
+      phone: o.phone,
+      account_status: o.status,
+      is_online: o.is_online,
+      last_online_at: o.last_online_at,
+      current_location:
+        o.is_online && o.last_known_latitude
+          ? { latitude: o.last_known_latitude, longitude: o.last_known_longitude }
+          : null,
+      last_known_location:
+        !o.is_online && o.last_known_latitude
+          ? {
+            latitude: o.last_known_latitude,
+            longitude: o.last_known_longitude,
+            timestamp: o.last_online_at,
+          }
+          : null,
+      bike_km_range: o.bike_km_range,
+      working_hours:
+        o.working_hours_start && o.working_hours_end
+          ? `${o.working_hours_start} - ${o.working_hours_end}`
+          : null,
+      current_recovery: o.recovery_orders[0] || null,
+      monthly_online_hours: monthlyStatsMap.get(o.id) || '0.00',
+      profile_history: Array.isArray(o.officer_profile_history) ? o.officer_profile_history : [],
+    }));
+
+    return res.json({ success: true, data: { officers: formatted } });
+  } catch (error) {
+    console.error('getAllRecoveryOfficers error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+const getDeliveryOfficerProfileDetail = async (req, res) => {
+  const { officerId } = req.params;
+
+  if (![4, 5, 6, 7, 8].includes(req.user.role_id)) {
+    return res.status(403).json({ success: false, error: { code: 403, message: 'Access denied. Admin only.' } });
+  }
+
+  try {
+    const officer = await prisma.user.findUnique({
+      where: { id: parseInt(officerId) },
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+        phone: true,
+        status: true,
+        is_online: true,
+        last_known_latitude: true,
+        last_known_longitude: true,
+        last_online_at: true,
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true,
+        officer_profile_history: true,
+      },
+    });
+
+    if (!officer) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Officer not found' } });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: officer.id,
+        full_name: officer.full_name,
+        username: officer.username,
+        phone: officer.phone,
+        account_status: officer.status,
+        is_online: officer.is_online,
+        last_online_at: officer.last_online_at,
+        bike_km_range: officer.bike_km_range,
+        working_hours_start: officer.working_hours_start,
+        working_hours_end: officer.working_hours_end,
+        profile_history: Array.isArray(officer.officer_profile_history) ? officer.officer_profile_history : [],
+      },
+    });
+  } catch (error) {
+    console.error('getDeliveryOfficerProfileDetail error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+const getRecoveryOfficerProfileDetail = async (req, res) => {
+  const { officerId } = req.params;
+
+  if (![4, 5, 6, 7, 8].includes(req.user.role_id)) {
+    return res.status(403).json({ success: false, error: { code: 403, message: 'Access denied. Admin only.' } });
+  }
+
+  try {
+    const officer = await prisma.user.findUnique({
+      where: { id: parseInt(officerId) },
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+        phone: true,
+        status: true,
+        is_online: true,
+        last_known_latitude: true,
+        last_known_longitude: true,
+        last_online_at: true,
+        bike_km_range: true,
+        working_hours_start: true,
+        working_hours_end: true,
+        officer_profile_history: true,
+      },
+    });
+
+    if (!officer) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Officer not found' } });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: officer.id,
+        full_name: officer.full_name,
+        username: officer.username,
+        phone: officer.phone,
+        account_status: officer.status,
+        is_online: officer.is_online,
+        last_online_at: officer.last_online_at,
+        bike_km_range: officer.bike_km_range,
+        working_hours_start: officer.working_hours_start,
+        working_hours_end: officer.working_hours_end,
+        profile_history: Array.isArray(officer.officer_profile_history) ? officer.officer_profile_history : [],
+      },
+    });
+  } catch (error) {
+    console.error('getRecoveryOfficerProfileDetail error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
 module.exports = {
   getAllVerificationOfficers,
+  getOfficerProfileDetail,
+  getAllDeliveryOfficers,
+  getDeliveryOfficerProfileDetail,
+  getAllRecoveryOfficers,
+  getRecoveryOfficerProfileDetail,
   updateOfficerProfile,
   getMyOfficerStatus,
   getOfficerDailyStats,

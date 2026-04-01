@@ -153,6 +153,23 @@ const startVerification = async (req, res) => {
       io
     );
 
+    // Emit real-time update for officer's current verification assignment
+    if (io) {
+      // Find the officer's current verification (same as in officerController)
+      const currentVerification = {
+        id: verification.id,
+        status: verification.status,
+        order: {
+          order_ref: verification.order.order_ref,
+          customer_name: order.customer_name,
+        },
+      };
+      io.to('admins').emit('officer_current_verification_update', {
+        officerId: verification.verification_officer_id,
+        current_verification: currentVerification,
+      });
+    }
+
     return res.status(201).json({
       success: true,
       message: 'Verification started successfully',
