@@ -2,6 +2,7 @@ const { PrismaClient } = require('@prisma/client');
 const crypto = require('crypto');
 const prisma = new PrismaClient();
 const { notifyUser } = require('../utils/notificationUtils');
+const { getPKTDate } = require("../utils/dateUtils");
 
 const admin = require('firebase-admin');
 
@@ -315,6 +316,7 @@ const createOrder = async (req, res) => {
         months: parseInt(months),
         channel: channel.trim(),
         status: assignedOfficerId ? 'pending' : 'new',
+        created_at: getPKTDate(new Date()),
         created_by_user_id: req.user.id,
         assigned_to_user_id: assignedOfficerId
       },
