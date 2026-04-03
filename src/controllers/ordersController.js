@@ -23,7 +23,7 @@ async function sendOrderAssignmentNotification(order, user, type, io = null) {
 
   if (type === 'verification') {
     title = 'New Order Assigned';
-    message = `Order ${order.order_ref} has been assigned to you for verificationss.`;
+    message = `Order ${order.order_ref} has been assigned to you for verification.`;
     notificationType = 'order_assignment';
   } else if (type === 'delivery') {
     title = 'New Order Assigned for Delivery';
@@ -33,6 +33,14 @@ async function sendOrderAssignmentNotification(order, user, type, io = null) {
     title = 'New Order Assigned for Recovery';
     message = `Order ${order.order_ref} has been assigned to you for Recovery.`;
     notificationType = 'recovery_assignment';
+  } else if (type === 'verification_location') {
+    title = 'New Task Assigned for Verification';
+    message = `Please verify and capture home location for order ${order.order_ref}.`;
+    notificationType = 'order_assignment';
+  } else if (type === 'delivery_location') {
+    title = 'New Task Assigned for Delivery';
+    message = `Please update the delivery location for order ${order.order_ref}.`;
+    notificationType = 'delivery_assignment';
   }
 
   // Save to DB and emit Socket.io

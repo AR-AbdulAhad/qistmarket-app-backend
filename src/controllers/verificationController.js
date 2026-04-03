@@ -1884,7 +1884,7 @@ const sendToVOForLocation = async (req, res) => {
     const officer = await prisma.user.findUnique({ where: { id: parseInt(officer_id) } });
     const io = req.app ? req.app.get('io') : null;
     if (officer) {
-      await sendOrderAssignmentNotification(verification.order, officer, 'verification', io);
+      await sendOrderAssignmentNotification(verification.order, officer, 'verification_location', io);
     }
 
     return res.status(200).json({
@@ -1924,7 +1924,7 @@ const sendToDOForLocation = async (req, res) => {
     const officer = await prisma.user.findUnique({ where: { id: parseInt(officer_id) } });
     const io = req.app ? req.app.get('io') : null;
     if (officer) {
-      await sendOrderAssignmentNotification(verification.order, officer, 'delivery', io);
+      await sendOrderAssignmentNotification(verification.order, officer, 'delivery_location', io);
     }
 
     return res.status(200).json({
