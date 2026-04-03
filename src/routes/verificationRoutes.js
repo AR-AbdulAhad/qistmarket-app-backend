@@ -131,6 +131,12 @@ router.post('/verification/:verification_id/approve', authenticateJWT, submitVer
 // NEW: Location Handling
 router.post('/verification/:verification_id/send-to-vo', authenticateJWT, sendToVOForLocation);
 router.post('/verification/:verification_id/send-to-do', authenticateJWT, sendToDOForLocation);
-router.patch('/verification/:verification_id/location-verified', authenticateJWT, updateLocationVerified);
+router.post(
+  '/verification/:verification_id/location-verified',
+  authenticateJWT,
+  upload.array('photos', 5),
+  fixUploadPath,
+  updateLocationVerified
+)
 
 module.exports = router;
