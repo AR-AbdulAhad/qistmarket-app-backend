@@ -897,6 +897,8 @@ const getOrderById = async (req, res) => {
   console.log('Fetching order with ID:', id);
 
   try {
+
+    // Fetch order and related verification (for purchaser location status)
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
       include: {
@@ -908,6 +910,20 @@ const getOrderById = async (req, res) => {
           },
           orderBy: { changed_at: 'desc' }
         },
+        verification: {
+          select: {
+            id: true,
+            status: true,
+            home_location_verified: true,
+            home_location_required: true,
+            purchaser: {
+              select: {
+                id: true,
+                is_verified: true,
+              }
+            }
+          }
+        }
       },
     });
 
@@ -918,9 +934,21 @@ const getOrderById = async (req, res) => {
       });
     }
 
+    // Attach purchaser location status if available
+    let purchaserLocationStatus = null;
+    let purchaserLocationVerified = null;
+    if (order.verification && order.verification.purchaser) {
+      purchaserLocationStatus = order.verification.purchaser.nearest_location || null;
+      purchaserLocationVerified = !!order.verification.purchaser.is_verified;
+    }
+
     return res.status(200).json({
       success: true,
-      data: { order },
+      data: {
+        order,
+        purchaserLocationStatus,
+        purchaserLocationVerified
+      },
     });
   } catch (error) {
     console.error(error);
@@ -1794,5 +1822,6 @@ module.exports = {
   getOutletDeliveryOfficers,
   getOfficerApprovedOrders,
   getHandoverHistory,
-  expireOrders
+  expireOrders,
+  sendOrderAssignmentNotification
 };

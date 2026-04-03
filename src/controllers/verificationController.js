@@ -1,6 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const { notifyAdmins } = require('../utils/notificationUtils');
+const { sendOrderAssignmentNotification } = require('./ordersController');
 const { getPKTDate } = require("../utils/dateUtils");
 
 // Start Verification
@@ -1182,12 +1183,6 @@ const submitVerificationReview = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Verification not found' });
     }
 
-    if (verification.status !== 'completed') {
-      return res.status(400).json({
-        success: false,
-        error: 'Verification must be completed before review'
-      });
-    }
 
     if (verification.reviews.length >= 3) {
       return res.status(400).json({
@@ -1243,30 +1238,18 @@ const submitVerificationReview = async (req, res) => {
     const totalReviews = updated.reviews.length;
     const approvalPercentage = totalReviews > 0 ? Math.round((approvesCount / totalReviews) * 100) : 0;
 
-    let newVerificationStatus = verification.status;
     let orderStatusUpdate = null;
 
     // Rule: 2 Approvals = Final Approved
     if (approvesCount >= 2) {
-      newVerificationStatus = 'approved';
       orderStatusUpdate = 'approved';
     } 
     // Rule: 2 Rejections = Auto Cancelled
     else if (rejectsCount >= 2) {
-      newVerificationStatus = 'rejected';
-      orderStatusUpdate = 'cancelled';
+      orderStatusUpdate = 'rejected';
     }
 
     const updates = [];
-
-    if (newVerificationStatus !== verification.status) {
-      updates.push(
-        prisma.verification.update({
-          where: { id: parseInt(verification_id) },
-          data: { status: newVerificationStatus }
-        })
-      );
-    }
 
     if (orderStatusUpdate) {
       updates.push(
@@ -1288,7 +1271,7 @@ const submitVerificationReview = async (req, res) => {
     const io = req.app.get('io');
     await notifyAdmins(
       'Review Submitted',
-      `Review added to Order #${verification.order.order_ref} → ${newVerificationStatus.toUpperCase()} (${approvalPercentage}%)`,
+      `Review added to Order #${verification.order.order_ref} → ${orderStatusUpdate?.toUpperCase() || 'UNCHANGED'} (${approvalPercentage}%)`,
       'review_submitted',
       parseInt(verification_id),
       io
@@ -1302,7 +1285,6 @@ const submitVerificationReview = async (req, res) => {
         approvalPercentage,
         totalReviews,
         approvesCount,
-        verificationStatus: newVerificationStatus,
         orderStatus: orderStatusUpdate || 'unchanged'
       }
     });
@@ -1898,6 +1880,13 @@ const sendToVOForLocation = async (req, res) => {
       }
     });
 
+    // Notify Verification Officer
+    const officer = await prisma.user.findUnique({ where: { id: parseInt(officer_id) } });
+    const io = req.app ? req.app.get('io') : null;
+    if (officer) {
+      await sendOrderAssignmentNotification(verification.order, officer, 'verification', io);
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Sent to Verification Officer for location capture'
@@ -1923,14 +1912,20 @@ const sendToDOForLocation = async (req, res) => {
     }
 
     // Normal delivery assignment but we know it needs location
-    await prisma.order.update({
-      where: { id: verification.order_id },
+    await prisma.verification.update({
+      where: { id: verification.id },
       data: {
-        delivery_officer_id: parseInt(officer_id),
-        status: 'picked', // Normal status for delivery in progress
-        outlet_id: req.user.outlet_id || verification.order.outlet_id
+        verification_officer_id: parseInt(officer_id),
+        status: 'location_capture_pending'
       }
     });
+
+    // Notify Delivery Officer
+    const officer = await prisma.user.findUnique({ where: { id: parseInt(officer_id) } });
+    const io = req.app ? req.app.get('io') : null;
+    if (officer) {
+      await sendOrderAssignmentNotification(verification.order, officer, 'delivery', io);
+    }
 
     return res.status(200).json({
       success: true,
@@ -1944,28 +1939,88 @@ const sendToDOForLocation = async (req, res) => {
 
 const updateLocationVerified = async (req, res) => {
   const { verification_id } = req.params;
-  const { latitude, longitude, address } = req.body;
+  const {
+    location_type,
+    latitude,
+    longitude,
+    address,
+    label,
+    person_type,
+    person_id
+  } = req.body;
 
   try {
-    const verification = await prisma.verification.update({
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) }
+    });
+
+    if (!verification) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Verification not found' }
+      });
+    }
+
+    // Create location first
+    const location = await prisma.verificationLocation.create({
+      data: {
+        verification_id: parseInt(verification_id),
+        location_type,
+        latitude: latitude ? parseFloat(latitude) : null,
+        longitude: longitude ? parseFloat(longitude) : null,
+        address,
+        label,
+        person_type,
+        person_id: person_id ? parseInt(person_id) : null,
+        created_at: getPKTDate(new Date())
+      }
+    });
+
+    // Get uploaded photos (up to 5)
+    const photos = req.files || [];
+
+    // Save photos to separate table
+    const photoPromises = photos.map(file =>
+      prisma.verificationLocationPhoto.create({
+        data: {
+          verification_location_id: location.id,
+          file_url: file.url,
+          uploaded_at: new Date()
+        }
+      })
+    );
+
+    const savedPhotos = await Promise.all(photoPromises);
+
+    // Update verification flags
+    await prisma.verification.update({
       where: { id: parseInt(verification_id) },
       data: {
         home_location_verified: true,
-      },
-      include: { order: true }
+        home_location_required: false,
+        status: 'location_captured',
+      }
     });
 
-    // Save the GPS coordinates if needed (assuming there's a place for it or just tag is enough)
-    // The BRD says "Save the GPS coordinates in the customer profile"
-    // Usually this is done via locations tracking or verification_locations.
+    // Get location with photos
+    const locationWithPhotos = await prisma.verificationLocation.findUnique({
+      where: { id: location.id },
+      include: {
+        photos: true
+      }
+    });
 
     return res.status(200).json({
       success: true,
-      message: 'Location verified successfully'
+      message: 'Location verified successfully',
+      data: { location: locationWithPhotos }
     });
   } catch (error) {
     console.error('updateLocationVerified error:', error);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
   }
 };
 
