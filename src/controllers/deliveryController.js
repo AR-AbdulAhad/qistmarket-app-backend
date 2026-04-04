@@ -579,7 +579,8 @@ const getDeliveryBoyInventory = async (req, res) => {
             imei_serial: true,
             quantity: true,
             purchase_price: true,
-            status: true
+            status: true,
+            installment_plans: true
           }
         }
       },
@@ -606,6 +607,7 @@ const getDeliveryBoyInventory = async (req, res) => {
           category: t.inventory.category,
           color_variant: t.inventory.color_variant || null,
           purchase_price: t.inventory.purchase_price,
+          installment_plans: t.inventory.installment_plans,
           total_qty: 0,
           units: []
         });

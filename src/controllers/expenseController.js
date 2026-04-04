@@ -1,46 +1,152 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
+// Helper to generate sequential Voucher Number: EV-YYYY-XXXX
+const generateVoucherNumber = async () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const prefix = `EV-${year}-`;
+
+    const lastVoucher = await prisma.expenseVoucher.findFirst({
+        where: {
+            voucher_number: { startsWith: prefix }
+        },
+        orderBy: { voucher_number: 'desc' }
+    });
+
+    let nextNumber = 1;
+    if (lastVoucher) {
+        const lastSerial = parseInt(lastVoucher.voucher_number.split('-')[2]);
+        nextNumber = lastSerial + 1;
+    }
+
+    return `${prefix}${nextNumber.toString().padStart(4, '0')}`;
+};
+
 const getExpenses = async (req, res) => {
     const { outlet_id } = req.user;
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
 
     try {
-        const expenses = await prisma.expense.findMany({ where: { outlet_id } });
-        res.json({ success: true, expenses });
+        const vouchers = await prisma.expenseVoucher.findMany({
+            where: { outlet_id: parseInt(outlet_id) },
+            include: { items: true },
+            orderBy: { date: 'desc' }
+        });
+        res.json({ success: true, vouchers });
     } catch (error) {
         console.error('getExpenses error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
-const addExpense = async (req, res) => {
+const createExpenseVoucher = async (req, res) => {
     const { outlet_id } = req.user;
-    const { expense_type, amount, description } = req.body;
+    const { items, payment_method, date, notes } = req.body;
 
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
-
-    if (!expense_type || !amount) {
-        return res.status(400).json({ success: false, message: 'Missing fields' });
-    }
+    if (!items || !items.length) return res.status(400).json({ success: false, message: 'At least one expense item is required.' });
 
     try {
-        const expense = await prisma.expense.create({
-            data: {
-                outlet_id,
-                expense_type,
-                amount,
-                description
+        const voucher_number = await generateVoucherNumber();
+        const total_amount = items.reduce((sum, item) => sum + parseFloat(item.amount), 0);
+
+        const result = await prisma.$transaction(async (tx) => {
+            // 1. Create the Voucher Header
+            const voucher = await tx.expenseVoucher.create({
+                data: {
+                    outlet_id: parseInt(outlet_id),
+                    voucher_number,
+                    total_amount,
+                    payment_method: payment_method || "Cash",
+                    date: date ? new Date(date) : new Date(),
+                    notes,
+                    items: {
+                        create: items.map(item => ({
+                            category: item.category || "General",
+                            amount: parseFloat(item.amount),
+                            description: item.description
+                        }))
+                    }
+                },
+                include: { items: true }
+            });
+
+            return voucher;
+        });
+
+        res.status(201).json({ success: true, voucher: result });
+    } catch (error) {
+        console.error('createExpenseVoucher error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const deleteExpenseVoucher = async (req, res) => {
+    const { id } = req.params;
+    const { outlet_id } = req.user;
+
+    try {
+        const voucher = await prisma.expenseVoucher.findUnique({ where: { id: parseInt(id) } });
+        if (!voucher || voucher.outlet_id !== outlet_id) {
+            return res.status(404).json({ success: false, message: 'Voucher not found' });
+        }
+
+        await prisma.expenseVoucher.delete({ where: { id: parseInt(id) } });
+        res.json({ success: true, message: 'Voucher deleted successfully.' });
+    } catch (error) {
+        console.error('deleteExpenseVoucher error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getExpenseSummary = async (req, res) => {
+    const { outlet_id } = req.user;
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+
+    const now = new Date();
+    const startOfToday = new Date(now.setHours(0,0,0,0));
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    try {
+        const [todayExpenses, monthExpenses, categorySummary] = await Promise.all([
+            prisma.expenseVoucher.aggregate({
+                where: { outlet_id: parseInt(outlet_id), date: { gte: startOfToday } },
+                _sum: { total_amount: true }
+            }),
+            prisma.expenseVoucher.aggregate({
+                where: { outlet_id: parseInt(outlet_id), date: { gte: startOfMonth } },
+                _sum: { total_amount: true }
+            }),
+            prisma.expenseItem.groupBy({
+                by: ['category'],
+                where: { voucher: { outlet_id: parseInt(outlet_id) } },
+                _sum: { amount: true },
+                orderBy: { _sum: { amount: 'desc' } },
+                take: 5
+            })
+        ]);
+
+        res.json({
+            success: true,
+            summary: {
+                today: todayExpenses._sum.total_amount || 0,
+                thisMonth: monthExpenses._sum.total_amount || 0,
+                topCategories: categorySummary.map(c => ({
+                    category: c.category,
+                    amount: c._sum.amount
+                }))
             }
         });
-        res.status(201).json({ success: true, expense });
     } catch (error) {
-        console.error('addExpense error:', error);
+        console.error('getExpenseSummary error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
 module.exports = {
     getExpenses,
-    addExpense
+    createExpenseVoucher,
+    deleteExpenseVoucher,
+    getExpenseSummary
 };

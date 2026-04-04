@@ -3,6 +3,68 @@ const prisma = new PrismaClient();
 const { notifyUser, notifyAdmins } = require('../utils/notificationUtils');
 const { sendOTP } = require('../services/watiService');
 
+function roundUpToNearest50(amount) {
+    return Math.ceil(amount / 50) * 50;
+}
+
+function generateInstallments(categoryName, price) {
+    const category = categoryName.toLowerCase().trim();
+    let plans = [];
+
+    if (category === 'mobiles' && price <= 50000) {
+        plans = [
+            { months: 3, profit: 0.20, advance: 0.35 },
+            { months: 6, profit: 0.35, advance: 0.25 },
+            { months: 9, profit: 0.45, advance: 0.20 },
+            { months: 12, profit: 0.55, advance: 0.15 },
+        ];
+    }
+    else if (price > 50000 && price <= 100000) {
+        plans = [
+            { months: 3, profit: 0.20, advance: 0.40 },
+            { months: 6, profit: 0.35, advance: 0.35 },
+            { months: 9, profit: 0.45, advance: 0.30 },
+            { months: 12, profit: 0.55, advance: 0.25 },
+        ];
+    }
+    else if (price > 100000) {
+        plans = [
+            { months: 3, profit: 0.20, advance: 0.40 },
+            { months: 6, profit: 0.35, advance: 0.35 },
+            { months: 9, profit: 0.45, advance: 0.30 },
+            { months: 12, profit: 0.55, advance: 0.25 },
+            { months: 24, profit: 0.85, advance: 0.25 },
+        ];
+    }
+    else if (price <= 50000) {
+        plans = [
+            { months: 3, profit: 0.22, advance: 0.40 },
+            { months: 6, profit: 0.38, advance: 0.35 },
+            { months: 9, profit: 0.48, advance: 0.30 },
+            { months: 12, profit: 0.60, advance: 0.25 },
+        ];
+    } else {
+        return [];
+    }
+
+    return plans.map(plan => {
+        const advanceAmount = roundUpToNearest50(price * plan.advance);
+        const remaining = price - advanceAmount;
+        const profitAmount = roundUpToNearest50(remaining * plan.profit);
+        const totalDealAmount = remaining + profitAmount;
+        const monthlyAmount = roundUpToNearest50(totalDealAmount / plan.months);
+        const totalPrice = advanceAmount + (monthlyAmount * plan.months);
+
+        return {
+            advance: advanceAmount,
+            totalPrice: totalPrice,
+            monthlyAmount: monthlyAmount,
+            months: plan.months,
+            isActive: true,
+        };
+    });
+}
+
 const getInventory = async (req, res) => {
     const { outlet_id } = req.user;
 
@@ -45,6 +107,9 @@ const addInventory = async (req, res) => {
             // Uniqueness is ignored for generic cases; but if IMEI exists and given, we avoid dupes if quantity=1 maybe. 
             // In Prisma schema imei_serial is Optional string now without unique. So we can just add.
 
+            const purchasePriceNum = parseFloat(purchase_price);
+            const instPlans = generateInstallments(category || '', purchasePriceNum);
+
             const created = await prisma.outletInventory.create({
                 data: {
                     outlet_id,
@@ -53,8 +118,9 @@ const addInventory = async (req, res) => {
                     imei_serial: imei_serial || null,
                     color_variant: color_variant || null,
                     quantity: parseInt(quantity) || 1,
-                    purchase_price: parseFloat(purchase_price),
+                    purchase_price: purchasePriceNum,
                     installment_price: 0, 
+                    installment_plans: instPlans,
                     status: status || 'In Stock'
                 }
             });

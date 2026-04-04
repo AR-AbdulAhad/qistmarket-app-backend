@@ -171,7 +171,7 @@ model Outlet {
   users        User[]
   orders       Order[]
   cashRegisters CashRegister[]
-  expenses     Expense[]
+  expenseVouchers ExpenseVoucher[]
   inventories  OutletInventory[]
   vendorPurchases VendorPurchase[]
   vendorPayments  VendorPayment[]
@@ -200,18 +200,35 @@ model CashRegister {
   @@map("cash_registers")
 }
 
-model Expense {
-  id           Int      @id @default(autoincrement())
-  outlet_id    Int
-  expense_type String
-  amount       Float
-  description  String?
-  created_at   DateTime @default(now())
-  outlet       Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+model ExpenseVoucher {
+  id             Int           @id @default(autoincrement())
+  outlet_id      Int
+  voucher_number String        @unique
+  total_amount   Float         @default(0)
+  payment_method String        @default("Cash")
+  date           DateTime      @default(now())
+  notes          String?       @db.Text
+  created_at     DateTime      @default(now())
+  updated_at     DateTime      @updatedAt
+  outlet         Outlet        @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  items          ExpenseItem[]
 
   @@index([outlet_id])
-  @@index([created_at])
-  @@map("expenses")
+  @@index([date])
+  @@index([voucher_number])
+  @@map("expense_vouchers")
+}
+
+model ExpenseItem {
+  id          Int            @id @default(autoincrement())
+  voucher_id  Int
+  category    String?        @default("General")
+  amount      Float
+  description String?
+  voucher     ExpenseVoucher @relation(fields: [voucher_id], references: [id], onDelete: Cascade)
+
+  @@index([voucher_id])
+  @@map("expense_items")
 }
 
 model VendorPurchase {
@@ -284,6 +301,7 @@ model OutletInventory {
   purchase_price     Float
   installment_price  Float
   status             String   @default("In Stock")
+  installment_plans  Json?
   created_at         DateTime @default(now())
   updated_at         DateTime @updatedAt
   outlet             Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
