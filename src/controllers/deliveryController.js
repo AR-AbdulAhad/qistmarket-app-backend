@@ -635,9 +635,11 @@ const getDeliveryBoyInventory = async (req, res) => {
 
 // Pick Order (Change status to Picked)
 const pickOrder = async (req, res) => {
-  const { verification_id, order_id } = req.body;
+  const { order_id } = req.body;
 
   try {
+    const verification_id = req.user.id;
+
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
@@ -676,15 +678,21 @@ const unpickOrder = async (req, res) => {
   const { order_id } = req.body;
 
   try {
-    const order = await prisma.order.findUnique({
-      where: { id: parseInt(order_id) }
+    const verification_id = req.user.id;
+
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) }
     });
+
+    if (!verification) {
+      return res.status(404).json({ success: false, error: { message: 'Verification not found' } });
+    }
 
     if (!order) {
       return res.status(404).json({ success: false, error: { message: 'Order not found' } });
     }
 
-    if (order.status !== 'Picked') {
+    if (order.status !== 'picked') {
       return res.status(400).json({ success: false, error: { message: 'Order is not in Picked status' } });
     }
 
