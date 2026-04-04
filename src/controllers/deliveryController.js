@@ -505,23 +505,13 @@ const verifyRefundOtp = async (req, res) => {
   }
 };
 
-// Get Inventory assigned to Delivery Boy
+// Get Inventory assigned to Delivery Boy (grouped by product + variant)
 const getDeliveryBoyInventory = async (req, res) => {
   try {
     const deliveryBoyId = req.user.id;
 
-    if (!deliveryBoyId) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: 'Authentication required' }
-      });
-    }
-
     const transfers = await prisma.stockTransfer.findMany({
-      where: {
-        to_type: 'Delivery Officer',
-        to_id: deliveryBoyId
-      },
+      where: { to_type: 'Delivery Officer', to_id: deliveryBoyId },
       include: {
         inventory: {
           select: {
@@ -539,72 +529,54 @@ const getDeliveryBoyInventory = async (req, res) => {
       orderBy: { created_at: 'desc' }
     });
 
-    if (transfers.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: 'No stock transferred to you yet',
-        data: [],
-        grouped: []
-      });
-    }
-
+    // Resolve source outlet names
     const outletIds = [...new Set(transfers.filter(t => t.from_type === 'Outlet').map(t => t.from_id))];
-    const outlets = await prisma.outlet.findMany({
-      where: { id: { in: outletIds } },
-      select: { id: true, name: true, code: true, address: true }
-    });
+    const outlets = outletIds.length > 0
+      ? await prisma.outlet.findMany({
+        where: { id: { in: outletIds } },
+        select: { id: true, name: true, code: true }
+      })
+      : [];
 
-    // Flat list with full detail
-    const inventoryData = transfers.map(t => {
-      let outletData = null;
-      if (t.from_type === 'Outlet') {
-        const out = outlets.find(o => o.id === t.from_id);
-        if (out) outletData = { name: out.name, code: out.code, address: out.address };
-      }
-      return {
-        transfer_id: t.id,
-        transferred_at: t.created_at,
-        from_type: t.from_type,
-        from_id: t.from_id,
-        outlet_details: outletData,
-        quantity_transferred: t.quantity_transferred,
-        product: t.inventory
-      };
-    });
-
-    // Grouped summary by product_name + color_variant
+    // Group transfers by product_name + color_variant
     const groupMap = new Map();
-    for (const item of inventoryData) {
-      const key = `${item.product.product_name}||${item.product.color_variant || ''}`;
+
+    for (const t of transfers) {
+      const key = `${t.inventory.product_name}||${t.inventory.color_variant || ''}`;
       if (!groupMap.has(key)) {
         groupMap.set(key, {
-          key,
-          product_name: item.product.product_name,
-          category: item.product.category,
-          color_variant: item.product.color_variant,
-          total_quantity_transferred: 0,
-          outlet_details: item.outlet_details,
+          product_name: t.inventory.product_name,
+          category: t.inventory.category,
+          color_variant: t.inventory.color_variant || null,
+          purchase_price: t.inventory.purchase_price,
+          total_qty: 0,
           units: []
         });
       }
       const grp = groupMap.get(key);
-      grp.total_quantity_transferred += item.quantity_transferred || 1;
-      grp.units.push(item);
+      const qty = t.quantity_transferred || 1;
+      const outlet = outlets.find(o => o.id === t.from_id);
+      grp.total_qty += qty;
+      grp.units.push({
+        transfer_id: t.id,
+        transferred_at: t.created_at,
+        quantity_transferred: qty,
+        imei_serial: t.inventory.imei_serial || null,
+        status: t.inventory.status,
+        outlet: outlet ? { name: outlet.name, code: outlet.code } : null
+      });
     }
 
-    return res.status(200).json({
-      success: true,
-      data: inventoryData,
-      grouped: Array.from(groupMap.values())
-    });
+    const grouped = Array.from(groupMap.values());
+
+    return res.json({ success: true, count: grouped.length, grouped });
   } catch (error) {
-    console.error('Error fetching delivery inventory:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    console.error('getDeliveryBoyInventory error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
+
+
 
 module.exports = {
   submitDelivery,
