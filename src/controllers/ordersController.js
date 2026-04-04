@@ -228,6 +228,7 @@ const createOrder = async (req, res) => {
   }
 
   try {
+    const currentUser = await prisma.user.findUnique({ where: { id: req.user.id } });
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -326,6 +327,7 @@ const createOrder = async (req, res) => {
         status: assignedOfficerId ? 'pending' : 'new',
         created_at: getPKTDate(new Date()),
         created_by_user_id: req.user.id,
+        outlet_id: currentUser?.outlet_id || null,
         assigned_to_user_id: assignedOfficerId
       },
       include: {
@@ -392,7 +394,22 @@ const getOrders = async (req, res) => {
   const take = Number(limit);
 
   try {
+    const userFromDb = await prisma.user.findUnique({ where: { id: req.user.id } });
     const where = {};
+    const userRole = (req.user?.role || '').toLowerCase();
+
+    console.log(userRole);
+
+    if (userRole === 'branch user') {
+      where.AND = [
+        {
+          OR: [
+            { outlet_id: userFromDb?.outlet_id || -1 },
+            { created_by_user_id: req.user.id }
+          ]
+        }
+      ];
+    }
 
     if (search.trim()) {
       where.OR = [
@@ -481,7 +498,23 @@ const getOrdersWithPagination = async (req, res) => {
   const cursorId = Number(lastId);
 
   try {
+    const userFromDb = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      include: { role: true }
+    });
     const baseWhere = {};
+    const userRole = (req.user?.role || '').toLowerCase();
+
+    if (userRole === 'outlet') {
+      baseWhere.AND = [
+        {
+          OR: [
+            { outlet_id: userFromDb?.outlet_id || -1 },
+            { created_by_user_id: req.user.id }
+          ]
+        }
+      ];
+    }
 
     if (search.trim()) {
       baseWhere.OR = [
@@ -1191,9 +1224,23 @@ const getApprovedOrders = async (req, res) => {
   const take = Number(limit);
 
   try {
+    const userFromDb = await prisma.user.findUnique({ where: { id: req.user.id } });
+    const userRole = (req.user?.role || '').toLowerCase();
+
     const where = {
       status: { in: ['picked', 'approved'] },
     };
+
+    if (userRole === 'branch user') {
+      where.AND = [
+        {
+          OR: [
+            { outlet_id: userFromDb?.outlet_id || -1 },
+            { created_by_user_id: req.user.id }
+          ]
+        }
+      ];
+    }
 
     if (search.trim()) {
       where.OR = [

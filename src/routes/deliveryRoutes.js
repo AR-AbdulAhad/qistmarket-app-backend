@@ -13,7 +13,8 @@ const {
   verifyDeliveryOtp,
   returnProduct,
   generateRefundOtp,
-  verifyRefundOtp
+  verifyRefundOtp,
+  getDeliveryBoyInventory
 } = require('../controllers/deliveryController');
 
 // Submit delivery (batch)
@@ -32,7 +33,8 @@ router.post(
 // Get delivery by order ID
 router.get('/delivery/order/:order_id', getDeliveryByOrderId);
 router.get('/delivery-boy/picked-products-minimal', authenticateJWT, getPendingDeliveryProducts);
-router.get('/delivery-boy/cash-in-hand', getCashInHand);
+router.get('/delivery-boy/cash-in-hand', authenticateJWT, getCashInHand);
+router.get('/delivery-boy/inventory', authenticateJWT, getDeliveryBoyInventory);
 
 // OTP Verified Delivery Flows
 router.post('/delivery/generate-otp', authenticateJWT, generateDeliveryOtp);

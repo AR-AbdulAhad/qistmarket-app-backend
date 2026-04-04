@@ -505,6 +505,72 @@ const verifyRefundOtp = async (req, res) => {
   }
 };
 
+// Get Inventory assigned to Delivery Boy
+const getDeliveryBoyInventory = async (req, res) => {
+  try {
+    const deliveryBoyId = req.user.id;
+
+    if (!deliveryBoyId) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 401, message: 'Authentication required' }
+      });
+    }
+
+    const transfers = await prisma.stockTransfer.findMany({
+      where: {
+        to_type: 'Delivery Officer',
+        to_id: deliveryBoyId
+      },
+      include: {
+        inventory: true
+      },
+      orderBy: { created_at: 'desc' }
+    });
+
+    if (transfers.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No stock transferred to you yet',
+        data: []
+      });
+    }
+
+    const outletIds = [...new Set(transfers.filter(t => t.from_type === 'Outlet').map(t => t.from_id))];
+    const outlets = await prisma.outlet.findMany({
+      where: { id: { in: outletIds } },
+      select: { id: true, name: true, code: true, address: true }
+    });
+
+    const inventoryData = transfers.map(t => {
+      let outletData = null;
+      if (t.from_type === 'Outlet') {
+        const out = outlets.find(o => o.id === t.from_id);
+        if (out) outletData = { name: out.name, code: out.code, address: out.address };
+      }
+      return {
+        transfer_id: t.id,
+        transferred_at: t.created_at,
+        from_type: t.from_type,
+        from_id: t.from_id,
+        outlet_details: outletData,
+        product: t.inventory
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: inventoryData
+    });
+  } catch (error) {
+    console.error('Error fetching delivery inventory:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
@@ -514,5 +580,6 @@ module.exports = {
   verifyDeliveryOtp,
   returnProduct,
   generateRefundOtp,
-  verifyRefundOtp
+  verifyRefundOtp,
+  getDeliveryBoyInventory
 };
