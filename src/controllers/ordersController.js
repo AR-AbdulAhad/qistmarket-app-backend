@@ -1314,9 +1314,9 @@ const assignDelivery = async (req, res) => {
 
     console.log('Order for delivery assignment:', order?.status);
 
-    if (!order || order?.status !== 'picked') {
-      return res.status(400).json({ success: false, message: 'Order not found or not approved' });
-    }
+    // if (!order || order?.status !== 'picked') {
+    //   return res.status(400).json({ success: false, message: 'Order not found or not approved' });
+    // }
 
     if (action === 'unassign') {
       const updatedOrder = await prisma.order.update({
