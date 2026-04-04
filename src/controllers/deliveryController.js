@@ -523,7 +523,18 @@ const getDeliveryBoyInventory = async (req, res) => {
         to_id: deliveryBoyId
       },
       include: {
-        inventory: true
+        inventory: {
+          select: {
+            id: true,
+            product_name: true,
+            category: true,
+            color_variant: true,
+            imei_serial: true,
+            quantity: true,
+            purchase_price: true,
+            status: true
+          }
+        }
       },
       orderBy: { created_at: 'desc' }
     });
@@ -532,7 +543,8 @@ const getDeliveryBoyInventory = async (req, res) => {
       return res.status(200).json({
         success: true,
         message: 'No stock transferred to you yet',
-        data: []
+        data: [],
+        grouped: []
       });
     }
 
@@ -542,6 +554,7 @@ const getDeliveryBoyInventory = async (req, res) => {
       select: { id: true, name: true, code: true, address: true }
     });
 
+    // Flat list with full detail
     const inventoryData = transfers.map(t => {
       let outletData = null;
       if (t.from_type === 'Outlet') {
@@ -554,13 +567,35 @@ const getDeliveryBoyInventory = async (req, res) => {
         from_type: t.from_type,
         from_id: t.from_id,
         outlet_details: outletData,
+        quantity_transferred: t.quantity_transferred,
         product: t.inventory
       };
     });
 
+    // Grouped summary by product_name + color_variant
+    const groupMap = new Map();
+    for (const item of inventoryData) {
+      const key = `${item.product.product_name}||${item.product.color_variant || ''}`;
+      if (!groupMap.has(key)) {
+        groupMap.set(key, {
+          key,
+          product_name: item.product.product_name,
+          category: item.product.category,
+          color_variant: item.product.color_variant,
+          total_quantity_transferred: 0,
+          outlet_details: item.outlet_details,
+          units: []
+        });
+      }
+      const grp = groupMap.get(key);
+      grp.total_quantity_transferred += item.quantity_transferred || 1;
+      grp.units.push(item);
+    }
+
     return res.status(200).json({
       success: true,
-      data: inventoryData
+      data: inventoryData,
+      grouped: Array.from(groupMap.values())
     });
   } catch (error) {
     console.error('Error fetching delivery inventory:', error);

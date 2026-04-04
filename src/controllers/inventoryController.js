@@ -36,23 +36,23 @@ const addInventory = async (req, res) => {
     try {
         const createdItems = [];
         for (const item of items) {
-            const { product_name, category, imei_serial, purchase_price, status } = item;
+            const { product_name, category, imei_serial, purchase_price, status, color_variant, quantity } = item;
 
-            if (!product_name || !imei_serial || purchase_price === undefined) {
+            if (!product_name || purchase_price === undefined) {
                 continue;
             }
 
-            const existing = await prisma.outletInventory.findUnique({ where: { imei_serial } });
-            if (existing) {
-                continue; 
-            }
+            // Uniqueness is ignored for generic cases; but if IMEI exists and given, we avoid dupes if quantity=1 maybe. 
+            // In Prisma schema imei_serial is Optional string now without unique. So we can just add.
 
             const created = await prisma.outletInventory.create({
                 data: {
                     outlet_id,
                     product_name,
                     category: category || '',
-                    imei_serial,
+                    imei_serial: imei_serial || null,
+                    color_variant: color_variant || null,
+                    quantity: parseInt(quantity) || 1,
                     purchase_price: parseFloat(purchase_price),
                     installment_price: 0, 
                     status: status || 'In Stock'
@@ -99,11 +99,14 @@ const initiateStockTransfer = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid transfer type.' });
         }
 
+        // inventory_ids may be [{id, quantity}] objects OR plain integers — normalize both
+        const rawIds = inventory_ids.map(i => typeof i === 'object' ? parseInt(i.id) : parseInt(i));
+
         const items = await prisma.outletInventory.findMany({
-            where: { id: { in: inventory_ids }, outlet_id, status: 'In Stock' }
+            where: { id: { in: rawIds }, outlet_id, status: 'In Stock' }
         });
 
-        if (items.length !== inventory_ids.length) {
+        if (items.length !== rawIds.length) {
             return res.status(400).json({ success: false, message: 'Some items could not be found or are not in stock.' });
         }
 
@@ -149,39 +152,78 @@ const verifyStockTransfer = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
         }
 
+        // The new frontend payload should pass inventory_ids as an array of objects: [{ id: 5, quantity: 2 }, ...]
+        // We will extract just the IDs to fetch the raw items
+        const rawIds = inventory_ids.map(i => typeof i === 'object' ? i.id : i);
+
         const items = await prisma.outletInventory.findMany({
-            where: { id: { in: inventory_ids }, outlet_id, status: 'In Stock' }
+            where: { id: { in: rawIds }, outlet_id, status: 'In Stock' }
         });
 
-        if (items.length !== inventory_ids.length) {
+        if (items.length !== rawIds.length) {
             return res.status(400).json({ success: false, message: 'Some items could not be found or are not in stock.' });
         }
 
         // Process transfers
         const transfers = await prisma.$transaction(async (tx) => {
-            // "or transfere karne ke bd stsus transfered hojata hay or stock transfere list me se hat jata hay jb ke usi me rahe or koi status chaneg na ho sahi hay"
-            let payload = { status: 'In Stock' }; 
+            const transferData = [];
             
-            // Note: If transferring to another Outlet, it must physically reflect in their inventory ID
-            if (to_type === 'Outlet') {
-                payload = { status: 'In Stock', outlet_id: targetId };
+            for (const payloadItem of inventory_ids) {
+                const recordId = typeof payloadItem === 'object' ? payloadItem.id : payloadItem;
+                const transferQty = typeof payloadItem === 'object' ? (parseInt(payloadItem.quantity) || 1) : 1;
+
+                const item = items.find(i => i.id === recordId);
+                if (!item) continue;
+
+                let finalInventoryId = item.id;
+                let isFullTransfer = (item.quantity <= transferQty);
+                let actualTransferQty = isFullTransfer ? item.quantity : transferQty;
+
+                let targetPayload = { status: 'In Stock' }; 
+                if (to_type === 'Outlet') {
+                    targetPayload = { status: 'In Stock', outlet_id: targetId };
+                }
+
+                if (isFullTransfer) {
+                    await tx.outletInventory.update({
+                        where: { id: item.id },
+                        data: targetPayload
+                    });
+                } else {
+                    // Split the row! Keep original at original outlet with reduced Qty
+                    await tx.outletInventory.update({
+                        where: { id: item.id },
+                        data: { quantity: item.quantity - actualTransferQty }
+                    });
+
+                    // Create cloned Row for the Target Outlet / DO
+                    const cloned = await tx.outletInventory.create({
+                        data: {
+                            outlet_id: (to_type === 'Outlet') ? targetId : outlet_id,
+                            product_name: item.product_name,
+                            category: item.category,
+                            imei_serial: item.imei_serial,
+                            color_variant: item.color_variant,
+                            quantity: actualTransferQty,
+                            purchase_price: item.purchase_price,
+                            installment_price: item.installment_price,
+                            status: 'In Stock'
+                        }
+                    });
+                    finalInventoryId = cloned.id;
+                }
+
+                transferData.push({
+                    from_type: 'Outlet',
+                    from_id: outlet_id,
+                    to_type,
+                    to_id: targetId,
+                    inventory_id: finalInventoryId,
+                    quantity_transferred: actualTransferQty
+                });
             }
 
-            // Bulk update inventory status (Only applies outlet_id swap if Outlet)
-            await tx.outletInventory.updateMany({
-                where: { id: { in: inventory_ids } },
-                data: payload
-            });
-
             // Bulk create transfer records
-            const transferData = inventory_ids.map(id => ({
-                from_type: 'Outlet',
-                from_id: outlet_id,
-                to_type,
-                to_id: targetId,
-                inventory_id: id
-            }));
-
             await tx.stockTransfer.createMany({
                 data: transferData
             });
@@ -192,18 +234,17 @@ const verifyStockTransfer = async (req, res) => {
                 data: { isUsed: true }
             });
 
-            return transferData; // returning the payload structure
-        }, { timeout: 15000 }); // extended timeout 15s
+            return transferData; 
+        }, { timeout: 15000 }); 
 
         // Notifications
         const messageTitle = 'Stock Transfer Received';
-        const messageBody = `You have received a transfer of ${items.length} item(s) from Outlet ${outlet_id}.`;
+        const messageBody = `You have received a transfer of ${transfers.length} item entry(s) from Outlet ${outlet_id}.`;
         const io = req.app.get('io');
 
         if (to_type === 'Delivery Officer') {
             await notifyUser(targetId, messageTitle, messageBody, 'stock_transfer', null, io);
         } else if (to_type === 'Outlet') {
-            // Find users associated with the target outlet (usually Branch Users)
             const targetUsers = await prisma.user.findMany({
                 where: { outlet_id: targetId, role: { name: 'Branch User' }, status: 'active' }
             });
@@ -213,7 +254,7 @@ const verifyStockTransfer = async (req, res) => {
         }
 
         // Notify Admins mapping (dashboard global alerts)
-        await notifyAdmins('Outlet Stock Transferred', `${items.length} items transferred from Outlet ${outlet_id} to ${to_type} ${targetId}`, 'stock_transfer', null, io);
+        await notifyAdmins('Outlet Stock Transferred', `${transfers.length} item batches transferred from Outlet ${outlet_id} to ${to_type} ${targetId}`, 'stock_transfer', null, io);
 
         res.json({ success: true, transfers });
     } catch (error) {
@@ -233,12 +274,23 @@ const getTransferHistory = async (req, res) => {
         const transfers = await prisma.stockTransfer.findMany({
             where: { from_type: 'Outlet', from_id: outlet_id },
             include: {
-                inventory: true
+                inventory: {
+                    select: {
+                        id: true,
+                        product_name: true,
+                        category: true,
+                        color_variant: true,
+                        imei_serial: true,
+                        quantity: true,
+                        purchase_price: true,
+                        status: true
+                    }
+                }
             },
             orderBy: { created_at: 'desc' }
         });
 
-        // We also need to map the "to_id" to human readable names.
+        // Map to_id to human readable names
         const deliveryToIds = [...new Set(transfers.filter(t => t.to_type === 'Delivery Officer').map(t => t.to_id))];
         const outletToIds = [...new Set(transfers.filter(t => t.to_type === 'Outlet').map(t => t.to_id))];
 
@@ -290,6 +342,8 @@ const updateInventoryItem = async (req, res) => {
                 product_name: data.product_name,
                 category: data.category,
                 imei_serial: data.imei_serial,
+                color_variant: data.color_variant,
+                quantity: data.quantity !== undefined ? parseInt(data.quantity) : undefined,
                 purchase_price: data.purchase_price !== undefined ? parseFloat(data.purchase_price) : undefined,
                 status: data.status,
             }
@@ -335,6 +389,8 @@ const bulkUpdateInventory = async (req, res) => {
         if (data.status) updateData.status = data.status;
         if (data.product_name) updateData.product_name = data.product_name;
         if (data.category) updateData.category = data.category;
+        if (data.color_variant) updateData.color_variant = data.color_variant;
+        if (data.quantity !== undefined) updateData.quantity = parseInt(data.quantity);
         if (data.purchase_price !== undefined) updateData.purchase_price = parseFloat(data.purchase_price);
 
         const updated = await prisma.outletInventory.updateMany({

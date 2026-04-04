@@ -251,7 +251,9 @@ model OutletInventory {
   outlet_id          Int
   product_name       String
   category           String?
-  imei_serial        String   @unique
+  imei_serial        String?
+  color_variant      String?
+  quantity           Int      @default(1)
   purchase_price     Float
   installment_price  Float
   status             String   @default("In Stock")
@@ -272,6 +274,7 @@ model StockTransfer {
   to_type      String
   to_id        Int
   inventory_id Int
+  quantity_transferred Int @default(1)
   created_at   DateTime @default(now())
   inventory    OutletInventory @relation(fields: [inventory_id], references: [id], onDelete: Cascade)
 
