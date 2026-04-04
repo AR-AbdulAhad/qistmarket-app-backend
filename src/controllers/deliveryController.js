@@ -638,18 +638,8 @@ const pickOrder = async (req, res) => {
   const { order_id } = req.body;
 
   try {
-    const verification_id = req.user.id;
-
-    const verification = await prisma.verification.findUnique({
-      where: { id: parseInt(verification_id) }
-    });
-
-    if (!verification) {
-      return res.status(404).json({ success: false, error: { message: 'Verification not found' } });
-    }
-
-    if (verification.order_id !== parseInt(order_id)) {
-      return res.status(400).json({ success: false, error: { message: 'Verification does not match the order' } });
+    if (!order_id) {
+      return res.status(404).json({ success: false, error: { message: 'Order not found' } });
     }
 
     await prisma.order.update({
@@ -678,24 +668,9 @@ const unpickOrder = async (req, res) => {
   const { order_id } = req.body;
 
   try {
-    const verification_id = req.user.id;
-
-    const verification = await prisma.verification.findUnique({
-      where: { id: parseInt(verification_id) }
-    });
-
-    if (!verification) {
-      return res.status(404).json({ success: false, error: { message: 'Verification not found' } });
-    }
-
-    if (!order) {
+    if (!order_id) {
       return res.status(404).json({ success: false, error: { message: 'Order not found' } });
     }
-
-    if (order.status !== 'picked') {
-      return res.status(400).json({ success: false, error: { message: 'Order is not in Picked status' } });
-    }
-
     await prisma.order.update({
       where: { id: parseInt(order_id) },
       data: { status: 'approved' }
