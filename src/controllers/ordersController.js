@@ -1312,7 +1312,9 @@ const assignDelivery = async (req, res) => {
       include: { verification: true }
     });
 
-    if (!order || order.verification?.status !== 'approved') {
+    console.log('Order for delivery assignment:', order?.status);
+
+    if (!order || order?.status !== 'picked') {
       return res.status(400).json({ success: false, message: 'Order not found or not approved' });
     }
 
@@ -1322,7 +1324,6 @@ const assignDelivery = async (req, res) => {
         data: {
           delivery_officer_id: null,
           outlet_id: null, // Also unassign from outlet
-          status: 'approved'
         },
         include: {
           delivery_officer: { select: { username: true } }
@@ -1350,8 +1351,7 @@ const assignDelivery = async (req, res) => {
       where: { id: Number(id) },
       data: {
         delivery_officer_id: Number(user_id),
-        outlet_id: officer?.outlet_id || null, // Connects order to the outlet
-        status: 'approved' // Assignment starts from approved (ready for outlet handover)
+        outlet_id: officer?.outlet_id || null,
       },
       include: {
         delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }

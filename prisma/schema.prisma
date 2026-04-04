@@ -215,32 +215,59 @@ model Expense {
 }
 
 model VendorPurchase {
-  id             Int      @id @default(autoincrement())
+  id             Int                  @id @default(autoincrement())
   outlet_id      Int
+  invoice_number String               @unique
   vendor_name    String
-  product_name   String
-  imei_serial    String   @unique
-  quantity       Int      @default(1)
-  purchase_price Float
-  created_at     DateTime @default(now())
-  outlet         Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  notes          String?              @db.Text
+  total_amount   Float                @default(0)
+  paid_amount    Float                @default(0)
+  balance        Float                @default(0)
+  status         String               @default("Unpaid")  // Unpaid | Partial | Paid
+  purchase_date  DateTime             @default(now())
+  created_at     DateTime             @default(now())
+  updated_at     DateTime             @updatedAt
+  outlet         Outlet               @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  items          VendorPurchaseItem[]
+  payments       VendorPayment[]
 
   @@index([outlet_id])
   @@index([vendor_name])
+  @@index([status])
   @@index([created_at])
   @@map("vendor_purchases")
 }
 
+model VendorPurchaseItem {
+  id            Int            @id @default(autoincrement())
+  purchase_id   Int
+  product_name  String
+  category      String?
+  color_variant String?
+  imei_serial   String?
+  quantity      Int            @default(1)
+  unit_price    Float
+  total_price   Float
+  purchase      VendorPurchase @relation(fields: [purchase_id], references: [id], onDelete: Cascade)
+
+  @@index([purchase_id])
+  @@map("vendor_purchase_items")
+}
+
 model VendorPayment {
-  id             Int      @id @default(autoincrement())
+  id             Int            @id @default(autoincrement())
   outlet_id      Int
+  purchase_id    Int
   vendor_name    String
   amount         Float
-  payment_method String?
-  created_at     DateTime @default(now())
-  outlet         Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  payment_method String?        @default("Cash")
+  notes          String?        @db.Text
+  created_at     DateTime       @default(now())
+  outlet         Outlet         @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  purchase       VendorPurchase @relation(fields: [purchase_id], references: [id], onDelete: Cascade)
 
   @@index([outlet_id])
+  @@index([purchase_id])
   @@index([vendor_name])
   @@index([created_at])
   @@map("vendor_payments")

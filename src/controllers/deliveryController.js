@@ -365,19 +365,40 @@ const generateDeliveryOtp = async (req, res) => {
 
   try {
     const order = await prisma.order.findUnique({
-      where: { id: parseInt(order_id) }
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: {
+          include: {
+            purchaser: true
+          }
+        }
+      }
     });
 
     if (!order) {
       return res.status(404).json({ success: false, error: { message: 'Order not found' } });
     }
 
+    if (!order.verification || !order.verification.purchaser) {
+      return res.status(404).json({ success: false, error: { message: 'Verification or purchaser details not found' } });
+    }
+
     if (order.delivery_officer_id !== req.user.id) {
       return res.status(403).json({ success: false, error: { message: 'Order not assigned to you' } });
     }
 
-    const otp = await saveOTP(order.phone, 'delivery');
-    await sendOTP(order.phone, otp);
+    const purchaserNumber = order.verification.purchaser.telephone_number;
+    const otp = await saveOTP(purchaserNumber, 'delivery');
+    await sendOTP(purchaserNumber, otp);
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Delivery OTP Generated',
+      `OTP sent to purchaser for Order #${order_id}`,
+      'delivery_otp_generated',
+      order_id,
+      io
+    );
 
     return res.status(200).json({ success: true, message: 'OTP sent to customer' });
   } catch (error) {
@@ -422,6 +443,15 @@ const verifyDeliveryOtp = async (req, res) => {
       }
     });
 
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Delivery Verified',
+      `Delivery for Order #${order_id} has been verified and completed`,
+      'delivery_verified',
+      order_id,
+      io
+    );
+
     return res.status(200).json({ success: true, valid: true, message: 'Delivery verified and completed' });
   } catch (error) {
     console.error('verifyDeliveryOtp error:', error);
@@ -449,6 +479,15 @@ const returnProduct = async (req, res) => {
       }
     });
 
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Product Returned',
+      `Product for Order #${order_id} has been returned. Reason: ${reason}`,
+      'product_returned',
+      order_id,
+      io
+    );
+
     return res.status(200).json({ success: true, message: 'Product marked as returned' });
   } catch (error) {
     console.error('returnProduct error:', error);
@@ -469,6 +508,15 @@ const generateRefundOtp = async (req, res) => {
 
     const otp = await saveOTP(order.phone, 'refund');
     await sendOTP(order.phone, otp);
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Refund OTP Generated',
+      `OTP sent to customer for refund of Order #${order_id}`,
+      'refund_otp_generated',
+      order_id,
+      io
+    );
 
     return res.status(200).json({ success: true, message: 'Refund OTP sent to customer' });
   } catch (error) {
@@ -497,6 +545,15 @@ const verifyRefundOtp = async (req, res) => {
       where: { id: parseInt(order_id) },
       data: { status: 'refunded' }
     });
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Refund Processed',
+      `Refund for Order #${order_id} has been verified and processed`,
+      'refund_processed',
+      order_id,
+      io
+    );
 
     return res.status(200).json({ success: true, valid: true, message: 'Refund verified and processed' });
   } catch (error) {
@@ -576,7 +633,81 @@ const getDeliveryBoyInventory = async (req, res) => {
   }
 };
 
+// Pick Order (Change status to Picked)
+const pickOrder = async (req, res) => {
+  const { verification_id, order_id } = req.body;
 
+  try {
+    const verification = await prisma.verification.findUnique({
+      where: { id: parseInt(verification_id) }
+    });
+
+    if (!verification) {
+      return res.status(404).json({ success: false, error: { message: 'Verification not found' } });
+    }
+
+    if (verification.order_id !== parseInt(order_id)) {
+      return res.status(400).json({ success: false, error: { message: 'Verification does not match the order' } });
+    }
+
+    await prisma.order.update({
+      where: { id: parseInt(order_id) },
+      data: { status: 'picked' }
+    });
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Order Picked',
+      `Order #${order_id} has been picked`,
+      'order_picked',
+      order_id,
+      io
+    );
+
+    return res.status(200).json({ success: true, message: 'Order status changed to Picked' });
+  } catch (error) {
+    console.error('pickOrder error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
+
+// Unpick Order (Change status from Picked back to approved)
+const unpickOrder = async (req, res) => {
+  const { order_id } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, error: { message: 'Order not found' } });
+    }
+
+    if (order.status !== 'Picked') {
+      return res.status(400).json({ success: false, error: { message: 'Order is not in Picked status' } });
+    }
+
+    await prisma.order.update({
+      where: { id: parseInt(order_id) },
+      data: { status: 'approved' }
+    });
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Order Unpicked',
+      `Order #${order_id} has been unpicked and status changed back to approved`,
+      'order_unpicked',
+      order_id,
+      io
+    );
+
+    return res.status(200).json({ success: true, message: 'Order status changed back to approved' });
+  } catch (error) {
+    console.error('unpickOrder error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
 
 module.exports = {
   submitDelivery,
@@ -588,5 +719,7 @@ module.exports = {
   returnProduct,
   generateRefundOtp,
   verifyRefundOtp,
-  getDeliveryBoyInventory
+  getDeliveryBoyInventory,
+  pickOrder,
+  unpickOrder
 };

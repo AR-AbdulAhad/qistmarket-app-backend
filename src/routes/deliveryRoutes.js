@@ -14,7 +14,9 @@ const {
   returnProduct,
   generateRefundOtp,
   verifyRefundOtp,
-  getDeliveryBoyInventory
+  getDeliveryBoyInventory,
+  pickOrder,
+  unpickOrder
 } = require('../controllers/deliveryController');
 
 // Submit delivery (batch)
@@ -44,5 +46,9 @@ router.post('/delivery/return', authenticateJWT, returnProduct);
 // OTP Verified Refund Flows
 router.post('/delivery/refund/generate-otp', authenticateJWT, generateRefundOtp);
 router.post('/delivery/refund/verify-otp', authenticateJWT, verifyRefundOtp);
+
+// Pick/Unpick Order Status
+router.post('/delivery/pick-order', authenticateJWT, pickOrder);
+router.post('/delivery/unpick-order', authenticateJWT, unpickOrder);
 
 module.exports = router;
