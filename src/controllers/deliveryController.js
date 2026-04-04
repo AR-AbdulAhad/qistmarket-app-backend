@@ -6,7 +6,7 @@ const { notifyAdmins } = require('../utils/notificationUtils');
 
 // Submit Delivery (Batch Upload)
 const submitDelivery = async (req, res) => {
-  const { order_id } = req.body;
+  const { order_id, product_imei, selected_plan } = req.body;
 
   if (!order_id) {
     return res.status(400).json({
@@ -66,9 +66,37 @@ const submitDelivery = async (req, res) => {
         status: 'completed',
         start_time: new Date(),
         end_time: new Date(),
-        verified: true
+        verified: true,
+        product_imei: product_imei || null,
+        selected_plan: selected_plan || null
       }
     });
+
+    // Update Inventory Status and Transfer History if IMEI provided
+    if (product_imei) {
+      const inventory = await prisma.outletInventory.findFirst({
+        where: { imei_serial: product_imei }
+      });
+
+      if (inventory) {
+        // Mark inventory as out of stock
+        await prisma.outletInventory.update({
+          where: { id: inventory.id },
+          data: { status: 'Out Of Stock' }
+        });
+
+        // Mark transfer as delivered
+        await prisma.stockTransfer.updateMany({
+          where: { 
+            inventory_id: inventory.id, 
+            to_id: req.user.id,
+            to_type: 'Delivery Officer',
+            status: 'pending'
+          },
+          data: { status: 'delivered' }
+        });
+      }
+    }
 
     // Create uploads
     const uploadsData = [];
@@ -413,46 +441,38 @@ const verifyDeliveryOtp = async (req, res) => {
 
   try {
     const order = await prisma.order.findUnique({
-      where: { id: parseInt(order_id) }
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: {
+          include: {
+            purchaser: true
+          }
+        }
+      }
     });
 
     if (!order) return res.status(404).json({ success: false, error: { message: 'Order not found' } });
 
-    const verification = await verifyOTP(order.phone, otp, 'delivery');
+    if (!order.verification || !order.verification.purchaser) {
+      return res.status(404).json({ success: false, error: { message: 'Verification or purchaser details not found' } });
+    }
+
+    const purchaserNumber = order.verification.purchaser.telephone_number;
+    const verification = await verifyOTP(purchaserNumber, otp, 'delivery');
     if (!verification.valid) {
       return res.status(400).json({ success: true, valid: false, message: verification.message });
     }
 
-    // Mark as delivered
-    await prisma.order.update({
-      where: { id: parseInt(order_id) },
-      data: { status: 'delivered', is_delivered: true }
-    });
-
-    // Create delivery record if not exists
-    await prisma.delivery.upsert({
-      where: { order_id: parseInt(order_id) },
-      update: { status: 'completed', end_time: new Date(), verified: true },
-      create: {
-        order_id: parseInt(order_id),
-        delivery_agent_id: req.user.id,
-        status: 'completed',
-        start_time: new Date(),
-        end_time: new Date(),
-        verified: true
-      }
-    });
-
     const io = req.app.get('io');
     await notifyAdmins(
-      'Delivery Verified',
-      `Delivery for Order #${order_id} has been verified and completed`,
-      'delivery_verified',
+      'Delivery OTP Verified',
+      `OTP verified for Order #${order_id}`,
+      'delivery_otp_verified',
       order_id,
       io
     );
 
-    return res.status(200).json({ success: true, valid: true, message: 'Delivery verified and completed' });
+    return res.status(200).json({ success: true, valid: true, message: 'OTP verified successfully' });
   } catch (error) {
     console.error('verifyDeliveryOtp error:', error);
     return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
@@ -568,7 +588,7 @@ const getDeliveryBoyInventory = async (req, res) => {
     const deliveryBoyId = req.user.id;
 
     const transfers = await prisma.stockTransfer.findMany({
-      where: { to_type: 'Delivery Officer', to_id: deliveryBoyId },
+      where: { to_type: 'Delivery Officer', to_id: deliveryBoyId, status: 'pending' },
       include: {
         inventory: {
           select: {

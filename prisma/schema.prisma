@@ -320,6 +320,7 @@ model StockTransfer {
   to_id        Int
   inventory_id Int
   quantity_transferred Int @default(1)
+  status       String   @default("pending")
   created_at   DateTime @default(now())
   inventory    OutletInventory @relation(fields: [inventory_id], references: [id], onDelete: Cascade)
 
@@ -543,6 +544,8 @@ model Delivery {
   delivery_agent    User             @relation("delivery_agent", fields: [delivery_agent_id], references: [id])
   order             Order            @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
   uploads           DeliveryUpload[]
+  product_imei      String?          @db.VarChar(100)
+  selected_plan     Json?
 
   @@index([delivery_agent_id])
 }
