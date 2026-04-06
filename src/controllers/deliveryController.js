@@ -22,7 +22,10 @@ const submitDelivery = async (req, res) => {
         id: parseInt(order_id),
         delivery_officer_id: req.user.id
       },
-      include: { delivery: true }
+      include: {
+        delivery: true,
+        verification: { include: { purchaser: true } }
+      }
     });
 
     if (!order) {
@@ -72,6 +75,11 @@ const submitDelivery = async (req, res) => {
       }
     });
 
+    // Snapshot variables for Cash In Hand
+    let colorVariant = null;
+    let productNameSnapshot = order.product_name;
+    let stockTransferId = null;
+
     // Update Inventory Status and Transfer History if IMEI provided
     if (product_imei) {
       const inventory = await prisma.outletInventory.findFirst({
@@ -85,16 +93,26 @@ const submitDelivery = async (req, res) => {
           data: { status: 'Out Of Stock' }
         });
 
+        colorVariant = inventory.color_variant || null;
+        productNameSnapshot = inventory.product_name || order.product_name;
+
         // Mark transfer as delivered
-        await prisma.stockTransfer.updateMany({
-          where: { 
-            inventory_id: inventory.id, 
+        const transfer = await prisma.stockTransfer.findFirst({
+          where: {
+            inventory_id: inventory.id,
             to_id: req.user.id,
             to_type: 'Delivery Officer',
             status: 'pending'
-          },
-          data: { status: 'delivered' }
+          }
         });
+
+        if (transfer) {
+          stockTransferId = transfer.id;
+          await prisma.stockTransfer.update({
+            where: { id: transfer.id },
+            data: { status: 'delivered' }
+          });
+        }
       }
     }
 
@@ -160,6 +178,41 @@ const submitDelivery = async (req, res) => {
       }
     });
 
+    // Determine advance amount STRICTLY from delivery context (selected_plan)
+    let advanceAmount = 0.0;
+    let planObj = null;
+
+    if (selected_plan) {
+      try {
+        planObj = typeof selected_plan === 'string' ? JSON.parse(selected_plan) : selected_plan;
+        if (planObj && (planObj.advance !== undefined || planObj.advance_amount !== undefined)) {
+          advanceAmount = parseFloat(planObj.advance || planObj.advance_amount);
+        }
+      } catch (e) {
+        console.error('Error parsing selected_plan:', e);
+      }
+    }
+
+    // Get confirmed purchaser name from verification if available
+    const confirmedCustomerName = order.verification?.purchaser?.full_name || order.customer_name;
+
+    // Create Cash In Hand entry for advance amount using delivery snapshots
+    if (advanceAmount > 0) {
+      await prisma.cashInHand.create({
+        data: {
+          delivery_officer_id: req.user.id,
+          order_id: parseInt(order_id),
+          amount: advanceAmount,
+          status: 'pending',
+          customer_name: confirmedCustomerName,
+          product_name: productNameSnapshot || order.product_name,
+          imei_serial: product_imei || null,
+          color_variant: colorVariant || null,
+          stock_transfer_id: stockTransferId
+        }
+      });
+    }
+
     // Fetch updated delivery
     const updatedDelivery = await prisma.delivery.findUnique({
       where: { id: delivery.id },
@@ -199,8 +252,6 @@ const submitDelivery = async (req, res) => {
 const getDeliveryByOrderId = async (req, res) => {
   const { order_id } = req.params;
 
-  console.log('Get delivery for order_id:', order_id);
-
   try {
     const delivery = await prisma.delivery.findUnique({
       where: { order_id: parseInt(order_id) },
@@ -218,7 +269,6 @@ const getDeliveryByOrderId = async (req, res) => {
         error: { code: 404, message: 'Delivery not found for this order' }
       });
     }
-
 
     return res.status(200).json({
       success: true,
@@ -244,11 +294,10 @@ const getPendingDeliveryProducts = async (req, res) => {
       });
     }
 
-    // Fetch all pending orders with only needed fields
     const orders = await prisma.order.findMany({
       where: {
         delivery_officer_id: deliveryBoyId,
-        is_delivered: false,           // or delivery: null if you chose that approach
+        is_delivered: false,
       },
       select: {
         product_name: true,
@@ -298,7 +347,6 @@ const getPendingDeliveryProducts = async (req, res) => {
       }
     });
 
-    // Convert grouped object to array
     const result = Object.values(grouped).map((group) => ({
       product_name: group.product_name,
       count: group.count,
@@ -324,70 +372,180 @@ const getPendingDeliveryProducts = async (req, res) => {
 };
 
 const getCashInHand = async (req, res) => {
-  try {
-    const deliveryBoyId = req.user.id;
+  const { date_from, date_to, status, date } = req.query;
+  const deliveryBoyId = req.user?.id;
 
-    if (!deliveryBoyId) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: 'Authentication required' }
-      });
+  try {
+    let where = {
+      delivery_officer_id: deliveryBoyId,
+    };
+
+    if (status) {
+      where.status = status;
     }
 
-    const deliveries = await prisma.delivery.findMany({
-      where: {
-        delivery_agent_id: deliveryBoyId,
-        status: 'completed',
-      },
+    if (date) {
+      const selectedDate = new Date(date);
+      const nextDay = new Date(date);
+      nextDay.setDate(nextDay.getDate() + 1);
+      where.created_at = {
+        gte: selectedDate,
+        lt: nextDay
+      };
+    } else if (date_from || date_to) {
+      where.created_at = {};
+      if (date_from) where.created_at.gte = new Date(date_from);
+      if (date_to) where.created_at.lte = new Date(date_to);
+    } else {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      where.created_at = { gte: today };
+    }
+
+    const cashEntries = await prisma.cashInHand.findMany({
+      where,
       include: {
         order: {
           select: {
             id: true,
+            order_ref: true,
             product_name: true,
+            imei_serial: true,
             advance_amount: true,
+            created_at: true,
+            customer_name: true,
+            delivery: {
+              select: {
+                selected_plan: true,
+                product_imei: true
+              }
+            }
           }
+        },
+        outlet: {
+          select: { name: true, code: true }
         }
       },
-      orderBy: {
-        created_at: 'desc'
-      }
+      orderBy: { created_at: 'desc' }
     });
 
-    if (deliveries.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: 'No cash in hand entries',
-        data: [],
-        total_unpaid: 0
-      });
-    }
-
-    const cashEntries = deliveries.map(d => ({
-      order_id: d.order.id,
-      product_name: d.order.product_name,
-      amount: d.order.advance_amount,
-      status: 'unpaid',
-      created_at: d.end_time,
-      updated_at: d.end_time
+    const formattedEntries = cashEntries.map(entry => ({
+      id: entry.id,
+      amount: entry.amount,
+      status: entry.status,
+      created_at: entry.created_at,
+      payment_method: entry.payment_method,
+      order_id: entry.order.id,
+      order_ref: entry.order.order_ref,
+      customer_name: entry.customer_name || entry.order?.customer_name,
+      product_name: entry.product_name || entry.order.product_name,
+      imei: entry.imei_serial || entry.order.imei_serial || entry.order.delivery?.product_imei,
+      color_variant: entry.color_variant,
+      selected_plan: entry.order.delivery?.selected_plan,
+      outlet: entry.outlet
     }));
 
-    const totalUnpaid = cashEntries.reduce((sum, entry) => sum + (entry.amount || 0), 0);
+    const totalUnpaid = formattedEntries
+      .filter(e => e.status === 'pending')
+      .reduce((sum, e) => sum + (e.amount || 0), 0);
 
     return res.status(200).json({
       success: true,
-      data: cashEntries,
+      data: formattedEntries,
       total_unpaid: totalUnpaid
     });
   } catch (error) {
-    console.error('Error fetching cash in hand:', error);
-    return res.status(500).json({
-      success: false,
-      error: { code: 500, message: 'Internal server error' }
-    });
+    console.error('getCashInHand error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
   }
 };
 
-// Generate Delivery OTP
+const submitCashToOutlet = async (req, res) => {
+  const { cash_in_hand_ids, cash_in_hand_id, outlet_id, payment_method } = req.body;
+  const deliveryBoyId = req.user?.id;
+
+  let ids = [];
+  if (cash_in_hand_ids && Array.isArray(cash_in_hand_ids)) {
+    ids = cash_in_hand_ids.map(id => parseInt(id));
+  } else if (cash_in_hand_id) {
+    ids = [parseInt(cash_in_hand_id)];
+  }
+
+  if (ids.length === 0 || !outlet_id) {
+    return res.status(400).json({ success: false, message: 'cash_in_hand_ids and outlet_id are required' });
+  }
+
+  try {
+    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+
+    await prisma.cashInHand.updateMany({
+      where: {
+        id: { in: ids },
+        delivery_officer_id: deliveryBoyId,
+      },
+      data: {
+        outlet_id: parseInt(outlet_id),
+        payment_method: payment_method || 'Cash',
+        otp: otp
+      }
+    });
+
+    const entries = await prisma.cashInHand.findMany({
+      where: { id: { in: ids } },
+      include: {
+        delivery_officer: { select: { full_name: true, phone: true } },
+        order: { select: { product_name: true, order_ref: true } }
+      }
+    });
+
+    if (entries.length === 0) {
+      return res.status(404).json({ success: false, message: 'No pending cash entries found' });
+    }
+
+    const totalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
+    const officerName = entries[0]?.delivery_officer?.full_name || 'Officer';
+    const officerPhone = entries[0]?.delivery_officer?.phone;
+
+    // Send OTP to Delivery Officer via WhatsApp (Wati)
+    if (officerPhone) {
+      try {
+        await sendOTP(officerPhone, otp);
+        console.log(`OTP ${otp} sent to officer ${officerName} at ${officerPhone}`);
+      } catch (err) {
+        console.error('Error sending OTP to officer:', err);
+      }
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`outlet_${outlet_id}`).emit('cash_submission_requested', {
+        officer_name: officerName,
+        amount: totalAmount,
+        payment_method: payment_method || 'Cash',
+        otp: otp,
+        entries: entries.map(e => ({
+          customer_name: e.customer_name,
+          order_ref: e.order.order_ref,
+          product_name: e.product_name,
+          imei: e.imei_serial,
+          color: e.color_variant,
+          amount: e.amount
+        }))
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Cash submission initiated. OTP has been sent to your WhatsApp.',
+      total_amount: totalAmount
+    });
+  } catch (error) {
+    console.error('submitCashToOutlet error:', error);
+    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+  }
+};
+
+
 const generateDeliveryOtp = async (req, res) => {
   const { order_id } = req.body;
 
@@ -435,7 +593,6 @@ const generateDeliveryOtp = async (req, res) => {
   }
 };
 
-// Verify Delivery OTP
 const verifyDeliveryOtp = async (req, res) => {
   const { order_id, otp } = req.body;
 
@@ -479,7 +636,6 @@ const verifyDeliveryOtp = async (req, res) => {
   }
 };
 
-// Return Product
 const returnProduct = async (req, res) => {
   const { order_id, reason } = req.body;
 
@@ -515,7 +671,6 @@ const returnProduct = async (req, res) => {
   }
 };
 
-// Generate Refund OTP
 const generateRefundOtp = async (req, res) => {
   const { order_id } = req.body;
 
@@ -545,7 +700,6 @@ const generateRefundOtp = async (req, res) => {
   }
 };
 
-// Verify Refund OTP
 const verifyRefundOtp = async (req, res) => {
   const { order_id, otp } = req.body;
 
@@ -582,7 +736,6 @@ const verifyRefundOtp = async (req, res) => {
   }
 };
 
-// Get Inventory assigned to Delivery Boy (grouped by product + variant)
 const getDeliveryBoyInventory = async (req, res) => {
   try {
     const deliveryBoyId = req.user.id;
@@ -607,7 +760,6 @@ const getDeliveryBoyInventory = async (req, res) => {
       orderBy: { created_at: 'desc' }
     });
 
-    // Resolve source outlet names
     const outletIds = [...new Set(transfers.filter(t => t.from_type === 'Outlet').map(t => t.from_id))];
     const outlets = outletIds.length > 0
       ? await prisma.outlet.findMany({
@@ -616,7 +768,6 @@ const getDeliveryBoyInventory = async (req, res) => {
       })
       : [];
 
-    // Group transfers by product_name + color_variant
     const groupMap = new Map();
 
     for (const t of transfers) {
@@ -655,7 +806,6 @@ const getDeliveryBoyInventory = async (req, res) => {
   }
 };
 
-// Pick Order (Change status to Picked)
 const pickOrder = async (req, res) => {
   const { order_id } = req.body;
 
@@ -685,7 +835,6 @@ const pickOrder = async (req, res) => {
   }
 };
 
-// Unpick Order (Change status from Picked back to approved)
 const unpickOrder = async (req, res) => {
   const { order_id } = req.body;
 
@@ -726,5 +875,6 @@ module.exports = {
   verifyRefundOtp,
   getDeliveryBoyInventory,
   pickOrder,
-  unpickOrder
+  unpickOrder,
+  submitCashToOutlet
 };

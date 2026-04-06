@@ -201,10 +201,125 @@ const getDashboardStats = async (req, res) => {
     }
 };
 
+const getGlobalCashInHand = async (req, res) => {
+    try {
+        const entries = await prisma.cashInHand.findMany({
+            where: { status: 'pending' },
+            include: {
+                delivery_officer: { select: { full_name: true, phone: true } },
+                order: { 
+                    select: { 
+                        order_ref: true,
+                        delivery: { select: { selected_plan: true } }
+                    } 
+                },
+                outlet: { select: { name: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+
+        return res.status(200).json({
+            success: true,
+            data: entries
+        });
+    } catch (error) {
+        console.error('getGlobalCashInHand error:', error);
+        return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+    }
+};
+
+const verifyCashSubmissionOTP = async (req, res) => {
+    const { otp, outlet_id } = req.body;
+
+    if (!otp || !outlet_id) {
+        return res.status(400).json({ success: false, message: 'OTP and outlet_id are required' });
+    }
+
+    try {
+        const entries = await prisma.cashInHand.findMany({
+            where: {
+                outlet_id: parseInt(outlet_id),
+                otp: otp,
+                status: 'pending'
+            }
+        });
+
+        if (entries.length === 0) {
+            return res.status(400).json({ success: false, message: 'Invalid OTP or no pending submissions found' });
+        }
+
+        await prisma.cashInHand.updateMany({
+            where: {
+                id: { in: entries.map(e => e.id) }
+            },
+            data: {
+                status: 'paid',
+                otp: null
+            }
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: 'Cash submission verified and marked as paid successfully'
+        });
+    } catch (error) {
+        console.error('verifyCashSubmissionOTP error:', error);
+        return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+    }
+};
+
+const getOutletCashHistory = async (req, res) => {
+    const { date_from, date_to, officer_id } = req.query;
+    const outletId = req.user.outlet_id;
+
+    try {
+        let where = { status: 'paid' };
+
+        if (outletId) {
+            where.outlet_id = outletId;
+        }
+
+        if (officer_id) {
+            where.delivery_officer_id = parseInt(officer_id);
+        }
+
+        if (date_from || date_to) {
+            where.created_at = {};
+            if (date_from) where.created_at.gte = new Date(date_from);
+            if (date_to) where.created_at.lte = new Date(date_to);
+        }
+
+        const entries = await prisma.cashInHand.findMany({
+            where,
+            include: {
+                delivery_officer: { select: { full_name: true, phone: true } },
+                order: { 
+                    select: { 
+                        order_ref: true,
+                        delivery: { select: { selected_plan: true } }
+                    } 
+                }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+
+        return res.status(200).json({
+            success: true,
+            data: entries
+        });
+    } catch (error) {
+        console.error('getOutletCashHistory error:', error);
+        return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+    }
+};
+
 module.exports = {
     createOutlet,
     getOutlets,
     updateOutlet,
     loginOutletUser,
-    getDashboardStats
+    getDashboardStats,
+    getGlobalCashInHand,
+    verifyCashSubmissionOTP,
+    getOutletCashHistory
 };

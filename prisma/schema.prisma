@@ -69,6 +69,7 @@ model User {
   complaints               Complaint[]
   outlet                   Outlet?                 @relation(fields: [outlet_id], references: [id])
   verification_edit_history VerificationEditHistory[] @relation("user_edits")
+  cash_in_hand             CashInHand[]            @relation("OfficerCashInHand")
 
   @@index([role_id])
   @@index([is_online])
@@ -132,6 +133,7 @@ model Order {
   productHistories    OrderProductHistory[]
   verification        Verification?         @relation("OrderVerification")
   imei_serial         String?
+  cash_in_hand        CashInHand[]          @relation("OrderCashInHand")
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -175,6 +177,7 @@ model Outlet {
   inventories  OutletInventory[]
   vendorPurchases VendorPurchase[]
   vendorPayments  VendorPayment[]
+  cash_in_hand    CashInHand[]    @relation("OutletCashInHand")
 
   @@map("outlets")
 }
@@ -323,6 +326,7 @@ model StockTransfer {
   status       String   @default("pending")
   created_at   DateTime @default(now())
   inventory    OutletInventory @relation(fields: [inventory_id], references: [id], onDelete: Cascade)
+  cash_in_hands CashInHand[]
 
   @@index([inventory_id])
   @@index([created_at])
@@ -563,6 +567,37 @@ model DeliveryUpload {
   @@index([delivery_id])
 }
 
+model CashInHand {
+  id                  Int      @id @default(autoincrement())
+  delivery_officer_id Int
+  order_id            Int
+  amount              Float
+  status              String   @default("pending") // pending, paid
+  payment_method      String?  // Cash, Online
+  outlet_id           Int?     // The outlet where cash was handed over
+  otp                 String?  // OTP for verification
+  customer_name       String?
+  product_name        String?
+  imei_serial         String?
+  color_variant       String?
+  stock_transfer_id   Int?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  delivery_officer    User     @relation("OfficerCashInHand", fields: [delivery_officer_id], references: [id])
+  order               Order    @relation("OrderCashInHand", fields: [order_id], references: [id])
+  outlet              Outlet?  @relation("OutletCashInHand", fields: [outlet_id], references: [id])
+  stock_transfer      StockTransfer? @relation(fields: [stock_transfer_id], references: [id])
+
+  @@index([delivery_officer_id])
+  @@index([order_id])
+  @@index([outlet_id])
+  @@index([stock_transfer_id])
+  @@index([created_at])
+  @@index([status])
+  @@map("cash_in_hand")
+}
+
 model Notification {
   id        Int      @id @default(autoincrement())
   userId    Int
@@ -577,6 +612,7 @@ model Notification {
 
   @@index([userId])
   @@index([createdAt])
+  @@index([userId, createdAt])
   @@index([type])
   @@map("notifications")
 }

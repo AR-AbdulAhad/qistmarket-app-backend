@@ -1,6 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
-const crypto = require('crypto');
 const prisma = new PrismaClient();
+const crypto = require('crypto');
 const { notifyUser } = require('../utils/notificationUtils');
 const { getPKTDate } = require("../utils/dateUtils");
 

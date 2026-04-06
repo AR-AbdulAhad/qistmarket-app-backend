@@ -16,7 +16,8 @@ const {
   verifyRefundOtp,
   getDeliveryBoyInventory,
   pickOrder,
-  unpickOrder
+  unpickOrder,
+  submitCashToOutlet
 } = require('../controllers/deliveryController');
 
 // Submit delivery (batch)
@@ -50,5 +51,8 @@ router.post('/delivery/refund/verify-otp', authenticateJWT, verifyRefundOtp);
 // Pick/Unpick Order Status
 router.post('/delivery/pick-order', authenticateJWT, pickOrder);
 router.post('/delivery/unpick-order', authenticateJWT, unpickOrder);
+
+// Cash handling routes
+router.post('/delivery-boy/submit-cash', submitCashToOutlet);
 
 module.exports = router;

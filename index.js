@@ -132,6 +132,17 @@ io.on('connection', (socket) => {
       socket.join(`user_${decoded.id}`);
       socket.emit('joined_user_room', { success: true, userId: decoded.id });
       console.log(`User ${decoded.id} joined personal room user_${decoded.id}`);
+
+      // Check if user belongs to an outlet and join that room too
+      prisma.user.findUnique({
+        where: { id: decoded.id },
+        select: { outlet_id: true }
+      }).then(user => {
+        if (user && user.outlet_id) {
+          socket.join(`outlet_${user.outlet_id}`);
+          console.log(`User ${decoded.id} joined outlet room outlet_${user.outlet_id}`);
+        }
+      }).catch(err => console.error("Error joining outlet room:", err));
     } catch (err) {
       socket.emit('auth_error', { message: 'Invalid or expired token' });
     }
