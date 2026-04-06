@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { updateCashRegister } = require('../utils/cashRegisterUtils');
 
 // Helper to generate sequential Voucher Number: EV-YYYY-XXXX
 const generateVoucherNumber = async () => {
@@ -72,6 +73,9 @@ const createExpenseVoucher = async (req, res) => {
                 include: { items: true }
             });
 
+            // 2. Update Cash Register
+            await updateCashRegister(tx, parseInt(outlet_id), 'expenses', total_amount, 'add');
+
             return voucher;
         });
 
@@ -87,12 +91,20 @@ const deleteExpenseVoucher = async (req, res) => {
     const { outlet_id } = req.user;
 
     try {
-        const voucher = await prisma.expenseVoucher.findUnique({ where: { id: parseInt(id) } });
-        if (!voucher || voucher.outlet_id !== outlet_id) {
-            return res.status(404).json({ success: false, message: 'Voucher not found' });
-        }
+        const result = await prisma.$transaction(async (tx) => {
+            const voucher = await tx.expenseVoucher.findUnique({ where: { id: parseInt(id) } });
+            if (!voucher || voucher.outlet_id !== outlet_id) {
+                throw new Error('Voucher not found');
+            }
 
-        await prisma.expenseVoucher.delete({ where: { id: parseInt(id) } });
+            await tx.expenseVoucher.delete({ where: { id: parseInt(id) } });
+
+            // Reverse the expense from the cash register
+            await updateCashRegister(tx, outlet_id, 'expenses', voucher.total_amount, 'subtract');
+
+            return voucher;
+        });
+
         res.json({ success: true, message: 'Voucher deleted successfully.' });
     } catch (error) {
         console.error('deleteExpenseVoucher error:', error);

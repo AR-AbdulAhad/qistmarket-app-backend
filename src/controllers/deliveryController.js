@@ -87,10 +87,10 @@ const submitDelivery = async (req, res) => {
       });
 
       if (inventory) {
-        // Mark inventory as out of stock
+        // Mark inventory as Sold since it has been successfully delivered
         await prisma.outletInventory.update({
           where: { id: inventory.id },
-          data: { status: 'Out Of Stock' }
+          data: { status: 'Sold' }
         });
 
         colorVariant = inventory.color_variant || null;
@@ -863,6 +863,83 @@ const unpickOrder = async (req, res) => {
   }
 };
 
+// =======================
+// RETURN & EXCHANGE MODULE
+// =======================
+
+const initiateReturnExchange = async (req, res) => {
+  const { order_id, type } = req.body; // type = 'Return' or 'Exchange'
+  const delivery_officer_id = req.user.id;
+
+  if (!order_id || !['Return', 'Exchange'].includes(type)) {
+    return res.status(400).json({ success: false, error: 'Valid order_id and type (Return/Exchange) are required.' });
+  }
+
+  try {
+    // Check if the order was delivered by this officer
+    const delivery = await prisma.delivery.findUnique({
+      where: { order_id: parseInt(order_id) },
+      include: { order: true }
+    });
+
+    if (!delivery || delivery.status !== 'completed') {
+      return res.status(400).json({ success: false, error: 'Order is not marked as delivered.' });
+    }
+
+    if (delivery.delivery_agent_id !== delivery_officer_id) {
+      return res.status(403).json({ success: false, error: 'You are not the designated delivery officer for this order.' });
+    }
+
+    // 24-hour verification
+    const delivery_time = delivery.end_time || delivery.updated_at;
+    const now = new Date();
+    const hoursDifference = (now.getTime() - delivery_time.getTime()) / (1000 * 60 * 60);
+    
+    if (hoursDifference > 24) {
+      return res.status(400).json({ success: false, error: 'Return/Exchange period has expired (> 24 hours).' });
+    }
+
+    // Must belong to an outlet
+    const outlet_id = delivery.order.outlet_id;
+    if (!outlet_id) {
+      return res.status(400).json({ success: false, error: 'This order is not associated with an outlet.' });
+    }
+
+    // Check if an active return/exchange already exists
+    const existing = await prisma.returnExchange.findFirst({
+      where: { order_id: parseInt(order_id), status: 'pending' }
+    });
+
+    if (existing) {
+      return res.status(400).json({ success: false, error: 'A return/exchange request is already pending for this order.' });
+    }
+
+    // Generate random 4 digit OTP
+    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+
+    // Securely log the intent
+    const returnRecord = await prisma.returnExchange.create({
+      data: {
+        order_id: parseInt(order_id),
+        delivery_officer_id,
+        outlet_id,
+        type,
+        otp,
+        imei_returned: delivery.product_imei
+      }
+    });
+
+    return res.json({
+      success: true,
+      message: `${type} request initiated successfully. Please hand over the item to the outlet and provide this OTP.`,
+      data: returnRecord
+    });
+  } catch (error) {
+    console.error('initiateReturnExchange error:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+};
+
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
@@ -876,5 +953,6 @@ module.exports = {
   getDeliveryBoyInventory,
   pickOrder,
   unpickOrder,
-  submitCashToOutlet
+  submitCashToOutlet,
+  initiateReturnExchange
 };

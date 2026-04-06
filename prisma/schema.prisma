@@ -70,6 +70,7 @@ model User {
   outlet                   Outlet?                 @relation(fields: [outlet_id], references: [id])
   verification_edit_history VerificationEditHistory[] @relation("user_edits")
   cash_in_hand             CashInHand[]            @relation("OfficerCashInHand")
+  return_exchanges         ReturnExchange[]        @relation("OfficerReturnExchange")
 
   @@index([role_id])
   @@index([is_online])
@@ -134,6 +135,7 @@ model Order {
   verification        Verification?         @relation("OrderVerification")
   imei_serial         String?
   cash_in_hand        CashInHand[]          @relation("OrderCashInHand")
+  return_exchanges    ReturnExchange[]      @relation("OrderReturnExchange")
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -178,6 +180,7 @@ model Outlet {
   vendorPurchases VendorPurchase[]
   vendorPayments  VendorPayment[]
   cash_in_hand    CashInHand[]    @relation("OutletCashInHand")
+  return_exchanges ReturnExchange[] @relation("OutletReturnExchange")
 
   @@map("outlets")
 }
@@ -192,6 +195,7 @@ model CashRegister {
   cash_from_recovery    Float    @default(0)
   cash_from_delivery    Float    @default(0)
   expenses              Float    @default(0)
+  vendor_payments       Float    @default(0)
   closing_cash          Float    @default(0)
   created_at            DateTime @default(now())
   updated_at            DateTime @updatedAt
@@ -596,6 +600,28 @@ model CashInHand {
   @@index([created_at])
   @@index([status])
   @@map("cash_in_hand")
+}
+
+model ReturnExchange {
+  id                  Int       @id @default(autoincrement())
+  order_id            Int
+  delivery_officer_id Int
+  outlet_id           Int
+  type                String    // "Return" or "Exchange"
+  status              String    @default("pending") // pending, verified
+  otp                 String?
+  imei_returned       String?
+  created_at          DateTime  @default(now())
+  verified_at         DateTime?
+  
+  order               Order     @relation("OrderReturnExchange", fields: [order_id], references: [id])
+  delivery_officer    User      @relation("OfficerReturnExchange", fields: [delivery_officer_id], references: [id])
+  outlet              Outlet    @relation("OutletReturnExchange", fields: [outlet_id], references: [id])
+
+  @@index([order_id])
+  @@index([delivery_officer_id])
+  @@index([outlet_id])
+  @@map("return_exchanges")
 }
 
 model Notification {

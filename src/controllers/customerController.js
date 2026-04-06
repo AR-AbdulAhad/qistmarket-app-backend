@@ -38,6 +38,16 @@ const getCustomers = async (req, res) => {
         });
 
 
+        // Ensure we only fetch delivered orders
+        if (!where.AND) where.AND = [];
+        where.AND.push({
+            OR: [
+                { is_delivered: true },
+                { status: 'delivered' },
+                { delivery: { status: 'completed' } }
+            ]
+        });
+
         // First, find distinct whatsapp_numbers matching the criteria
         const distinctCustomers = await prisma.order.findMany({
             where,
@@ -73,12 +83,18 @@ const getCustomers = async (req, res) => {
             where: {
                 whatsapp_number: {
                     in: paginatedWhatsappNumbers
-                }
+                },
+                OR: [
+                    { is_delivered: true },
+                    { status: 'delivered' },
+                    { delivery: { status: 'completed' } }
+                ]
             },
             include: {
                 verification: { select: { status: true, start_time: true, end_time: true } },
                 delivery: { select: { status: true, end_time: true, verified: true } },
                 payments: true,
+                cash_in_hand: true,
             },
             orderBy: [{ created_at: 'desc' }],
         });
@@ -113,15 +129,19 @@ const getCustomers = async (req, res) => {
 
             // Actual payments from database
             const dbPayments = order.payments || [];
+            const cashHandled = order.cash_in_hand || [];
 
-            const hasPaidAdvance = dbPayments.some(p => p.paymentType === 'advance') || isDelivered;
+            // Do NOT assume delivery means advance was paid. Check actual records.
+            const hasPaidAdvance = dbPayments.some(p => p.paymentType === 'advance') || cashHandled.some(c => c.status === 'paid');
+            const advanceRecord = dbPayments.find(p => p.paymentType === 'advance');
+            const cashRecord = cashHandled.find(c => c.status === 'paid');
 
             let advancePayment = {
                 amount: advanceAmount,
                 paid: hasPaidAdvance,
-                paidAt: dbPayments.find(p => p.paymentType === 'advance')?.paidAt || (isDelivered ? deliveryDate : null),
+                paidAt: advanceRecord ? advanceRecord.paidAt : (cashRecord ? cashRecord.updated_at : null),
                 status: hasPaidAdvance ? 'paid' : 'pending',
-                paidVia: dbPayments.find(p => p.paymentType === 'advance')?.paymentMethod || (isDelivered ? 'delivery' : null),
+                paidVia: advanceRecord ? advanceRecord.paymentMethod : (cashRecord ? cashRecord.payment_method || 'delivery' : null),
             };
 
             let installmentLedger = [];
@@ -159,7 +179,8 @@ const getCustomers = async (req, res) => {
                 }
             }
 
-            const totalPaid = dbPayments.reduce((sum, p) => sum + p.amount, 0);
+            // Note: Total paid sums up actual dbPayments. If advance was taken via CashInHand instead of OrderPayment, we must add it.
+            const totalPaid = dbPayments.reduce((sum, p) => sum + p.amount, 0) + (cashRecord ? cashRecord.amount : 0);
             const totalDue = advanceAmount + (monthlyAmount * totalMonths);
             const totalRemaining = Math.max(0, totalDue - totalPaid);
 

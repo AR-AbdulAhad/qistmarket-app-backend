@@ -2,9 +2,8 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
-
-// If your app uses bcrypt for passwords, require it:
 const bcrypt = require('bcrypt');
+const { updateCashRegister } = require('../utils/cashRegisterUtils');
 
 const createOutlet = async (req, res) => {
     const { code, name, address } = req.body;
@@ -207,11 +206,11 @@ const getGlobalCashInHand = async (req, res) => {
             where: { status: 'pending' },
             include: {
                 delivery_officer: { select: { full_name: true, phone: true } },
-                order: { 
-                    select: { 
+                order: {
+                    select: {
                         order_ref: true,
                         delivery: { select: { selected_plan: true } }
-                    } 
+                    }
                 },
                 outlet: { select: { name: true } }
             },
@@ -258,6 +257,12 @@ const verifyCashSubmissionOTP = async (req, res) => {
             }
         });
 
+        // Sum amounts
+        const totalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
+
+        // Update Cash Register
+        await updateCashRegister(null, parseInt(outlet_id), 'cash_from_delivery', totalAmount, 'add');
+
         return res.status(200).json({
             success: true,
             message: 'Cash submission verified and marked as paid successfully'
@@ -293,11 +298,11 @@ const getOutletCashHistory = async (req, res) => {
             where,
             include: {
                 delivery_officer: { select: { full_name: true, phone: true } },
-                order: { 
-                    select: { 
+                order: {
+                    select: {
                         order_ref: true,
                         delivery: { select: { selected_plan: true } }
-                    } 
+                    }
                 }
             },
             orderBy: { created_at: 'desc' }
@@ -313,13 +318,136 @@ const getOutletCashHistory = async (req, res) => {
     }
 };
 
+// =====================
+// RETURN & EXCHANGE MODULE
+// =====================
+
+const getReturnExchanges = async (req, res) => {
+    const outlet_id = req.user.outlet_id;
+    try {
+        const records = await prisma.returnExchange.findMany({
+            where: { outlet_id: parseInt(outlet_id) },
+            include: {
+                order: true,
+                delivery_officer: { select: { full_name: true, phone: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+        return res.json({ success: true, data: records });
+    } catch (error) {
+        console.error('getReturnExchanges error:', error);
+        return res.status(500).json({ success: false, error: 'Server error' });
+    }
+};
+
+const verifyReturnExchangeOtp = async (req, res) => {
+    const outlet_id = req.user.outlet_id;
+    const { record_id, otp } = req.body;
+
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const record = await tx.returnExchange.findUnique({
+                where: { id: parseInt(record_id) },
+                include: { order: true }
+            });
+
+            if (!record) throw new Error('Record not found');
+            if (record.outlet_id !== outlet_id) throw new Error('Not authorized for this outlet');
+            if (record.status === 'verified') throw new Error('Already verified');
+            if (record.otp !== otp) throw new Error('Invalid OTP');
+
+            // 1. Mark verified
+            const updatedRecord = await tx.returnExchange.update({
+                where: { id: record.id },
+                data: {
+                    status: 'verified',
+                    verified_at: new Date(),
+                }
+            });
+
+            // 2. Change order status and clear IMEI if needed
+            const isExchange = record.type === 'Exchange';
+            await tx.order.update({
+                where: { id: record.order_id },
+                data: {
+                    status: isExchange ? 'approved' : 'Returned',
+                    imei_serial: isExchange ? null : record.order.imei_serial, // Clear IMEI for fresh assignment during exchange
+                    is_delivered: false // Mark as not delivered so it shows up in delivery list again
+                }
+            });
+
+            // 3. Update stock (Sold -> In Stock)
+            if (record.imei_returned) {
+                const inventory = await tx.outletInventory.findFirst({
+                    where: { imei_serial: record.imei_returned, outlet_id: parseInt(outlet_id) }
+                });
+
+                if (inventory) {
+                    await tx.outletInventory.update({
+                        where: { id: inventory.id },
+                        data: { status: 'In Stock' }
+                    });
+
+                    // 4. Stock Transfer log
+                    await tx.stockTransfer.create({
+                        data: {
+                            inventory_id: inventory.id,
+                            from_type: 'DeliveryOfficer',
+                            from_id: record.delivery_officer_id,
+                            to_type: 'Outlet',
+                            to_id: parseInt(outlet_id),
+                            status: 'completed',
+                            quantity_transferred: 1,
+                        }
+                    });
+                }
+            }
+
+            return updatedRecord;
+        });
+
+        return res.json({ success: true, message: 'Returned stock successfully taken back via OTP verification.', data: result });
+    } catch (error) {
+        console.error('verifyReturnExchangeOtp error:', error);
+        return res.status(400).json({ success: false, error: error.message || 'Server error' });
+    }
+};
+
+const getAllOutlets = async (req, res) => {
+    try {
+        const { code, status } = req.query;
+        const where = {};
+
+        if (code) {
+            where.code = { contains: code };
+        }
+
+        if (status) {
+            where.status = status;
+        }
+
+        const outlets = await prisma.outlet.findMany({
+            where,
+            orderBy: { created_at: 'desc' }
+        });
+
+        res.json({ success: true, data: outlets });
+    } catch (error) {
+        console.error('getAllOutlets error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     createOutlet,
     getOutlets,
+    getAllOutlets,
     updateOutlet,
     loginOutletUser,
     getDashboardStats,
     getGlobalCashInHand,
     verifyCashSubmissionOTP,
-    getOutletCashHistory
+    getOutletCashHistory,
+    getReturnExchanges,
+    verifyReturnExchangeOtp
 };

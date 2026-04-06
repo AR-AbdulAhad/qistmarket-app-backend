@@ -831,7 +831,7 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
           baseWhere.status = value;
         } else if (key === 'created_by') {
           baseWhere.created_by = { username: value };
-        } else {
+        } else if (key !== 'startDate' && key !== 'endDate' && key !== 'nextLastId') {
           baseWhere[key] = { contains: value };
         }
       }

@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { updateCashRegister } = require('../utils/cashRegisterUtils');
 
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
@@ -435,9 +436,15 @@ const submitCollections = async (req, res) => {
       }
     });
 
-    if (unsubmitted === 0) {
-      return res.status(400).json({ success: false, error: 'No unsubmitted collections found' });
-    }
+    // Get the total amount to submit
+    const unsubmittedPayments = await prisma.orderPayment.aggregate({
+      where: {
+        collectedBy: officerId,
+        is_submitted: false,
+      },
+      _sum: { amount: true }
+    });
+    const totalAmount = unsubmittedPayments._sum.amount || 0;
 
     const updated = await prisma.orderPayment.updateMany({
       where: {
@@ -449,6 +456,12 @@ const submitCollections = async (req, res) => {
         submitted_at: new Date(),
       }
     });
+
+    // We assume the officer is assigned to an outlet
+    const officer = await prisma.user.findUnique({ where: { id: officerId } });
+    if (officer && officer.outlet_id && totalAmount > 0) {
+        await updateCashRegister(null, officer.outlet_id, 'cash_from_recovery', totalAmount, 'add');
+    }
 
     return res.json({ success: true, data: { count: updated.count, message: 'Collections submitted successfully' } });
   } catch (error) {

@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const { updateCashRegister } = require('../utils/cashRegisterUtils');
 
 // Helper to generate Invoice Number: QM-YYYY-XXXX
 const generateInvoiceNumber = async (tx) => {
@@ -179,6 +180,9 @@ const recordPayment = async (req, res) => {
                     status
                 }
             });
+
+            // Update Cash Register
+            await updateCashRegister(tx, outlet_id, 'vendor_payments', parseFloat(amount), 'add');
 
             return payment;
         });
