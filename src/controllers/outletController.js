@@ -4,6 +4,8 @@ const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
+const { sendOTP } = require('../services/watiService');
+
 
 const createOutlet = async (req, res) => {
     const { code, name, address } = req.body;
@@ -333,7 +335,22 @@ const getReturnExchanges = async (req, res) => {
             },
             orderBy: { created_at: 'desc' }
         });
-        return res.json({ success: true, data: records });
+
+        // Map the JSON-stored snapshot data back to top-level fields for the UI
+        const mappedRecords = records.map(record => {
+            const plan = record.selected_plan 
+                ? (typeof record.selected_plan === 'string' ? JSON.parse(record.selected_plan) : record.selected_plan) 
+                : {};
+            
+            return {
+                ...record,
+                product_color: plan.delivered_color || record.product_color || 'N/A',
+                product_variant: plan.delivered_variant || record.product_variant || 'N/A',
+                delivered_advance_amount: plan.delivered_advance_amount || record.delivered_advance_amount || 0
+            };
+        });
+
+        return res.json({ success: true, data: mappedRecords });
     } catch (error) {
         console.error('getReturnExchanges error:', error);
         return res.status(500).json({ success: false, error: 'Server error' });
@@ -345,71 +362,247 @@ const verifyReturnExchangeOtp = async (req, res) => {
     const { record_id, otp } = req.body;
 
     try {
-        const result = await prisma.$transaction(async (tx) => {
-            const record = await tx.returnExchange.findUnique({
-                where: { id: parseInt(record_id) },
-                include: { order: true }
-            });
-
-            if (!record) throw new Error('Record not found');
-            if (record.outlet_id !== outlet_id) throw new Error('Not authorized for this outlet');
-            if (record.status === 'verified') throw new Error('Already verified');
-            if (record.otp !== otp) throw new Error('Invalid OTP');
-
-            // 1. Mark verified
-            const updatedRecord = await tx.returnExchange.update({
-                where: { id: record.id },
-                data: {
-                    status: 'verified',
-                    verified_at: new Date(),
-                }
-            });
-
-            // 2. Change order status and clear IMEI if needed
-            const isExchange = record.type === 'Exchange';
-            await tx.order.update({
-                where: { id: record.order_id },
-                data: {
-                    status: isExchange ? 'approved' : 'Returned',
-                    imei_serial: isExchange ? null : record.order.imei_serial, // Clear IMEI for fresh assignment during exchange
-                    is_delivered: false // Mark as not delivered so it shows up in delivery list again
-                }
-            });
-
-            // 3. Update stock (Sold -> In Stock)
-            if (record.imei_returned) {
-                const inventory = await tx.outletInventory.findFirst({
-                    where: { imei_serial: record.imei_returned, outlet_id: parseInt(outlet_id) }
-                });
-
-                if (inventory) {
-                    await tx.outletInventory.update({
-                        where: { id: inventory.id },
-                        data: { status: 'In Stock' }
-                    });
-
-                    // 4. Stock Transfer log
-                    await tx.stockTransfer.create({
-                        data: {
-                            inventory_id: inventory.id,
-                            from_type: 'DeliveryOfficer',
-                            from_id: record.delivery_officer_id,
-                            to_type: 'Outlet',
-                            to_id: parseInt(outlet_id),
-                            status: 'completed',
-                            quantity_transferred: 1,
-                        }
-                    });
-                }
+        // Step 1: Validate the record
+        const record = await prisma.returnExchange.findUnique({
+            where: { id: parseInt(record_id) },
+            include: { 
+                order: {
+                    include: { delivery: true }
+                } 
             }
-
-            return updatedRecord;
         });
 
-        return res.json({ success: true, message: 'Returned stock successfully taken back via OTP verification.', data: result });
+        if (!record) return res.status(404).json({ success: false, error: 'Record not found' });
+        if (record.outlet_id !== outlet_id) return res.status(403).json({ success: false, error: 'Not authorized for this outlet' });
+        if (record.status === 'verified') return res.status(400).json({ success: false, error: 'Already verified' });
+        if (record.otp !== otp) return res.status(400).json({ success: false, error: 'Invalid OTP' });
+
+        // Step 2: Time calculation for Used Stock logic (48 hours)
+        const deliveryTime = record.order.delivery?.end_time || record.order.delivery?.updated_at || record.order.updated_at;
+        const now = new Date();
+        const hoursSinceDelivery = (now.getTime() - new Date(deliveryTime).getTime()) / (1000 * 60 * 60);
+        
+        // If type is Return and > 48h, mark as Used
+        const isUsed = record.type === 'Return' && hoursSinceDelivery > 48;
+
+        // Step 3: Mark return record as verified
+        const updatedRecord = await prisma.returnExchange.update({
+            where: { id: record.id },
+            data: {
+                status: 'verified',
+                verified_at: now,
+                is_used: isUsed
+            }
+        });
+
+        // Step 4: Handle Cash Refund (Cash Register impact)
+        if (record.is_cash_refund && record.refund_amount > 0) {
+            await updateCashRegister(null, parseInt(outlet_id), 'expenses', record.refund_amount, 'add');
+        }
+
+        // Step 5: Handle CashInHand Cancellation for Delivery Officer
+        // If there's a pending cash collection for this order, cancel it since the product is returned.
+        const pendingCash = await prisma.cashInHand.findFirst({
+            where: {
+                order_id: record.order_id,
+                status: 'pending'
+            }
+        });
+
+        if (pendingCash) {
+            await prisma.cashInHand.update({
+                where: { id: pendingCash.id },
+                data: { status: 'cancelled' } // Mark as cancelled instead of paid
+            });
+        }
+
+        // Step 6: Change order status & Handle Exchange
+        const isExchange = record.type === 'Exchange';
+        
+        if (isExchange) {
+            // For Exchange: Reset the order so it can be delivered again
+            await prisma.order.update({
+                where: { id: record.order_id },
+                data: {
+                    status: 'approved',
+                    imei_serial: null,
+                    is_delivered: false
+                }
+            });
+
+            // Delete the delivery record (remove delivery history for this attempt)
+            await prisma.delivery.deleteMany({
+                where: { order_id: record.order_id }
+            });
+
+            console.log(`Exchange completed: Order ${record.order.order_ref} reset to approved for redelivery.`);
+        } else {
+            // Simple Return
+            await prisma.order.update({
+                where: { id: record.order_id },
+                data: {
+                    status: 'Returned',
+                    imei_serial: null,
+                    is_delivered: false
+                }
+            });
+        }
+
+        // Step 7: Update inventory status
+        if (record.imei_returned) {
+            const inventory = await prisma.outletInventory.findFirst({
+                where: { imei_serial: record.imei_returned, outlet_id: parseInt(outlet_id) }
+            });
+
+            if (inventory) {
+                await prisma.outletInventory.update({
+                    where: { id: inventory.id },
+                    data: { status: isUsed ? 'Used Stock' : 'In Stock' }
+                });
+
+                // Step 8: Log the stock transfer
+                await prisma.stockTransfer.create({
+                    data: {
+                        inventory_id: inventory.id,
+                        from_type: 'Customer',
+                        from_id: record.order_id,
+                        to_type: 'Outlet',
+                        to_id: parseInt(outlet_id),
+                        status: 'completed',
+                        quantity_transferred: 1,
+                    }
+                });
+            }
+        }
+
+        return res.json({ success: true, message: 'Returned stock successfully verified and updated.', data: updatedRecord });
     } catch (error) {
         console.error('verifyReturnExchangeOtp error:', error);
-        return res.status(400).json({ success: false, error: error.message || 'Server error' });
+        return res.status(500).json({ success: false, error: error.message || 'Server error' });
+    }
+};
+
+/**
+ * Direct Return/Exchange initiation by Outlet Manager (for walk-in customers)
+ */
+const initiateDirectReturn = async (req, res) => {
+    const outlet_id = req.user.outlet_id;
+    const { order_id, type, is_cash_refund, refund_amount } = req.body;
+
+    if (!order_id || !['Return', 'Exchange'].includes(type)) {
+        return res.status(400).json({ success: false, error: 'Valid order_id and type (Return/Exchange) are required.' });
+    }
+
+    try {
+        // 1. Fetch order, delivery, verification, and the official CashInHand receipt
+        const order = await prisma.order.findUnique({
+            where: { id: parseInt(order_id) },
+            include: { 
+                delivery: true,
+                verification: {
+                    include: { purchaser: true }
+                },
+                cash_in_hand: {
+                    take: 1,
+                    orderBy: { created_at: 'desc' }
+                }
+            }
+        });
+
+        if (!order || !order.delivery || order.delivery.status !== 'completed') {
+            return res.status(400).json({ success: false, error: 'Order is not marked as delivered.' });
+        }
+
+        if (order.outlet_id !== outlet_id) {
+            return res.status(403).json({ success: false, error: 'This order does not belong to your outlet.' });
+        }
+
+        // 2. Extract delivery-specific data prioritizing the official CashInHand record
+        const cashRecord = order.cash_in_hand?.[0];
+        const deliveryPlan = order.delivery.selected_plan ? (typeof order.delivery.selected_plan === 'string' ? JSON.parse(order.delivery.selected_plan) : order.delivery.selected_plan) : null;
+        
+        const deliveredAdvance = cashRecord ? cashRecord.amount : (deliveryPlan?.advance_payment || deliveryPlan?.advance_amount || deliveryPlan?.advancePayment || order.advance_amount);
+        const productName = cashRecord?.product_name || deliveryPlan?.productName || order.product_name;
+        const imei = cashRecord?.imei_serial || order.delivery.product_imei;
+
+        // Split color/variant from CashInHand snapshot first
+        let color = null;
+        let variant = null;
+        if (cashRecord?.color_variant) {
+            const parts = cashRecord.color_variant.split('|').map(s => s.trim());
+            color = parts[0] || 'N/A';
+            variant = parts[1] || 'N/A';
+        } else {
+            color = deliveryPlan?.color || deliveryPlan?.productColor || null;
+            variant = deliveryPlan?.variant || deliveryPlan?.productVariant || null;
+        }
+
+        // 3. Generate OTP for customer verification
+        const otp = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit OTP
+
+        // 4. Create PENDING record (Storing extra specs in selected_plan JSON to avoid schema conflicts)
+        const returnRecord = await prisma.returnExchange.create({
+            data: {
+                order_id: parseInt(order_id),
+                outlet_id: outlet_id,
+                type: type,
+                status: 'pending',
+                otp: otp,
+                product_name: productName,
+                // We store these in selected_plan to ensure data is captured without needing immediate schema columns
+                selected_plan: {
+                    ...deliveryPlan,
+                    delivered_color: color,
+                    delivered_variant: variant,
+                    delivered_advance_amount: parseFloat(deliveredAdvance) || 0
+                },
+                imei_returned: imei,
+                is_cash_refund: !!is_cash_refund,
+                refund_amount: parseFloat(refund_amount) || 0,
+                initiated_by: "Outlet"
+            }
+        });
+
+        // 5. Send OTP to Customer (Purchaser) via WhatsApp
+        const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+        
+        if (customerPhone) {
+            try {
+                await sendOTP(customerPhone, otp);
+                console.log(`Sales Return OTP ${otp} sent to customer at ${customerPhone}`);
+            } catch (err) {
+                console.error('Error sending Sales Return OTP to customer:', err);
+            }
+        }
+
+        // 6. Socket Notification for Real-time Dashboard Update
+        const io = req.app.get('io');
+        if (io) {
+            io.to(`outlet_${outlet_id}`).emit('return_exchange_requested', {
+                record_id: returnRecord.id,
+                officer_name: "Outlet",
+                type,
+                otp,
+                order_ref: order.order_ref,
+                product_name: productName,
+                color: color,
+                variant: variant,
+                delivered_advance: deliveredAdvance,
+                imei: imei || null,
+                is_cash_refund: returnRecord.is_cash_refund,
+                refund_amount: returnRecord.refund_amount
+            });
+        }
+
+        return res.json({ 
+            success: true, 
+            message: `OTP generated and sent to customer's WhatsApp. Please verify to complete the Sales Return.`, 
+            data: { record_id: returnRecord.id } 
+        });
+
+    } catch (error) {
+        console.error('initiateDirectReturn error:', error);
+        return res.status(500).json({ success: false, error: 'Server error' });
     }
 };
 
@@ -438,6 +631,88 @@ const getAllOutlets = async (req, res) => {
     }
 };
 
+const searchDeliveredOrders = async (req, res) => {
+    const outlet_id = req.user.outlet_id;
+    const { query } = req.query;
+
+    if (!query || query.length < 3) {
+        return res.json({ success: true, data: [] });
+    }
+
+    try {
+        const orders = await prisma.order.findMany({
+            where: {
+                outlet_id: outlet_id,
+                delivery: { status: 'completed' },
+                OR: [
+                    { order_ref: { contains: query } },
+                    { customer_name: { contains: query } },
+                    { product_name: { contains: query } },
+                    { 
+                        delivery: { 
+                            product_imei: { contains: query } 
+                        } 
+                    }
+                ]
+            },
+            include: { 
+                delivery: true,
+                cash_in_hand: {
+                    take: 1,
+                    orderBy: { created_at: 'desc' }
+                }
+            },
+            take: 10
+        });
+
+        // Map through orders to provide explicit "delivered" fields for the UI
+        const refinedOrders = orders.map(order => {
+            const delivery = order.delivery;
+            const cashRecord = order.cash_in_hand?.[0]; // The official financial snapshot of delivery
+            const plan = delivery?.selected_plan 
+                ? (typeof delivery.selected_plan === 'string' 
+                    ? JSON.parse(delivery.selected_plan) 
+                    : delivery.selected_plan) 
+                : null;
+            
+            // Advance: Prioritize the actual cash collected in CashInHand
+            const deliveredAdvance = cashRecord ? cashRecord.amount : (plan?.advance_payment || plan?.advance_amount || plan?.advancePayment || 0);
+
+            // Product specs: Prioritize the snapshot taken during delivery (CashInHand)
+            const deliveredProd = cashRecord?.product_name || plan?.productName || order.product_name;
+            const deliveredImei = cashRecord?.imei_serial || delivery?.product_imei || order.imei_serial || 'N/A';
+            
+            // Handle color/variant from CashInHand snapshot first
+            let deliveredColor = 'N/A';
+            let deliveredVariant = 'N/A';
+
+            if (cashRecord?.color_variant) {
+                // CashInHand often stores "Blue | 128GB"
+                const parts = cashRecord.color_variant.split('|').map(s => s.trim());
+                deliveredColor = parts[0] || 'N/A';
+                deliveredVariant = parts[1] || 'N/A';
+            } else {
+                deliveredColor = plan?.color || plan?.productColor || 'N/A';
+                deliveredVariant = plan?.variant || plan?.productVariant || 'N/A';
+            }
+
+            return {
+                ...order,
+                delivered_product_name: deliveredProd,
+                delivered_color: deliveredColor,
+                delivered_variant: deliveredVariant,
+                delivered_imei: deliveredImei,
+                delivered_advance: deliveredAdvance
+            };
+        });
+
+        return res.json({ success: true, data: refinedOrders });
+    } catch (error) {
+        console.error('searchDeliveredOrders error:', error);
+        return res.status(500).json({ success: false, error: 'Server error' });
+    }
+};
+
 module.exports = {
     createOutlet,
     getOutlets,
@@ -449,5 +724,7 @@ module.exports = {
     verifyCashSubmissionOTP,
     getOutletCashHistory,
     getReturnExchanges,
-    verifyReturnExchangeOtp
+    verifyReturnExchangeOtp,
+    initiateDirectReturn,
+    searchDeliveredOrders
 };

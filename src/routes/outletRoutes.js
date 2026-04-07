@@ -11,7 +11,9 @@ const {
     verifyCashSubmissionOTP,
     getOutletCashHistory,
     getReturnExchanges,
-    verifyReturnExchangeOtp
+    verifyReturnExchangeOtp,
+    initiateDirectReturn,
+    searchDeliveredOrders
 } = require('../controllers/outletController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -30,5 +32,7 @@ router.get('/outlet/cash-history', authenticateJWT, getOutletCashHistory);
 // Return and Exchange Module
 router.get('/outlet/return-exchanges', authenticateJWT, getReturnExchanges);
 router.post('/outlet/verify-return-otp', authenticateJWT, verifyReturnExchangeOtp);
+router.get('/outlet/search-delivered-orders', authenticateJWT, searchDeliveredOrders);
+router.post('/outlet/initiate-direct-return', authenticateJWT, initiateDirectReturn);
 
 module.exports = router;

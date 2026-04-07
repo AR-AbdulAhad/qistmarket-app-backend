@@ -605,17 +605,23 @@ model CashInHand {
 model ReturnExchange {
   id                  Int       @id @default(autoincrement())
   order_id            Int
-  delivery_officer_id Int
+  delivery_officer_id Int?      // Optional if initiated by Outlet directly
   outlet_id           Int
   type                String    // "Return" or "Exchange"
   status              String    @default("pending") // pending, verified
   otp                 String?
+  product_name        String?   // New: Sourced from Delivery
+  selected_plan       Json?     // New: Sourced from Delivery
   imei_returned       String?
+  is_cash_refund      Boolean   @default(false)
+  refund_amount       Float     @default(0)
+  initiated_by        String    @default("DeliveryOfficer") // "DeliveryOfficer" or "Outlet"
+  is_used             Boolean   @default(false)             // Flags if item went to Used Stock (> 48h)
   created_at          DateTime  @default(now())
   verified_at         DateTime?
   
   order               Order     @relation("OrderReturnExchange", fields: [order_id], references: [id])
-  delivery_officer    User      @relation("OfficerReturnExchange", fields: [delivery_officer_id], references: [id])
+  delivery_officer    User?     @relation("OfficerReturnExchange", fields: [delivery_officer_id], references: [id])
   outlet              Outlet    @relation("OutletReturnExchange", fields: [outlet_id], references: [id])
 
   @@index([order_id])

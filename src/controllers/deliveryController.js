@@ -868,8 +868,8 @@ const unpickOrder = async (req, res) => {
 // =======================
 
 const initiateReturnExchange = async (req, res) => {
-  const { order_id, type } = req.body; // type = 'Return' or 'Exchange'
-  const delivery_officer_id = req.user.id;
+  const { order_id, type, is_cash_refund, refund_amount } = req.body; // type = 'Return' or 'Exchange'
+  const delivery_officer_id = req.user.id; // Use authenticated officer ID
 
   if (!order_id || !['Return', 'Exchange'].includes(type)) {
     return res.status(400).json({ success: false, error: 'Valid order_id and type (Return/Exchange) are required.' });
@@ -879,7 +879,17 @@ const initiateReturnExchange = async (req, res) => {
     // Check if the order was delivered by this officer
     const delivery = await prisma.delivery.findUnique({
       where: { order_id: parseInt(order_id) },
-      include: { order: true }
+      include: {
+        order: {
+          include: {
+            cash_in_hand: {
+              take: 1,
+              orderBy: { created_at: 'desc' }
+            }
+          }
+        },
+        delivery_agent: { select: { full_name: true, phone: true } }
+      }
     });
 
     if (!delivery || delivery.status !== 'completed') {
@@ -890,13 +900,13 @@ const initiateReturnExchange = async (req, res) => {
       return res.status(403).json({ success: false, error: 'You are not the designated delivery officer for this order.' });
     }
 
-    // 24-hour verification
+    // 48-hour verification (Extended from 24h)
     const delivery_time = delivery.end_time || delivery.updated_at;
     const now = new Date();
     const hoursDifference = (now.getTime() - delivery_time.getTime()) / (1000 * 60 * 60);
-    
-    if (hoursDifference > 24) {
-      return res.status(400).json({ success: false, error: 'Return/Exchange period has expired (> 24 hours).' });
+
+    if (hoursDifference > 48) {
+      return res.status(400).json({ success: false, error: 'Return/Exchange period has expired (> 48 hours). Please contact the outlet directly.' });
     }
 
     // Must belong to an outlet
@@ -917,21 +927,85 @@ const initiateReturnExchange = async (req, res) => {
     // Generate random 4 digit OTP
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
-    // Securely log the intent
+    // 6. Source specific delivery data prioritizing the official CashInHand receipt
+    const cashRecord = delivery.order.cash_in_hand?.[0];
+    const deliveryPlan = delivery.selected_plan ? (typeof delivery.selected_plan === 'string' ? JSON.parse(delivery.selected_plan) : delivery.selected_plan) : null;
+    
+    const deliveredAdvance = cashRecord ? cashRecord.amount : (deliveryPlan?.advance_payment || deliveryPlan?.advance_amount || deliveryPlan?.advancePayment || delivery.order?.advance_amount || 0);
+    const productName = cashRecord?.product_name || deliveryPlan?.productName || delivery.order?.product_name;
+    const imei = cashRecord?.imei_serial || delivery.product_imei;
+
+    // Split color/variant from CashInHand snapshot first
+    let color = 'N/A';
+    let variant = 'N/A';
+    if (cashRecord?.color_variant) {
+        const parts = cashRecord.color_variant.split('|').map(s => s.trim());
+        color = parts[0] || 'N/A';
+        variant = parts[1] || 'N/A';
+    } else {
+        color = deliveryPlan?.color || deliveryPlan?.productColor || 'N/A';
+        variant = deliveryPlan?.variant || deliveryPlan?.productVariant || 'N/A';
+    }
+
+    // Securely log the intent (Storing extra specs in selected_plan JSON to avoid schema conflicts)
     const returnRecord = await prisma.returnExchange.create({
       data: {
         order_id: parseInt(order_id),
         delivery_officer_id,
         outlet_id,
         type,
+        status: 'pending',
         otp,
-        imei_returned: delivery.product_imei
+        product_name: productName,
+        // Robust storage of snapshot specs
+        selected_plan: {
+            ...deliveryPlan,
+            delivered_color: color,
+            delivered_variant: variant,
+            delivered_advance_amount: parseFloat(deliveredAdvance) || 0
+        },
+        imei_returned: imei,
+        is_cash_refund: !!is_cash_refund,
+        refund_amount: parseFloat(refund_amount) || 0,
+        initiated_by: "DeliveryOfficer"
       }
     });
+
+    // Send OTP to Delivery Officer via WhatsApp (Wati)
+    const officerPhone = delivery.delivery_agent?.phone;
+    const officerName = delivery.delivery_agent?.full_name || 'Officer';
+    if (officerPhone) {
+      try {
+        await sendOTP(officerPhone, otp);
+        console.log(`Return/Exchange OTP ${otp} sent to officer ${officerName} at ${officerPhone}`);
+      } catch (err) {
+        console.error('Error sending Return/Exchange OTP to officer:', err);
+      }
+    }
+
+    // Emit socket event to outlet room so the popup opens
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`outlet_${outlet_id}`).emit('return_exchange_requested', {
+        record_id: returnRecord.id,
+        officer_name: officerName,
+        type,
+        otp,
+        order_ref: delivery.order.order_ref || `#${order_id}`,
+        product_name: productName,
+        color: color,
+        variant: variant,
+        delivered_advance: deliveredAdvance,
+        imei: imei || null,
+        is_cash_refund: returnRecord.is_cash_refund,
+        refund_amount: returnRecord.refund_amount
+      });
+    }
 
     return res.json({
       success: true,
       message: `${type} request initiated successfully. Please hand over the item to the outlet and provide this OTP.`,
+      otp,
       data: returnRecord
     });
   } catch (error) {

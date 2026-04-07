@@ -399,10 +399,29 @@ app.get('/', (req, res) => {
   });
 });
 
+app.get('/api/debug-routes', (req, res) => {
+  const routes = [];
+  app._router.stack.forEach((middleware) => {
+    if (middleware.route) {
+      routes.push(`${Object.keys(middleware.route.methods)} ${middleware.route.path}`);
+    } else if (middleware.name === 'router') {
+      middleware.handle.stack.forEach((handler) => {
+        if (handler.route) {
+          const path = handler.route.path;
+          const methods = Object.keys(handler.route.methods);
+          routes.push(`${methods} ${middleware.regexp.toString()} ${path}`);
+        }
+      });
+    }
+  });
+  res.json({ success: true, routes });
+});
+
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
 app.use('/api', authRoutes);
+app.use('/api', outletRoutes); // Moved up
 app.use('/api', orderRoutes);
 app.use('/api', verificationRoutes);
 app.use('/api', appVerificationOtpRoutes);
@@ -418,7 +437,6 @@ app.use('/api/customers', customerRoutes);
 const complaintRoutes = require('./src/routes/complaintRoutes');
 app.use('/api/complaints', complaintRoutes);
 app.use('/api', reportRoutes);
-app.use('/api', outletRoutes);
 app.use('/api', cashRegisterRoutes);
 app.use('/api', expenseRoutes);
 app.use('/api', vendorRoutes);
