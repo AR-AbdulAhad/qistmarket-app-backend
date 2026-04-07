@@ -44,8 +44,8 @@ const sendTemplate = async (phone, templateName, broadcastName, parameters) => {
 
 // ─── OTP ───────────────────────────────────────────────────────────────────
 
-const WATI_TEMPLATE_NAME    = process.env.WATI_TEMPLATE_NAME    || 'verifications_otp';
-const WATI_BROADCAST_NAME   = process.env.WATI_BROADCAST_NAME   || 'verifications_otp';
+const WATI_TEMPLATE_NAME = process.env.WATI_TEMPLATE_NAME || 'verifications_otp';
+const WATI_BROADCAST_NAME = process.env.WATI_BROADCAST_NAME || 'verifications_otp';
 
 const sendOTPWhatsApp = async (phone, otp) => {
   return sendTemplate(phone, WATI_TEMPLATE_NAME, WATI_BROADCAST_NAME, [
@@ -59,8 +59,8 @@ const sendOTP = async (phone, otp) => sendOTPWhatsApp(phone, otp);
 // Params: customer_name, product_name, imei, color_variant, advance_amount,
 //         delivery_date, order_ref, order_status
 
-const WATI_DELIVERY_TEMPLATE   = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
-const WATI_DELIVERY_BROADCAST  = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
+const WATI_DELIVERY_TEMPLATE = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
+const WATI_DELIVERY_BROADCAST = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
 
 const sendDeliveryConfirmation = async (phone, {
   customerName,
@@ -73,14 +73,14 @@ const sendDeliveryConfirmation = async (phone, {
   orderStatus,
 }) => {
   const parameters = [
-    { name: '1', value: customerName   || 'Customer' },
-    { name: '2', value: productName    || 'N/A' },
-    { name: '3', value: imei           || 'N/A' },
-    { name: '4', value: colorVariant   || 'N/A' },
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: productName || 'N/A' },
+    { name: '3', value: imei || 'N/A' },
+    { name: '4', value: colorVariant || 'N/A' },
     { name: '5', value: String(advanceAmount || 0) },
-    { name: '6', value: deliveryDate   || new Date().toDateString() },
-    { name: '7', value: orderRef       || 'N/A' },
-    { name: '8', value: orderStatus    || 'Delivered' },
+    { name: '6', value: deliveryDate || new Date().toDateString() },
+    { name: '7', value: orderRef || 'N/A' },
+    { name: '8', value: orderStatus || 'Delivered' },
   ];
   return sendTemplate(phone, WATI_DELIVERY_TEMPLATE, WATI_DELIVERY_BROADCAST, parameters);
 };
@@ -89,7 +89,7 @@ const sendDeliveryConfirmation = async (phone, {
 // Params: customer_name, product_name, order_ref, next_month_label,
 //         monthly_amount, due_date, total_remaining, ledger_url
 
-const WATI_LEDGER_TEMPLATE  = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_ledger';
+const WATI_LEDGER_TEMPLATE = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_ledger';
 const WATI_LEDGER_BROADCAST = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_ledger';
 
 const sendInstallmentLedger = async (phone, {
@@ -103,14 +103,14 @@ const sendInstallmentLedger = async (phone, {
   ledgerUrl,
 }) => {
   const parameters = [
-    { name: '1', value: customerName    || 'Customer' },
-    { name: '2', value: productName     || 'N/A' },
-    { name: '3', value: orderRef        || 'N/A' },
-    { name: '4', value: nextMonthLabel  || 'Mahina 1' },
-    { name: '5', value: String(monthlyAmount  || 0) },
-    { name: '6', value: dueDate         || 'N/A' },
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: productName || 'N/A' },
+    { name: '3', value: orderRef || 'N/A' },
+    { name: '4', value: nextMonthLabel || 'Mahina 1' },
+    { name: '5', value: String(monthlyAmount || 0) },
+    { name: '6', value: dueDate || 'N/A' },
     { name: '7', value: String(totalRemaining || 0) },
-    { name: '8', value: ledgerUrl       || 'N/A' },
+    { name: '8', value: ledgerUrl || 'N/A' },
   ];
   return sendTemplate(phone, WATI_LEDGER_TEMPLATE, WATI_LEDGER_BROADCAST, parameters);
 };

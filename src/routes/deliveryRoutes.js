@@ -21,6 +21,9 @@ const {
   initiateReturnExchange
 } = require('../controllers/deliveryController');
 
+// Delivery Officer Analytics
+const { getDeliveryOfficerAnalytics } = require('../controllers/deliveryAnalyticsController');
+
 // Submit delivery (batch)
 router.post(
   '/delivery/submit',
@@ -37,7 +40,7 @@ router.post(
 // Get delivery by order ID
 router.get('/delivery/order/:order_id', getDeliveryByOrderId);
 router.get('/delivery-boy/picked-products-minimal', authenticateJWT, getPendingDeliveryProducts);
-router.get('/delivery-boy/cash-in-hand', getCashInHand);
+router.get('/delivery-boy/cash-in-hand', authenticateJWT, getCashInHand);
 router.get('/delivery-boy/inventory', authenticateJWT, getDeliveryBoyInventory);
 
 // OTP Verified Delivery Flows
@@ -58,5 +61,8 @@ router.post('/delivery-boy/submit-cash', authenticateJWT, submitCashToOutlet);
 
 // Return / Exchange initiate
 router.post('/delivery-boy/initiate-return', authenticateJWT, initiateReturnExchange);
+
+// Analytics & Reporting for Delivery Officer
+router.get('/delivery-boy/analytics', authenticateJWT, getDeliveryOfficerAnalytics);
 
 module.exports = router;

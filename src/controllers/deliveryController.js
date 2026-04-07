@@ -6,7 +6,7 @@ const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('..
 const { notifyAdmins } = require('../utils/notificationUtils');
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
-const LEDGER_BASE_URL     = (process.env.LEDGER_BASE_URL || 'http://localhost:5000').replace(/\/$/, '')
+const LEDGER_BASE_URL = (process.env.LEDGER_BASE_URL || 'http://localhost:5000').replace(/\/$/, '')
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -239,18 +239,18 @@ const submitDelivery = async (req, res) => {
     let ledgerUrl = null;
     try {
       // Parse plan for installment data
-      const monthlyAmt  = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
-      const totalMonths = planObj?.months         || planObj?.duration      || order.months         || 0;
+      const monthlyAmt = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
+      const totalMonths = planObj?.months || planObj?.duration || order.months || 0;
       const deliveryDate = new Date();
 
       if (totalMonths > 0 && monthlyAmt > 0) {
         // Build rows: month 1 due date = delivery date + 1 month
         const ledgerRows = Array.from({ length: totalMonths }, (_, i) => ({
-          month:    i + 1,
+          month: i + 1,
           due_date: addMonths(deliveryDate, i + 1).toISOString(),
-          amount:   monthlyAmt,
-          status:   'pending',
-          paid_at:  null,
+          amount: monthlyAmt,
+          status: 'pending',
+          paid_at: null,
         }));
 
         // Sign a long-lived token (2 years)
@@ -261,19 +261,19 @@ const submitDelivery = async (req, res) => {
         );
 
         // ledgerUrl = `${LEDGER_BASE_URL}/api/ledger/${ledgerToken}`;
-        ledgerUrl = `link hay`;
+        ledgerUrl = `link comming soon`;
 
         // Upsert ledger (safe if re-run)
         installmentLedger = await prisma.installmentLedger.upsert({
-          where:  { order_id: parseInt(order_id) },
+          where: { order_id: parseInt(order_id) },
           create: {
-            order_id:    parseInt(order_id),
+            order_id: parseInt(order_id),
             delivery_id: delivery.id,
-            token:       ledgerToken,
+            token: ledgerToken,
             ledger_rows: ledgerRows,
           },
           update: {
-            token:       ledgerToken,
+            token: ledgerToken,
             ledger_rows: ledgerRows,
           },
         });
@@ -291,30 +291,30 @@ const submitDelivery = async (req, res) => {
     if (customerPhone) {
       // Template 1: Delivery Confirmation
       sendDeliveryConfirmation(customerPhone, {
-        customerName:  confirmedCustomerName,
-        productName:   productNameSnapshot,
-        imei:          product_imei || 'N/A',
-        colorVariant:  colorVariantStr,
+        customerName: confirmedCustomerName,
+        productName: productNameSnapshot,
+        imei: product_imei || 'N/A',
+        colorVariant: colorVariantStr,
         advanceAmount,
-        deliveryDate:  deliveryDateStr,
-        orderRef:      order.order_ref,
-        orderStatus:   'Delivered',
+        deliveryDate: deliveryDateStr,
+        orderRef: order.order_ref,
+        orderStatus: 'Delivered',
       }).then(r => console.log('[WATI] Delivery confirmation:', r.success ? 'sent ✓' : r.error))
         .catch(e => console.error('[WATI] Delivery confirmation error:', e));
 
       // Template 2: Installment Ledger (only if ledger was created)
       if (installmentLedger && ledgerUrl) {
-        const rows        = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
-        const firstRow    = rows[0];
+        const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
+        const firstRow = rows[0];
         const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
 
         sendInstallmentLedger(customerPhone, {
-          customerName:   confirmedCustomerName,
-          productName:    productNameSnapshot,
-          orderRef:       order.order_ref,
+          customerName: confirmedCustomerName,
+          productName: productNameSnapshot,
+          orderRef: order.order_ref,
           nextMonthLabel: 'Mahina 1',
-          monthlyAmount:  firstRow?.amount || 0,
-          dueDate:        firstRow ? formatDatePK(firstRow.due_date) : 'N/A',
+          monthlyAmount: firstRow?.amount || 0,
+          dueDate: firstRow ? formatDatePK(firstRow.due_date) : 'N/A',
           totalRemaining: totalRemain,
           ledgerUrl,
         }).then(r => console.log('[WATI] Ledger template:', r.success ? 'sent ✓' : r.error))
@@ -1041,7 +1041,7 @@ const initiateReturnExchange = async (req, res) => {
     // 6. Source specific delivery data prioritizing the official CashInHand receipt
     const cashRecord = delivery.order.cash_in_hand?.[0];
     const deliveryPlan = delivery.selected_plan ? (typeof delivery.selected_plan === 'string' ? JSON.parse(delivery.selected_plan) : delivery.selected_plan) : null;
-    
+
     const deliveredAdvance = cashRecord ? cashRecord.amount : (deliveryPlan?.advance_payment || deliveryPlan?.advance_amount || deliveryPlan?.advancePayment || delivery.order?.advance_amount || 0);
     const productName = cashRecord?.product_name || deliveryPlan?.productName || delivery.order?.product_name;
     const imei = cashRecord?.imei_serial || delivery.product_imei;
@@ -1050,12 +1050,12 @@ const initiateReturnExchange = async (req, res) => {
     let color = 'N/A';
     let variant = 'N/A';
     if (cashRecord?.color_variant) {
-        const parts = cashRecord.color_variant.split('|').map(s => s.trim());
-        color = parts[0] || 'N/A';
-        variant = parts[1] || 'N/A';
+      const parts = cashRecord.color_variant.split('|').map(s => s.trim());
+      color = parts[0] || 'N/A';
+      variant = parts[1] || 'N/A';
     } else {
-        color = deliveryPlan?.color || deliveryPlan?.productColor || 'N/A';
-        variant = deliveryPlan?.variant || deliveryPlan?.productVariant || 'N/A';
+      color = deliveryPlan?.color || deliveryPlan?.productColor || 'N/A';
+      variant = deliveryPlan?.variant || deliveryPlan?.productVariant || 'N/A';
     }
 
     // Securely log the intent (Storing extra specs in selected_plan JSON to avoid schema conflicts)
@@ -1070,10 +1070,10 @@ const initiateReturnExchange = async (req, res) => {
         product_name: productName,
         // Robust storage of snapshot specs
         selected_plan: {
-            ...deliveryPlan,
-            delivered_color: color,
-            delivered_variant: variant,
-            delivered_advance_amount: parseFloat(deliveredAdvance) || 0
+          ...deliveryPlan,
+          delivered_color: color,
+          delivered_variant: variant,
+          delivered_advance_amount: parseFloat(deliveredAdvance) || 0
         },
         imei_returned: imei,
         is_cash_refund: !!is_cash_refund,
