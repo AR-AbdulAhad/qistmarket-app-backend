@@ -136,6 +136,7 @@ model Order {
   imei_serial         String?
   cash_in_hand        CashInHand[]          @relation("OrderCashInHand")
   return_exchanges    ReturnExchange[]      @relation("OrderReturnExchange")
+  installment_ledger  InstallmentLedger?
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -551,9 +552,10 @@ model Delivery {
   updated_at        DateTime         @updatedAt
   delivery_agent    User             @relation("delivery_agent", fields: [delivery_agent_id], references: [id])
   order             Order            @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
-  uploads           DeliveryUpload[]
-  product_imei      String?          @db.VarChar(100)
-  selected_plan     Json?
+  uploads             DeliveryUpload[]
+  product_imei        String?          @db.VarChar(100)
+  selected_plan       Json?
+  installment_ledger  InstallmentLedger?
 
   @@index([delivery_agent_id])
 }
@@ -767,4 +769,19 @@ model VerificationEditHistory {
   @@index([entity_type, entity_id])
   @@index([edited_by_id])
   @@map("verification_edit_history")
+}
+
+model InstallmentLedger {
+  id          Int      @id @default(autoincrement())
+  order_id    Int      @unique
+  delivery_id Int      @unique
+  token       String   @unique @db.VarChar(512)
+  ledger_rows Json
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+  order       Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  delivery    Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@map("installment_ledgers")
 }

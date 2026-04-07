@@ -2,65 +2,121 @@ const axios = require('axios');
 require('dotenv').config();
 
 const WATI_ACCESS_TOKEN = process.env.WATI_ACCESS_TOKEN;
-const WATI_TEMPLATE_NAME = process.env.WATI_TEMPLATE_NAME || 'otp_template';
-const WATI_BROADCAST_NAME = process.env.WATI_BROADCAST_NAME || 'otp_broadcast';
 const WATI_BASE_URL = process.env.WATI_BASE_URL;
 
-const sendOTPWhatsApp = async (phone, otp) => {
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+const normalizePhone = (phone) => {
+  if (!phone) return null;
+  const p = phone.replace(/\s+/g, '').replace(/-/g, '');
+  if (p.startsWith('03') && p.length === 11) return '+92' + p.slice(1);
+  if (!p.startsWith('+')) return '+' + p;
+  return p;
+};
+
+const sendTemplate = async (phone, templateName, broadcastName, parameters) => {
   try {
-    let whatsappNumber = phone;
-    if (phone.startsWith('03') && phone.length === 11) {
-      whatsappNumber = '+92' + phone.slice(1);
-    } else if (!phone.startsWith('+')) {
-      whatsappNumber = '+' + phone;
-    }
-    
+    const whatsappNumber = normalizePhone(phone);
+    if (!whatsappNumber) return { success: false, error: 'Invalid phone number' };
+
     const url = `${WATI_BASE_URL}/api/v2/sendTemplateMessage`;
-    
     const payload = {
-      template_name: WATI_TEMPLATE_NAME,
-      broadcast_name: WATI_BROADCAST_NAME,
-      parameters: [{ 
-        name: '1', 
-        value: otp 
-      }]
+      template_name: templateName,
+      broadcast_name: broadcastName,
+      parameters,
     };
 
     const response = await axios.post(url, payload, {
       headers: {
-        'Authorization': `Bearer ${WATI_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${WATI_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
       },
-      params: {
-        whatsappNumber: whatsappNumber
-      },
-      timeout: 10000
+      params: { whatsappNumber },
+      timeout: 10000,
     });
 
-    if (response.data) {
-      return { 
-        success: true, 
-        message: 'OTP sent successfully via WhatsApp',
-        data: response.data 
-      };
-    } else {
-      return { 
-        success: true,
-        message: 'OTP sent',
-        data: response.data 
-      };
-    }
-
+    return { success: true, data: response.data };
   } catch (error) {
-    return { 
-      success: false, 
-      error: error.response?.data?.info || error.message || 'Failed to send OTP' 
-    };
+    console.error(`[WATI] Template "${templateName}" error:`, error.response?.data || error.message);
+    return { success: false, error: error.response?.data?.info || error.message };
   }
 };
 
-const sendOTP = async (phone, otp) => {
-  return sendOTPWhatsApp(phone, otp);
+// ─── OTP ───────────────────────────────────────────────────────────────────
+
+const WATI_TEMPLATE_NAME    = process.env.WATI_TEMPLATE_NAME    || 'verifications_otp';
+const WATI_BROADCAST_NAME   = process.env.WATI_BROADCAST_NAME   || 'verifications_otp';
+
+const sendOTPWhatsApp = async (phone, otp) => {
+  return sendTemplate(phone, WATI_TEMPLATE_NAME, WATI_BROADCAST_NAME, [
+    { name: '1', value: otp },
+  ]);
 };
 
-module.exports = { sendOTP };
+const sendOTP = async (phone, otp) => sendOTPWhatsApp(phone, otp);
+
+// ─── Template 1: Delivery Confirmation ─────────────────────────────────────
+// Params: customer_name, product_name, imei, color_variant, advance_amount,
+//         delivery_date, order_ref, order_status
+
+const WATI_DELIVERY_TEMPLATE   = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
+const WATI_DELIVERY_BROADCAST  = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
+
+const sendDeliveryConfirmation = async (phone, {
+  customerName,
+  productName,
+  imei,
+  colorVariant,
+  advanceAmount,
+  deliveryDate,
+  orderRef,
+  orderStatus,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName   || 'Customer' },
+    { name: '2', value: productName    || 'N/A' },
+    { name: '3', value: imei           || 'N/A' },
+    { name: '4', value: colorVariant   || 'N/A' },
+    { name: '5', value: String(advanceAmount || 0) },
+    { name: '6', value: deliveryDate   || new Date().toDateString() },
+    { name: '7', value: orderRef       || 'N/A' },
+    { name: '8', value: orderStatus    || 'Delivered' },
+  ];
+  return sendTemplate(phone, WATI_DELIVERY_TEMPLATE, WATI_DELIVERY_BROADCAST, parameters);
+};
+
+// ─── Template 2: Installment Ledger ────────────────────────────────────────
+// Params: customer_name, product_name, order_ref, next_month_label,
+//         monthly_amount, due_date, total_remaining, ledger_url
+
+const WATI_LEDGER_TEMPLATE  = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_ledger';
+const WATI_LEDGER_BROADCAST = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_ledger';
+
+const sendInstallmentLedger = async (phone, {
+  customerName,
+  productName,
+  orderRef,
+  nextMonthLabel,
+  monthlyAmount,
+  dueDate,
+  totalRemaining,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName    || 'Customer' },
+    { name: '2', value: productName     || 'N/A' },
+    { name: '3', value: orderRef        || 'N/A' },
+    { name: '4', value: nextMonthLabel  || 'Mahina 1' },
+    { name: '5', value: String(monthlyAmount  || 0) },
+    { name: '6', value: dueDate         || 'N/A' },
+    { name: '7', value: String(totalRemaining || 0) },
+    { name: '8', value: ledgerUrl       || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_LEDGER_TEMPLATE, WATI_LEDGER_BROADCAST, parameters);
+};
+
+module.exports = {
+  sendOTP,
+  sendDeliveryConfirmation,
+  sendInstallmentLedger,
+};

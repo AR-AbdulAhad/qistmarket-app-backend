@@ -901,6 +901,7 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
             },
           },
         },
+        delivery: true,
       },
     });
 

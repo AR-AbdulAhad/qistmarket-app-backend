@@ -1,8 +1,28 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
+const jwt = require('jsonwebtoken');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
-const { sendOTP } = require('../services/watiService');
+const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('../services/watiService');
 const { notifyAdmins } = require('../utils/notificationUtils');
+
+const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
+const LEDGER_BASE_URL     = (process.env.LEDGER_BASE_URL || 'http://localhost:5000').replace(/\/$/, '')
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+const formatDatePK = (d) => {
+  const date = d ? new Date(d) : new Date();
+  return date.toLocaleDateString('en-PK', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    timeZone: 'Asia/Karachi'
+  });
+};
+
+const addMonths = (date, n) => {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + n);
+  return d;
+};
 
 // Submit Delivery (Batch Upload)
 const submitDelivery = async (req, res) => {
@@ -194,7 +214,8 @@ const submitDelivery = async (req, res) => {
     }
 
     // Get confirmed purchaser name from verification if available
-    const confirmedCustomerName = order.verification?.purchaser?.full_name || order.customer_name;
+    const purchaser = order.verification?.purchaser;
+    const confirmedCustomerName = purchaser?.name || purchaser?.full_name || order.customer_name;
 
     // Create Cash In Hand entry for advance amount using delivery snapshots
     if (advanceAmount > 0) {
@@ -211,6 +232,96 @@ const submitDelivery = async (req, res) => {
           stock_transfer_id: stockTransferId
         }
       });
+    }
+
+    // ─── Build Installment Ledger ────────────────────────────────────────────
+    let installmentLedger = null;
+    let ledgerUrl = null;
+    try {
+      // Parse plan for installment data
+      const monthlyAmt  = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
+      const totalMonths = planObj?.months         || planObj?.duration      || order.months         || 0;
+      const deliveryDate = new Date();
+
+      if (totalMonths > 0 && monthlyAmt > 0) {
+        // Build rows: month 1 due date = delivery date + 1 month
+        const ledgerRows = Array.from({ length: totalMonths }, (_, i) => ({
+          month:    i + 1,
+          due_date: addMonths(deliveryDate, i + 1).toISOString(),
+          amount:   monthlyAmt,
+          status:   'pending',
+          paid_at:  null,
+        }));
+
+        // Sign a long-lived token (2 years)
+        const ledgerToken = jwt.sign(
+          { order_id: parseInt(order_id), delivery_id: delivery.id },
+          LEDGER_TOKEN_SECRET,
+          { expiresIn: '730d' }
+        );
+
+        // ledgerUrl = `${LEDGER_BASE_URL}/api/ledger/${ledgerToken}`;
+        ledgerUrl = `link hay`;
+
+        // Upsert ledger (safe if re-run)
+        installmentLedger = await prisma.installmentLedger.upsert({
+          where:  { order_id: parseInt(order_id) },
+          create: {
+            order_id:    parseInt(order_id),
+            delivery_id: delivery.id,
+            token:       ledgerToken,
+            ledger_rows: ledgerRows,
+          },
+          update: {
+            token:       ledgerToken,
+            ledger_rows: ledgerRows,
+          },
+        });
+      }
+    } catch (ledgerErr) {
+      // Non-fatal — log and continue
+      console.error('[submitDelivery] Ledger creation error:', ledgerErr);
+    }
+
+    // ─── WATI Messages ───────────────────────────────────────────────────────
+    const customerPhone = purchaser?.telephone_number;
+    const deliveryDateStr = formatDatePK(new Date());
+    const colorVariantStr = colorVariant || 'N/A';
+
+    if (customerPhone) {
+      // Template 1: Delivery Confirmation
+      sendDeliveryConfirmation(customerPhone, {
+        customerName:  confirmedCustomerName,
+        productName:   productNameSnapshot,
+        imei:          product_imei || 'N/A',
+        colorVariant:  colorVariantStr,
+        advanceAmount,
+        deliveryDate:  deliveryDateStr,
+        orderRef:      order.order_ref,
+        orderStatus:   'Delivered',
+      }).then(r => console.log('[WATI] Delivery confirmation:', r.success ? 'sent ✓' : r.error))
+        .catch(e => console.error('[WATI] Delivery confirmation error:', e));
+
+      // Template 2: Installment Ledger (only if ledger was created)
+      if (installmentLedger && ledgerUrl) {
+        const rows        = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
+        const firstRow    = rows[0];
+        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+
+        sendInstallmentLedger(customerPhone, {
+          customerName:   confirmedCustomerName,
+          productName:    productNameSnapshot,
+          orderRef:       order.order_ref,
+          nextMonthLabel: 'Mahina 1',
+          monthlyAmount:  firstRow?.amount || 0,
+          dueDate:        firstRow ? formatDatePK(firstRow.due_date) : 'N/A',
+          totalRemaining: totalRemain,
+          ledgerUrl,
+        }).then(r => console.log('[WATI] Ledger template:', r.success ? 'sent ✓' : r.error))
+          .catch(e => console.error('[WATI] Ledger template error:', e));
+      }
+    } else {
+      console.warn('[submitDelivery] No customer phone — WATI messages skipped for order', order.order_ref);
     }
 
     // Fetch updated delivery
@@ -237,7 +348,7 @@ const submitDelivery = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Delivery submitted successfully',
-      data: { delivery: updatedDelivery }
+      data: { delivery: updatedDelivery, ledger_url: ledgerUrl }
     });
   } catch (error) {
     console.error('Submit delivery error:', error);
