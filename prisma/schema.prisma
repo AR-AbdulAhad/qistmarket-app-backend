@@ -776,6 +776,7 @@ model InstallmentLedger {
   order_id    Int      @unique
   delivery_id Int      @unique
   token       String   @unique @db.VarChar(512)
+  short_id    String?  @unique @db.VarChar(20)
   ledger_rows Json
   created_at  DateTime @default(now())
   updated_at  DateTime @updatedAt
@@ -783,5 +784,6 @@ model InstallmentLedger {
   delivery    Delivery @relation(fields: [delivery_id], references: [id], onDelete: Cascade)
 
   @@index([token])
+  @@index([short_id])
   @@map("installment_ledgers")
 }

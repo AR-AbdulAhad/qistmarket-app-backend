@@ -1,12 +1,13 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('../services/watiService');
 const { notifyAdmins } = require('../utils/notificationUtils');
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
-const LEDGER_BASE_URL = (process.env.LEDGER_BASE_URL || 'http://localhost:5000').replace(/\/$/, '')
+const LEDGER_BASE_URL = (process.env.LEDGER_BASE_URL).replace(/\/$/, '')
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -253,15 +254,17 @@ const submitDelivery = async (req, res) => {
           paid_at: null,
         }));
 
-        // Sign a long-lived token (2 years)
+        // Sign a long-lived token (2 years) — kept for backward compat
         const ledgerToken = jwt.sign(
           { order_id: parseInt(order_id), delivery_id: delivery.id },
           LEDGER_TOKEN_SECRET,
           { expiresIn: '730d' }
         );
 
-        // ledgerUrl = `${LEDGER_BASE_URL}/api/ledger/${ledgerToken}`;
-        ledgerUrl = `link comming soon`;
+        // Short unique ID for the PDF download link
+        const shortId = crypto.randomBytes(5).toString('hex');
+        // ledgerUrl = `${LEDGER_BASE_URL}/api/ledger/pdf/${shortId}`;
+        ledgerUrl = `${ledgerToken}`;
 
         // Upsert ledger (safe if re-run)
         installmentLedger = await prisma.installmentLedger.upsert({
@@ -270,10 +273,12 @@ const submitDelivery = async (req, res) => {
             order_id: parseInt(order_id),
             delivery_id: delivery.id,
             token: ledgerToken,
+            short_id: shortId,
             ledger_rows: ledgerRows,
           },
           update: {
             token: ledgerToken,
+            short_id: shortId,
             ledger_rows: ledgerRows,
           },
         });

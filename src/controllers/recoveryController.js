@@ -174,19 +174,6 @@ const getRecoveryOfficerStats = async (req, res) => {
 const getRecoveryCustomers = async (req, res) => {
   const officerId = req.user.id;
 
-  const now = new Date();
-  let startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  let endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-
-  if (req.query.year && req.query.month) {
-    const y = parseInt(req.query.year);
-    const m = parseInt(req.query.month) - 1;
-    if (!isNaN(y) && !isNaN(m) && m >= 0 && m <= 11) {
-      startOfMonth = new Date(y, m, 1);
-      endOfMonth = new Date(y, m + 1, 1);
-    }
-  }
-
   try {
     const orders = await prisma.order.findMany({
       where: {
@@ -194,7 +181,12 @@ const getRecoveryCustomers = async (req, res) => {
       },
       include: {
         payments: true,
-        delivery: true,
+        delivery: {
+          include: {
+            installment_ledger: true,
+          },
+        },
+        cash_in_hand: true,
       },
       orderBy: [{ customer_name: 'asc' }, { created_at: 'desc' }],
     });
@@ -222,85 +214,113 @@ const getRecoveryCustomers = async (req, res) => {
       }
 
       const group = customerMap.get(key);
+      const delivery = order.delivery;
+      const cashInHand = order.cash_in_hand?.[0] || null;
+      const installmentLedgerModel = delivery?.installment_ledger || null;
 
-      const isDelivered = order.is_delivered || (order.delivery?.status === 'completed');
-      const deliveryDate = isDelivered ? (order.delivery?.end_time || order.updated_at) : null;
+      // ── Delivery status ────────────────────────────────────────
+      const isDelivered = order.is_delivered || delivery?.status === 'completed';
+      const deliveryDate = isDelivered
+        ? delivery?.end_time || order.updated_at
+        : null;
 
-      const advanceAmount = order.advance_amount || 0;
-      const monthlyAmount = order.monthly_amount || 0;
-      const totalMonths = order.months || 0;
+      // ── ALL product info from CashInHand ───────────────────────
+      const productName    = cashInHand?.product_name   || null;
+      const imeiSerial     = cashInHand?.imei_serial    || delivery?.product_imei || null;
+      const colorVariant   = cashInHand?.color_variant  || null;
+      const advanceAmount  = cashInHand?.amount         || 0;
+      const selectedPlan   = delivery?.selected_plan    || null;
+      const monthlyAmount  = selectedPlan?.monthly_amount ?? 0;
+      const totalMonths    = selectedPlan?.months        ?? 0;
 
-      // Actual payments from database
-      const dbPayments = order.payments || [];
+      // ── Advance payment status from payments table ─────────────
+      const advanceDbPayment = order.payments?.find(
+        (p) => p.paymentType === 'advance'
+      );
+      const hasPaidAdvance = !!advanceDbPayment || !!cashInHand;
 
-      const hasPaidAdvance = dbPayments.some(p => p.paymentType === 'advance') || isDelivered;
-
-      let advancePayment = {
-        amount: advanceAmount,
-        paid: hasPaidAdvance,
-        paidAt: dbPayments.find(p => p.paymentType === 'advance')?.paidAt || (isDelivered ? deliveryDate : null),
-        status: hasPaidAdvance ? 'paid' : 'pending',
+      const advancePayment = {
+        amount:        advanceAmount,
+        paid:          hasPaidAdvance,
+        paidAt:        advanceDbPayment?.paidAt || cashInHand?.created_at || null,
+        paymentMethod: advanceDbPayment?.paymentMethod || cashInHand?.payment_method || null,
+        status:        hasPaidAdvance ? 'paid' : 'pending',
       };
 
+      // ── Installment Ledger — directly from InstallmentLedger model ──
+      // ledger_rows are already fully computed at delivery time, just enrich payment status
       let installmentLedger = [];
-      let paidInstallments = 0;
-      let pendingInstallments = totalMonths;
 
-      if (isDelivered && deliveryDate && totalMonths > 0) {
-        let current = new Date(deliveryDate);
-        current.setMonth(current.getMonth() + 1);
-        current.setDate(5); // Fixed due date
+      if (installmentLedgerModel?.ledger_rows) {
+        const storedRows = Array.isArray(installmentLedgerModel.ledger_rows)
+          ? installmentLedgerModel.ledger_rows
+          : [];
 
-        for (let i = 0; i < totalMonths; i++) {
-          const mNum = i + 1;
-          const dueDate = new Date(current);
-          const payment = dbPayments.find(p => p.paymentType === 'installment' && p.monthNumber === mNum);
-
-          if (payment) {
-            paidInstallments++;
-            pendingInstallments--;
-          }
-
-          installmentLedger.push({
-            monthNumber: mNum,
-            dueDate: dueDate.toISOString().split('T')[0],
-            yearMonth: dueDate.toISOString().slice(0, 7),
-            dueAmount: monthlyAmount,
-            paidAmount: payment ? payment.amount : 0,
-            remainingAmount: payment ? 0 : monthlyAmount,
-            status: payment ? 'paid' : (new Date() > dueDate ? 'overdue' : 'pending'),
-            paidAt: payment ? payment.paidAt : null,
-          });
-          current.setMonth(current.getMonth() + 1);
-        }
+        installmentLedger = storedRows.map((row) => {
+          const mNum = row.monthNumber ?? row.month_number;
+          const payment = order.payments?.find(
+            (p) => p.paymentType === 'installment' && p.monthNumber === mNum
+          );
+          return {
+            ...row,
+            paidAmount:     payment ? payment.amount : 0,
+            remainingAmount: payment ? 0 : (row.dueAmount ?? row.due_amount ?? 0),
+            status:         payment ? 'paid' : (row.status ?? 'pending'),
+            paidAt:         payment?.paidAt        || null,
+            paymentMethod:  payment?.paymentMethod || null,
+          };
+        });
       }
 
-      const totalPaid = dbPayments.reduce((sum, p) => sum + p.amount, 0);
-      const totalDue = advanceAmount + (monthlyAmount * totalMonths);
+      const paidInstallments    = installmentLedger.filter((r) => r.status === 'paid').length;
+      const pendingInstallments = installmentLedger.filter((r) => r.status !== 'paid').length;
+
+      // ── Financial Summary ──────────────────────────────────────
+      const totalPaid      = order.payments.reduce((sum, p) => sum + p.amount, 0);
+      const totalDue       = advanceAmount + monthlyAmount * totalMonths;
       const totalRemaining = Math.max(0, totalDue - totalPaid);
 
       group.orders.push({
-        id: order.id,
-        order_ref: order.order_ref,
-        product_name: order.product_name,
-        status: order.status,
+        id:            order.id,
+        order_ref:     order.order_ref,
+        status:        order.status,
+        is_delivered:  isDelivered,
+        delivery_date: deliveryDate,
+
+        product_details: {
+          product_name:  productName,
+          imei_serial:   imeiSerial,
+          color_variant: colorVariant,
+        },
+
+        plan: {
+          selected_plan:  selectedPlan,
+          advance_amount: advanceAmount,
+          monthly_amount: monthlyAmount,
+          months:         totalMonths,
+        },
+
         ledger: {
-          advancePayment,
-          installmentLedger,
+          advance_payment:    advancePayment,
+          installment_ledger: installmentLedger,
+          ledger_token:       installmentLedgerModel?.short_id || null,
           summary: {
             totalDue,
             totalPaid,
             totalRemaining,
             paidInstallments,
             pendingInstallments,
-            installmentsStarted: isDelivered && totalMonths > 0,
-            firstInstallmentDate: installmentLedger[0]?.dueDate || null,
-          }
-        }
+            installmentsStarted:   isDelivered && totalMonths > 0,
+            firstInstallmentDate:  installmentLedger[0]?.dueDate ?? installmentLedger[0]?.due_date ?? null,
+          },
+        },
       });
     }
 
-    return res.json({ success: true, data: { customers: Array.from(customerMap.values()) } });
+    return res.json({
+      success: true,
+      data: { customers: Array.from(customerMap.values()) },
+    });
   } catch (error) {
     console.error('getRecoveryCustomers error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });

@@ -13,6 +13,7 @@ const jwt = require('jsonwebtoken');
 // ────────────────────────────────────────────────
 // Route Imports
 // ────────────────────────────────────────────────
+const ledgerRoutes = require('./src/routes/ledgerRoutes');
 const authRoutes = require('./src/routes/authRoutes');
 const orderRoutes = require('./src/routes/orderRoutes');
 const { expireOrders } = require('./src/controllers/ordersController');
@@ -34,7 +35,6 @@ const expenseRoutes = require('./src/routes/expenseRoutes');
 const vendorRoutes = require('./src/routes/vendorRoutes');
 const inventoryRoutes = require('./src/routes/inventoryRoutes');
 const outletReportRoutes = require('./src/routes/outletReportRoutes');
-const ledgerRoutes = require('./src/routes/ledgerRoutes');
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -403,6 +403,7 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
+app.use('/ledger', ledgerRoutes);    // Public ledger routes — no auth required, must be first!
 app.use('/api', authRoutes);
 app.use('/api', outletRoutes); // Moved up
 app.use('/api', orderRoutes);
@@ -425,7 +426,6 @@ app.use('/api', expenseRoutes);
 app.use('/api', vendorRoutes);
 app.use('/api', inventoryRoutes);
 app.use('/api', outletReportRoutes);
-app.use('/api', ledgerRoutes);    // token-based public ledger PDF
 
 // 404 handler
 app.use((req, res) => {

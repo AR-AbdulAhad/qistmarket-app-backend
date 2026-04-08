@@ -1,9 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { viewLedger } = require('../controllers/ledgerController');
+const { viewLedger, downloadLedgerPdf } = require('../controllers/ledgerController');
 
-// Public token-based ledger viewer (no auth middleware)
-// GET /api/ledger/:token
-router.get('/ledger/:token', viewLedger);
+// New: short ID based PDF download — GET /api/ledger/pdf/:shortId
+router.get('/pdf/:shortId', downloadLedgerPdf);
+
+// Legacy: JWT token based HTML view — GET /api/ledger/:token
+router.get('/:token', viewLedger);
 
 module.exports = router;
