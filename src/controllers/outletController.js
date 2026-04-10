@@ -4,7 +4,8 @@ const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
-const { sendOTP } = require('../services/watiService');
+const { sendOTP, sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 
 
 const createOutlet = async (req, res) => {
@@ -207,7 +208,7 @@ const getGlobalCashInHand = async (req, res) => {
         const entries = await prisma.cashInHand.findMany({
             where: { status: 'pending' },
             include: {
-                delivery_officer: { select: { full_name: true, phone: true } },
+                officer: { select: { full_name: true, phone: true } },
                 order: {
                     select: {
                         order_ref: true,
@@ -287,7 +288,7 @@ const getOutletCashHistory = async (req, res) => {
         }
 
         if (officer_id) {
-            where.delivery_officer_id = parseInt(officer_id);
+            where.officer_id = parseInt(officer_id);
         }
 
         if (date_from || date_to) {
@@ -299,7 +300,7 @@ const getOutletCashHistory = async (req, res) => {
         const entries = await prisma.cashInHand.findMany({
             where,
             include: {
-                delivery_officer: { select: { full_name: true, phone: true } },
+                officer: { select: { full_name: true, phone: true } },
                 order: {
                     select: {
                         order_ref: true,
@@ -338,10 +339,10 @@ const getReturnExchanges = async (req, res) => {
 
         // Map the JSON-stored snapshot data back to top-level fields for the UI
         const mappedRecords = records.map(record => {
-            const plan = record.selected_plan 
-                ? (typeof record.selected_plan === 'string' ? JSON.parse(record.selected_plan) : record.selected_plan) 
+            const plan = record.selected_plan
+                ? (typeof record.selected_plan === 'string' ? JSON.parse(record.selected_plan) : record.selected_plan)
                 : {};
-            
+
             return {
                 ...record,
                 product_color: plan.delivered_color || record.product_color || 'N/A',
@@ -365,10 +366,10 @@ const verifyReturnExchangeOtp = async (req, res) => {
         // Step 1: Validate the record
         const record = await prisma.returnExchange.findUnique({
             where: { id: parseInt(record_id) },
-            include: { 
+            include: {
                 order: {
                     include: { delivery: true }
-                } 
+                }
             }
         });
 
@@ -381,7 +382,7 @@ const verifyReturnExchangeOtp = async (req, res) => {
         const deliveryTime = record.order.delivery?.end_time || record.order.delivery?.updated_at || record.order.updated_at;
         const now = new Date();
         const hoursSinceDelivery = (now.getTime() - new Date(deliveryTime).getTime()) / (1000 * 60 * 60);
-        
+
         // If type is Return and > 48h, mark as Used
         const isUsed = record.type === 'Return' && hoursSinceDelivery > 48;
 
@@ -418,7 +419,7 @@ const verifyReturnExchangeOtp = async (req, res) => {
 
         // Step 6: Change order status & Handle Exchange
         const isExchange = record.type === 'Exchange';
-        
+
         if (isExchange) {
             // For Exchange: Reset the order so it can be delivered again
             await prisma.order.update({
@@ -497,7 +498,7 @@ const initiateDirectReturn = async (req, res) => {
         // 1. Fetch order, delivery, verification, and the official CashInHand receipt
         const order = await prisma.order.findUnique({
             where: { id: parseInt(order_id) },
-            include: { 
+            include: {
                 delivery: true,
                 verification: {
                     include: { purchaser: true }
@@ -520,7 +521,7 @@ const initiateDirectReturn = async (req, res) => {
         // 2. Extract delivery-specific data prioritizing the official CashInHand record
         const cashRecord = order.cash_in_hand?.[0];
         const deliveryPlan = order.delivery.selected_plan ? (typeof order.delivery.selected_plan === 'string' ? JSON.parse(order.delivery.selected_plan) : order.delivery.selected_plan) : null;
-        
+
         const deliveredAdvance = cashRecord ? cashRecord.amount : (deliveryPlan?.advance_payment || deliveryPlan?.advance_amount || deliveryPlan?.advancePayment || order.advance_amount);
         const productName = cashRecord?.product_name || deliveryPlan?.productName || order.product_name;
         const imei = cashRecord?.imei_serial || order.delivery.product_imei;
@@ -565,7 +566,7 @@ const initiateDirectReturn = async (req, res) => {
 
         // 5. Send OTP to Customer (Purchaser) via WhatsApp
         const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
-        
+
         if (customerPhone) {
             try {
                 await sendOTP(customerPhone, otp);
@@ -594,10 +595,10 @@ const initiateDirectReturn = async (req, res) => {
             });
         }
 
-        return res.json({ 
-            success: true, 
-            message: `OTP generated and sent to customer's WhatsApp. Please verify to complete the Sales Return.`, 
-            data: { record_id: returnRecord.id } 
+        return res.json({
+            success: true,
+            message: `OTP generated and sent to customer's WhatsApp. Please verify to complete the Sales Return.`,
+            data: { record_id: returnRecord.id }
         });
 
     } catch (error) {
@@ -648,14 +649,14 @@ const searchDeliveredOrders = async (req, res) => {
                     { order_ref: { contains: query } },
                     { customer_name: { contains: query } },
                     { product_name: { contains: query } },
-                    { 
-                        delivery: { 
-                            product_imei: { contains: query } 
-                        } 
+                    {
+                        delivery: {
+                            product_imei: { contains: query }
+                        }
                     }
                 ]
             },
-            include: { 
+            include: {
                 delivery: true,
                 cash_in_hand: {
                     take: 1,
@@ -669,19 +670,19 @@ const searchDeliveredOrders = async (req, res) => {
         const refinedOrders = orders.map(order => {
             const delivery = order.delivery;
             const cashRecord = order.cash_in_hand?.[0]; // The official financial snapshot of delivery
-            const plan = delivery?.selected_plan 
-                ? (typeof delivery.selected_plan === 'string' 
-                    ? JSON.parse(delivery.selected_plan) 
-                    : delivery.selected_plan) 
+            const plan = delivery?.selected_plan
+                ? (typeof delivery.selected_plan === 'string'
+                    ? JSON.parse(delivery.selected_plan)
+                    : delivery.selected_plan)
                 : null;
-            
+
             // Advance: Prioritize the actual cash collected in CashInHand
             const deliveredAdvance = cashRecord ? cashRecord.amount : (plan?.advance_payment || plan?.advance_amount || plan?.advancePayment || 0);
 
             // Product specs: Prioritize the snapshot taken during delivery (CashInHand)
             const deliveredProd = cashRecord?.product_name || plan?.productName || order.product_name;
             const deliveredImei = cashRecord?.imei_serial || delivery?.product_imei || order.imei_serial || 'N/A';
-            
+
             // Handle color/variant from CashInHand snapshot first
             let deliveredColor = 'N/A';
             let deliveredVariant = 'N/A';
@@ -713,6 +714,285 @@ const searchDeliveredOrders = async (req, res) => {
     }
 };
 
+const getOutletInstallments = async (req, res) => {
+    const { outlet_id } = req.user;
+    const {
+        page = 1,
+        limit = 10,
+        search = '',
+    } = req.query;
+
+    if (!outlet_id) {
+        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    }
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+    const q = search.trim();
+
+    try {
+        const orderWhere = {
+            outlet_id: outlet_id,
+            is_delivered: true,
+            ...(q && {
+                OR: [
+                    { customer_name: { contains: q } },
+                    { order_ref: { contains: q } },
+                    { whatsapp_number: { contains: q } },
+                    { delivery: { product_imei: { contains: q } } },
+                ],
+            }),
+        };
+
+        const totalOrders = await prisma.order.count({ where: orderWhere });
+        const orders = await prisma.order.findMany({
+            where: orderWhere,
+            include: {
+                verification: {
+                    include: {
+                        purchaser: true,
+                    },
+                },
+                delivery: {
+                    include: {
+                        installment_ledger: true,
+                    },
+                },
+                cash_in_hand: {
+                    take: 1,
+                    orderBy: { created_at: 'desc' },
+                },
+            },
+            orderBy: { created_at: 'desc' },
+            skip,
+            take: limitNum,
+        });
+
+        // ── Pre-fetch Inventory details based on IMEI ──────────────────
+        const allImeis = orders
+            .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+            .filter(Boolean);
+
+        const inventories = await prisma.outletInventory.findMany({
+            where: { imei_serial: { in: allImeis } },
+            select: { imei_serial: true, product_name: true }
+        });
+
+        const inventoryMap = new Map();
+        for (const inv of inventories) {
+            if (inv.imei_serial) {
+                inventoryMap.set(inv.imei_serial, inv);
+            }
+        }
+
+        const formatted = orders.map(order => {
+            const purchaser = order.verification?.purchaser || null;
+            const delivery = order.delivery;
+            const ledgerModel = delivery?.installment_ledger || null;
+            const cashRecord = order.cash_in_hand?.[0] || null;
+
+            const imeiSerial = cashRecord?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+            const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+
+            let plan = delivery?.selected_plan || null;
+            if (typeof plan === 'string') {
+                try { plan = JSON.parse(plan); } catch (e) { plan = null; }
+            }
+
+            const allRows = Array.isArray(ledgerModel?.ledger_rows) ? ledgerModel.ledger_rows : [];
+
+            // month === 0 → Advance Payment row; month > 0 → installment rows
+            const advanceLedgerRow = allRows.find(r => r.month === 0);
+            const installmentOnlyRows = allRows.filter(r => r.month > 0);
+
+            const installmentLedger = installmentOnlyRows.map((row) => ({
+                monthNumber: row.month,
+                label: row.label || `Month ${row.month}`,
+                dueDate: row.due_date || row.dueDate || null,
+                dueAmount: Number(row.amount || row.dueAmount || 0),
+                status: row.status || 'pending',
+                paidAt: row.paid_at || row.paidAt || null,
+                paymentMethod: row.payment_method || row.paymentMethod || null,
+            }));
+
+            // Calculate summaries from actual row data
+            const advanceAmount = advanceLedgerRow?.amount || cashRecord?.amount || order.advance_amount || 0;
+            const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
+            const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
+
+            const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+            const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
+
+            return {
+                order_id: order.id,
+                order_ref: order.order_ref,
+                customer_name: purchaser?.name || order.customer_name,
+                whatsapp_number: order.whatsapp_number,
+                product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
+                imei_serial: imeiSerial,
+                status: order.status,
+                created_at: order.created_at,
+                ledgerSummaries: {
+                    advanceAmount,
+                    monthlyAmount,
+                    totalMonths,
+                    totalInstallmentDue,
+                    totalInstallmentPaid,
+                    totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
+                    paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
+                    totalInstallments: installmentLedger.length,
+                },
+                installmentLedger,
+                ledger_short_id: ledgerModel?.token || null
+            };
+        });
+
+        res.json({
+            success: true,
+            data: {
+                installments: formatted,
+                pagination: {
+                    total: totalOrders,
+                    page: pageNum,
+                    limit: limitNum,
+                    totalPages: Math.ceil(totalOrders / limitNum),
+                }
+            }
+        });
+    } catch (error) {
+        console.error('getOutletInstallments error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+// =====================
+// INSTALLMENT PAYMENT MODULE (OUTLET)
+// =====================
+
+const generateInstallmentOtp = async (req, res) => {
+    const { order_id } = req.body;
+
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: parseInt(order_id) },
+            include: {
+                verification: { include: { purchaser: true } }
+            }
+        });
+
+        if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+        const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+        if (!phone) return res.status(400).json({ success: false, message: 'Customer phone number not found' });
+
+        const otp = await saveOTP(phone, 'installment_payment');
+        await sendOTP(phone, otp);
+
+        return res.json({ success: true, message: 'OTP sent to customer' });
+    } catch (error) {
+        console.error('generateInstallmentOtp error:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const verifyInstallmentPayment = async (req, res) => {
+    const { order_id, month_number, otp, feedback, payment_method = 'Cash' } = req.body;
+    const outlet_id = req.user.outlet_id;
+
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user' });
+
+    try {
+        const order = await prisma.order.findUnique({
+            where: { id: parseInt(order_id) },
+            include: {
+                verification: { include: { purchaser: true } },
+                installment_ledger: true,
+                delivery: true,
+                cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
+            }
+        });
+
+        if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+        const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+        const verification = await verifyOTP(phone, otp, 'installment_payment');
+
+        if (!verification.valid) {
+            return res.status(400).json({ success: false, message: verification.message });
+        }
+
+        const ledger = order.installment_ledger;
+        if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
+
+        let rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+        const rowIndex = rows.findIndex(r => (r.month == month_number || r.monthNumber == month_number));
+
+        if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
+        if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
+
+        // Update row
+        const paidAmount = rows[rowIndex].amount || rows[rowIndex].dueAmount || 0;
+        rows[rowIndex].status = 'paid';
+        rows[rowIndex].paid_at = new Date();
+        rows[rowIndex].payment_method = payment_method;
+        rows[rowIndex].feedback = feedback;
+
+        // Save Ledger
+        await prisma.installmentLedger.update({
+            where: { id: ledger.id },
+            data: { ledger_rows: rows }
+        });
+
+        // Update Cash Register (Only for Cash payments)
+        const isCash = ['cash', 'recovery_cash', 'recovery cash'].includes(payment_method?.toLowerCase() || 'cash');
+        if (isCash) {
+            await updateCashRegister(null, outlet_id, 'installments_received', paidAmount, 'add');
+        }
+
+        // Fetch real product name from inventory using IMEI
+        const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+        let finalProductName = order.product_name;
+
+        if (imeiSerial) {
+            const invInfo = await prisma.outletInventory.findFirst({
+                where: { imei_serial: imeiSerial },
+                select: { product_name: true }
+            });
+            if (invInfo?.product_name) {
+                finalProductName = invInfo.product_name;
+            }
+        }
+
+        // Send Wati Receipt
+        const customerName = order.verification?.purchaser?.name || order.customer_name;
+        sendInstallmentPaymentReceipt(phone, {
+            customerName,
+            amount: paidAmount,
+            productName: finalProductName,
+            orderRef: order.order_ref,
+            date: new Date().toLocaleDateString('en-PK')
+        }).catch(err => console.error('Wati Receipt Error:', err));
+
+        // Send Next Month Reminder if exists
+        const nextRow = rows[rowIndex + 1];
+        if (nextRow) {
+            sendNextInstallmentReminder(phone, {
+                customerName,
+                productName: finalProductName,
+                monthlyAmount: nextRow.amount || nextRow.dueAmount,
+                dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
+                ledgerUrl: ledger.short_id ? `${process.env.LEDGER_BASE_URL}/api/ledger/pdf/${ledger.short_id}` : null
+            }).catch(err => console.error('Wati Reminder Error:', err));
+        }
+
+        return res.json({ success: true, message: 'Payment processed successfully' });
+    } catch (error) {
+        console.error('verifyInstallmentPayment error:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     createOutlet,
     getOutlets,
@@ -726,5 +1006,8 @@ module.exports = {
     getReturnExchanges,
     verifyReturnExchangeOtp,
     initiateDirectReturn,
-    searchDeliveredOrders
+    searchDeliveredOrders,
+    getOutletInstallments,
+    generateInstallmentOtp,
+    verifyInstallmentPayment
 };

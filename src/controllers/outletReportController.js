@@ -47,14 +47,39 @@ const getDaybook = async (req, res) => {
             dateFilter.lte = end;
         }
 
-        // 1. Fetch Payments (Real-time income)
-        const payments = await prisma.orderPayment.findMany({
+        // 1. Fetch Ledgers (Real-time income)
+        const ledgers = await prisma.installmentLedger.findMany({
             where: {
                 order: outletFilter,
-                paidAt: dateFilter
             },
-            include: { order: true }
         });
+
+        const payments = [];
+        let totalIncome = 0;
+        let totalAdvance = 0;
+        let totalInstallments = 0;
+
+        for (const ledger of ledgers) {
+            const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            for (const row of rows) {
+                if (row.status === 'paid' && row.paid_at) {
+                    const paidDate = new Date(row.paid_at);
+                    if (paidDate >= dateFilter.gte && paidDate <= dateFilter.lte) {
+                        const amount = parseFloat(row.amount || row.dueAmount || 0);
+                        totalIncome += amount;
+                        if (row.month === 0) totalAdvance += amount;
+                        else totalInstallments += amount;
+
+                        payments.push({
+                            ...row,
+                            paymentType: row.month === 0 ? 'advance' : 'installment',
+                            amount: amount,
+                            paidAt: row.paid_at
+                        });
+                    }
+                }
+            }
+        }
 
         // 2. Fetch Expenses (Real-time outgoing)
         const expenses = await prisma.expense.findMany({
@@ -66,12 +91,12 @@ const getDaybook = async (req, res) => {
 
         // 3. Summarize
         const summary = {
-            totalIncome: payments.reduce((acc, p) => acc + p.amount, 0),
+            totalIncome,
             totalExpense: expenses.reduce((acc, e) => acc + e.amount, 0),
             netCash: 0,
             breakdown: {
-                advance: payments.filter(p => p.paymentType === 'advance').reduce((acc, p) => acc + p.amount, 0),
-                installments: payments.filter(p => p.paymentType === 'installment').reduce((acc, p) => acc + p.amount, 0),
+                advance: totalAdvance,
+                installments: totalInstallments,
             }
         };
         summary.netCash = summary.totalIncome - summary.totalExpense;
@@ -144,7 +169,7 @@ const getSalesReport = async (req, res) => {
         const orders = await prisma.order.findMany({
             where,
             include: {
-                payments: true
+                installment_ledger: true
             },
             orderBy: { created_at: 'desc' }
         });
@@ -152,7 +177,10 @@ const getSalesReport = async (req, res) => {
         const summary = {
             totalOrders: orders.length,
             totalGrossAmount: orders.reduce((acc, o) => acc + o.total_amount, 0),
-            totalReceived: orders.reduce((acc, o) => acc + o.payments.reduce((pAcc, p) => pAcc + p.amount, 0), 0)
+            totalReceived: orders.reduce((acc, o) => {
+                const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
+                return acc + rows.filter(r => r.status === 'paid').reduce((pAcc, p) => pAcc + (p.amount || 0), 0);
+            }, 0)
         };
 
         res.json({ success: true, data: { summary, orders } });
@@ -245,14 +273,26 @@ const getCustomerLedger = async (req, res) => {
                 ...outletFilter
             },
             include: {
-                payments: {
-                    orderBy: { created_at: 'desc' }
-                }
+                installment_ledger: true
             },
             orderBy: { created_at: 'desc' }
         });
 
-        res.json({ success: true, data: orders });
+        // Map installments for backward compatibility with the frontend if needed
+        const mappedOrders = orders.map(order => {
+            const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+            return {
+                ...order,
+                payments: rows.filter(r => r.status === 'paid').map(r => ({
+                    paymentType: r.month === 0 ? 'advance' : 'installment',
+                    amount: r.amount || 0,
+                    created_at: r.paid_at || order.created_at,
+                    method: r.payment_method
+                }))
+            };
+        });
+
+        res.json({ success: true, data: mappedOrders });
     } catch (error) {
         console.error('getCustomerLedger error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -272,12 +312,13 @@ const getRecoveryReport = async (req, res) => {
                 status: { notIn: ['Cancelled', 'Rejected'] }
             },
             include: {
-                payments: true
+                installment_ledger: true
             }
         });
 
         const recoveryList = orders.map(order => {
-            const totalPaid = order.payments.reduce((acc, p) => acc + p.amount, 0);
+            const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+            const totalPaid = rows.filter(r => r.status === 'paid').reduce((acc, p) => acc + (p.amount || 0), 0);
             const balance = order.total_amount - totalPaid;
             return {
                 order_id: order.id,

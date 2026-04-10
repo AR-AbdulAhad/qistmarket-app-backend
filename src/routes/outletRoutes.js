@@ -13,7 +13,10 @@ const {
     getReturnExchanges,
     verifyReturnExchangeOtp,
     initiateDirectReturn,
-    searchDeliveredOrders
+    searchDeliveredOrders,
+    getOutletInstallments,
+    generateInstallmentOtp,
+    verifyInstallmentPayment
 } = require('../controllers/outletController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -34,5 +37,10 @@ router.get('/outlet/return-exchanges', authenticateJWT, getReturnExchanges);
 router.post('/outlet/verify-return-otp', authenticateJWT, verifyReturnExchangeOtp);
 router.get('/outlet/search-delivered-orders', authenticateJWT, searchDeliveredOrders);
 router.post('/outlet/initiate-direct-return', authenticateJWT, initiateDirectReturn);
+router.get('/outlet/installments', authenticateJWT, getOutletInstallments);
+
+// Installment Payment flows (Outlet Managers)
+router.post('/outlet/installment/generate-otp', authenticateJWT, generateInstallmentOtp);
+router.post('/outlet/installment/verify-and-pay', authenticateJWT, verifyInstallmentPayment);
 
 module.exports = router;

@@ -98,7 +98,7 @@ const submitDelivery = async (req, res) => {
 
     // Snapshot variables for Cash In Hand
     let colorVariant = null;
-    let productNameSnapshot = order.product_name;
+    let productNameSnapshot = null;
     let stockTransferId = null;
 
     // Update Inventory Status and Transfer History if IMEI provided
@@ -115,7 +115,7 @@ const submitDelivery = async (req, res) => {
         });
 
         colorVariant = inventory.color_variant || null;
-        productNameSnapshot = inventory.product_name || order.product_name;
+        productNameSnapshot = inventory.product_name;
 
         // Mark transfer as delivered
         const transfer = await prisma.stockTransfer.findFirst({
@@ -222,15 +222,16 @@ const submitDelivery = async (req, res) => {
     if (advanceAmount > 0) {
       await prisma.cashInHand.create({
         data: {
-          delivery_officer_id: req.user.id,
+          officer_id: req.user.id,
           order_id: parseInt(order_id),
           amount: advanceAmount,
           status: 'pending',
           customer_name: confirmedCustomerName,
-          product_name: productNameSnapshot || order.product_name,
+          product_name: productNameSnapshot,
           imei_serial: product_imei || null,
           color_variant: colorVariant || null,
-          stock_transfer_id: stockTransferId
+          stock_transfer_id: stockTransferId,
+          payment_method: 'Cash'
         }
       });
     }
@@ -245,14 +246,32 @@ const submitDelivery = async (req, res) => {
       const deliveryDate = new Date();
 
       if (totalMonths > 0 && monthlyAmt > 0) {
-        // Build rows: month 1 due date = delivery date + 1 month
-        const ledgerRows = Array.from({ length: totalMonths }, (_, i) => ({
-          month: i + 1,
-          due_date: addMonths(deliveryDate, i + 1).toISOString(),
-          amount: monthlyAmt,
-          status: 'pending',
-          paid_at: null,
-        }));
+        // Build ledger rows
+        const ledgerRows = [];
+
+        // 1. Add Advance Payment as Month 0 (Already paid during booking/delivery)
+        ledgerRows.push({
+          month: 0,
+          label: 'Advance Payment',
+          due_date: deliveryDate.toISOString(),
+          amount: parseFloat(advanceAmount || 0),
+          status: 'paid', // Mark as paid since it was collected before/during delivery
+          paid_at: deliveryDate.toISOString(),
+          payment_method: 'Cash',
+          feedback: 'Collected at Delivery'
+        });
+
+        // 2. Add Installment Months (Month 1 to N)
+        for (let i = 0; i < totalMonths; i++) {
+          ledgerRows.push({
+            month: i + 1,
+            label: `Month ${i + 1}`,
+            due_date: addMonths(deliveryDate, i + 1).toISOString(),
+            amount: parseFloat(monthlyAmt),
+            status: 'pending',
+            paid_at: null,
+          });
+        }
 
         // Sign a long-lived token (2 years) — kept for backward compat
         const ledgerToken = jwt.sign(
@@ -263,7 +282,6 @@ const submitDelivery = async (req, res) => {
 
         // Short unique ID for the PDF download link
         const shortId = crypto.randomBytes(5).toString('hex');
-        // ledgerUrl = `${LEDGER_BASE_URL}/api/ledger/pdf/${shortId}`;
         ledgerUrl = `${ledgerToken}`;
 
         // Upsert ledger (safe if re-run)
@@ -493,7 +511,7 @@ const getCashInHand = async (req, res) => {
 
   try {
     let where = {
-      delivery_officer_id: deliveryBoyId,
+      officer_id: deliveryBoyId,
     };
 
     if (status) {
@@ -551,13 +569,13 @@ const getCashInHand = async (req, res) => {
       status: entry.status,
       created_at: entry.created_at,
       payment_method: entry.payment_method,
-      order_id: entry.order.id,
-      order_ref: entry.order.order_ref,
-      customer_name: entry.customer_name || entry.order?.customer_name,
-      product_name: entry.product_name || entry.order.product_name,
-      imei: entry.imei_serial || entry.order.imei_serial || entry.order.delivery?.product_imei,
+      order_id: entry.order_id,
+      order_ref: entry.order?.order_ref || 'N/A',
+      customer_name: entry.customer_name || entry.order?.customer_name || 'Unknown',
+      product_name: entry.product_name || entry.order?.product_name || 'Unknown',
+      imei: entry.imei_serial || entry.order?.imei_serial || entry.order?.delivery?.product_imei,
       color_variant: entry.color_variant,
-      selected_plan: entry.order.delivery?.selected_plan,
+      selected_plan: entry.order?.delivery?.selected_plan,
       outlet: entry.outlet
     }));
 
@@ -597,7 +615,7 @@ const submitCashToOutlet = async (req, res) => {
     await prisma.cashInHand.updateMany({
       where: {
         id: { in: ids },
-        delivery_officer_id: deliveryBoyId,
+        officer_id: deliveryBoyId,
       },
       data: {
         outlet_id: parseInt(outlet_id),
@@ -609,7 +627,7 @@ const submitCashToOutlet = async (req, res) => {
     const entries = await prisma.cashInHand.findMany({
       where: { id: { in: ids } },
       include: {
-        delivery_officer: { select: { full_name: true, phone: true } },
+        officer: { select: { full_name: true, phone: true } },
         order: { select: { product_name: true, order_ref: true } }
       }
     });
@@ -619,8 +637,8 @@ const submitCashToOutlet = async (req, res) => {
     }
 
     const totalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
-    const officerName = entries[0]?.delivery_officer?.full_name || 'Officer';
-    const officerPhone = entries[0]?.delivery_officer?.phone;
+    const officerName = entries[0]?.officer?.full_name || 'Officer';
+    const officerPhone = entries[0]?.officer?.phone;
 
     // Send OTP to Delivery Officer via WhatsApp (Wati)
     if (officerPhone) {
@@ -641,7 +659,7 @@ const submitCashToOutlet = async (req, res) => {
         otp: otp,
         entries: entries.map(e => ({
           customer_name: e.customer_name,
-          order_ref: e.order.order_ref,
+          order_ref: e.order?.order_ref || 'N/A',
           product_name: e.product_name,
           imei: e.imei_serial,
           color: e.color_variant,

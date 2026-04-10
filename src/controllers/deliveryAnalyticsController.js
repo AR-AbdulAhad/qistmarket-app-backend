@@ -66,7 +66,7 @@ const getDeliveryOfficerAnalytics = async (req, res) => {
     // Cash in hand (sum of cashInHand for this officer in range)
     const cashEntries = await prisma.cashInHand.findMany({
       where: {
-        delivery_officer_id: deliveryOfficerId,
+        officer_id: deliveryOfficerId,
         created_at: { gte, lt }
       }
     });

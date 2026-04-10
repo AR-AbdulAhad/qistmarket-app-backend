@@ -1,6 +1,12 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
+const { saveOTP, verifyOTP } = require('../utils/otpUtils');
+const {
+  sendOTP,
+  sendInstallmentPaymentReceipt,
+  sendNextInstallmentReminder
+} = require('../services/watiService');
 
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
@@ -178,15 +184,28 @@ const getRecoveryCustomers = async (req, res) => {
     const orders = await prisma.order.findMany({
       where: {
         recovery_officer_id: officerId,
+        is_delivered: true,
       },
       include: {
-        payments: true,
+        verification: {
+          include: {
+            purchaser: true,
+            documents: {
+              where: { document_type: 'photo', person_type: 'purchaser' },
+              orderBy: { uploaded_at: 'desc' },
+              take: 1,
+            },
+          },
+        },
         delivery: {
           include: {
             installment_ledger: true,
           },
         },
-        cash_in_hand: true,
+        cash_in_hand: {
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
       },
       orderBy: [{ customer_name: 'asc' }, { created_at: 'desc' }],
     });
@@ -195,123 +214,190 @@ const getRecoveryCustomers = async (req, res) => {
       return res.status(200).json({ success: true, data: { customers: [] } });
     }
 
+    // ── Pre-fetch Inventory details based on IMEI ──────────────────
+    const allImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const inventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: allImeis } },
+      select: { imei_serial: true, product_name: true, color_variant: true }
+    });
+
+    const inventoryMap = new Map();
+    for (const inv of inventories) {
+      if (inv.imei_serial) {
+        inventoryMap.set(inv.imei_serial, inv);
+      }
+    }
+
     const customerMap = new Map();
 
     for (const order of orders) {
       const key = (order.whatsapp_number || `unknown-${order.id}`).trim();
 
+      const purchaser = order.verification?.purchaser || null;
+      const cashInHand = order.cash_in_hand?.[0] || null;
+      const delivery = order.delivery;
+      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
+
+      // ── Customer details: purchaser se, fallback Order ────────
+      const customerName = purchaser?.name || order.customer_name;
+      const fatherHusbandName = purchaser?.father_husband_name || null;
+      const cnicNumber = purchaser?.cnic_number || null;
+      const presentAddress = purchaser?.present_address || order.address || null;
+      const permanentAddress = purchaser?.permanent_address || null;
+      const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
+      const nearestLocation = purchaser?.nearest_location || null;
+
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
-            name: order.customer_name,
+            name: customerName,
+            father_husband_name: fatherHusbandName,
+            cnic_number: cnicNumber,
             whatsapp_number: order.whatsapp_number,
-            address: order.address,
+            telephone_number: telephoneNumber,
+            present_address: presentAddress,
+            permanent_address: permanentAddress,
+            nearest_location: nearestLocation,
             city: order.city,
             area: order.area,
+            profile_photo: profilePhoto,
           },
           orders: [],
         });
       }
 
       const group = customerMap.get(key);
-      const delivery = order.delivery;
-      const cashInHand = order.cash_in_hand?.[0] || null;
-      const installmentLedgerModel = delivery?.installment_ledger || null;
 
       // ── Delivery status ────────────────────────────────────────
       const isDelivered = order.is_delivered || delivery?.status === 'completed';
-      const deliveryDate = isDelivered
-        ? delivery?.end_time || order.updated_at
-        : null;
+      const deliveryDate = isDelivered ? (delivery?.end_time || order.updated_at) : null;
 
-      // ── ALL product info from CashInHand ───────────────────────
-      const productName    = cashInHand?.product_name   || null;
-      const imeiSerial     = cashInHand?.imei_serial    || delivery?.product_imei || null;
-      const colorVariant   = cashInHand?.color_variant  || null;
-      const advanceAmount  = cashInHand?.amount         || 0;
-      const selectedPlan   = delivery?.selected_plan    || null;
-      const monthlyAmount  = selectedPlan?.monthly_amount ?? 0;
-      const totalMonths    = selectedPlan?.months        ?? 0;
+      // ── Product info: Fetch from Inventory via IMEI first ───────────────────────────
+      const imeiSerial = cashInHand?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+      const invInfo    = imeiSerial ? inventoryMap.get(imeiSerial) : null;
 
-      // ── Advance payment status from payments table ─────────────
-      const advanceDbPayment = order.payments?.find(
-        (p) => p.paymentType === 'advance'
-      );
-      const hasPaidAdvance = !!advanceDbPayment || !!cashInHand;
+      const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name || null;
+      const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      const advancePayment = {
-        amount:        advanceAmount,
-        paid:          hasPaidAdvance,
-        paidAt:        advanceDbPayment?.paidAt || cashInHand?.created_at || null,
-        paymentMethod: advanceDbPayment?.paymentMethod || cashInHand?.payment_method || null,
-        status:        hasPaidAdvance ? 'paid' : 'pending',
-      };
+      // ── Advance: from ledger row month=0, fallback to CashInHand ───────
+      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
+      let hasPaidAdvance = !!cashInHand;
+      let advancePaidAt = cashInHand?.created_at || null;
+      let advancePaymentMethod = cashInHand?.payment_method || null;
 
-      // ── Installment Ledger — directly from InstallmentLedger model ──
-      // ledger_rows are already fully computed at delivery time, just enrich payment status
+      // ── Plan info: Delivery.selected_plan se ──────────────────
+      let selectedPlan = delivery?.selected_plan || null;
+      if (typeof selectedPlan === 'string') {
+        try { selectedPlan = JSON.parse(selectedPlan); } catch { selectedPlan = null; }
+      }
+
+      // ── Installment Ledger: month=0 is Advance, month>0 are installments ──
       let installmentLedger = [];
 
       if (installmentLedgerModel?.ledger_rows) {
-        const storedRows = Array.isArray(installmentLedgerModel.ledger_rows)
+        const allLedgerRows = Array.isArray(installmentLedgerModel.ledger_rows)
           ? installmentLedgerModel.ledger_rows
           : [];
 
-        installmentLedger = storedRows.map((row) => {
-          const mNum = row.monthNumber ?? row.month_number;
-          const payment = order.payments?.find(
-            (p) => p.paymentType === 'installment' && p.monthNumber === mNum
-          );
-          return {
-            ...row,
-            paidAmount:     payment ? payment.amount : 0,
-            remainingAmount: payment ? 0 : (row.dueAmount ?? row.due_amount ?? 0),
-            status:         payment ? 'paid' : (row.status ?? 'pending'),
-            paidAt:         payment?.paidAt        || null,
-            paymentMethod:  payment?.paymentMethod || null,
-          };
-        });
+        // Extract advance from month 0 row
+        const advanceLedgerRow = allLedgerRows.find(r => r.month === 0);
+        if (advanceLedgerRow) {
+          advanceAmount = Number(advanceLedgerRow.amount || 0);
+          hasPaidAdvance = advanceLedgerRow.status === 'paid';
+          advancePaidAt = advanceLedgerRow.paid_at || advanceLedgerRow.paidAt || null;
+          advancePaymentMethod = advanceLedgerRow.payment_method || advanceLedgerRow.paymentMethod || 'Cash';
+        }
+
+        // Map only month > 0 rows as installments
+        installmentLedger = allLedgerRows
+          .filter(r => r.month > 0)
+          .map((row) => {
+            const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
+            const rowStatus = row.status || 'pending';
+            const isPaid = rowStatus === 'paid';
+            return {
+              monthNumber: row.month,
+              label: row.label || `Month ${row.month}`,
+              dueDate: row.due_date || row.dueDate || null,
+              dueAmount: rowDueAmount,
+              paidAmount: isPaid ? rowDueAmount : 0,
+              remainingAmount: isPaid ? 0 : rowDueAmount,
+              status: rowStatus,
+              paidAt: row.paid_at || row.paidAt || null,
+              paymentMethod: row.payment_method || row.paymentMethod || null,
+            };
+          });
       }
 
-      const paidInstallments    = installmentLedger.filter((r) => r.status === 'paid').length;
+      const advancePayment = {
+        amount: advanceAmount,
+        paid: hasPaidAdvance,
+        paidAt: advancePaidAt,
+        paymentMethod: advancePaymentMethod,
+        status: hasPaidAdvance ? 'paid' : 'pending',
+      };
+
+
+      // Derive monthly/total from actual rows for display
+      const monthlyAmount = installmentLedger[0]?.dueAmount
+        || Number(selectedPlan?.monthly_amount || selectedPlan?.monthlyAmount || 0);
+      const totalMonths = installmentLedger.length
+        || Number(selectedPlan?.months || selectedPlan?.totalMonths || 0);
+
+      const paidInstallments = installmentLedger.filter((r) => r.status === 'paid').length;
       const pendingInstallments = installmentLedger.filter((r) => r.status !== 'paid').length;
 
       // ── Financial Summary ──────────────────────────────────────
-      const totalPaid      = order.payments.reduce((sum, p) => sum + p.amount, 0);
-      const totalDue       = advanceAmount + monthlyAmount * totalMonths;
-      const totalRemaining = Math.max(0, totalDue - totalPaid);
+      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+      const totalInstallmentPaid = installmentLedger
+        .filter((r) => r.status === 'paid')
+        .reduce((sum, r) => sum + r.dueAmount, 0);
+      const totalInstallmentRemaining = Math.max(0, totalInstallmentDue - totalInstallmentPaid);
+
+      const grandTotalDue = advanceAmount + totalInstallmentDue;
+      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
+      const grandTotalRemaining = Math.max(0, grandTotalDue - grandTotalPaid);
 
       group.orders.push({
-        id:            order.id,
-        order_ref:     order.order_ref,
-        status:        order.status,
-        is_delivered:  isDelivered,
+        id: order.id,
+        order_ref: order.order_ref,
+        status: order.status,
+        is_delivered: isDelivered,
         delivery_date: deliveryDate,
 
         product_details: {
-          product_name:  productName,
-          imei_serial:   imeiSerial,
+          product_name: productName,
+          imei_serial: imeiSerial,
           color_variant: colorVariant,
         },
 
         plan: {
-          selected_plan:  selectedPlan,
+          selected_plan: selectedPlan,
           advance_amount: advanceAmount,
           monthly_amount: monthlyAmount,
-          months:         totalMonths,
+          months: totalMonths,
+          total_plan_value: grandTotalDue,
         },
 
         ledger: {
-          advance_payment:    advancePayment,
+          advance_payment: advancePayment,
           installment_ledger: installmentLedger,
-          ledger_token:       installmentLedgerModel?.short_id || null,
+          ledger_token: installmentLedgerModel?.short_id || null,
           summary: {
-            totalDue,
-            totalPaid,
-            totalRemaining,
+            totalInstallmentDue,
+            totalInstallmentPaid,
+            totalInstallmentRemaining,
+            grandTotalDue,
+            grandTotalPaid,
+            grandTotalRemaining,
             paidInstallments,
             pendingInstallments,
-            installmentsStarted:   isDelivered && totalMonths > 0,
-            firstInstallmentDate:  installmentLedger[0]?.dueDate ?? installmentLedger[0]?.due_date ?? null,
+            installmentsStarted: isDelivered && totalMonths > 0,
+            firstInstallmentDate: installmentLedger[0]?.dueDate ?? null,
           },
         },
       });
@@ -327,66 +413,35 @@ const getRecoveryCustomers = async (req, res) => {
   }
 };
 
-const markPaymentPaid = async (req, res) => {
-  const officerId = req.user.id;
-  const { order_id, paymentType, monthNumber, amount, paymentMethod = 'cash' } = req.body;
-
-  try {
-    // Check if already paid
-    const existingPayment = await prisma.orderPayment.findFirst({
-      where: {
-        order_id: parseInt(order_id),
-        paymentType,
-        monthNumber: monthNumber ? parseInt(monthNumber) : null,
-      },
-    });
-
-    if (existingPayment) {
-      return res.status(400).json({ success: false, error: 'Already paid' });
-    }
-
-    const payment = await prisma.orderPayment.create({
-      data: {
-        order_id: parseInt(order_id),
-        paymentType,
-        monthNumber: monthNumber ? parseInt(monthNumber) : null,
-        amount: parseFloat(amount),
-        paymentMethod,
-        collectedBy: officerId,
-      }
-    });
-
-    return res.json({ success: true, data: payment, message: 'Payment recorded successfully' });
-  } catch (error) {
-    console.error('markPaymentPaid error:', error);
-    return res.status(500).json({ success: false, error: 'Failed to record payment' });
-  }
-};
 
 const getCollectionStats = async (req, res) => {
   const officerId = req.user.id;
 
   try {
-    const cashInHand = await prisma.orderPayment.aggregate({
+    const cashInHand = await prisma.cashInHand.aggregate({
       where: {
-        collectedBy: officerId,
-        is_submitted: false,
+        officer_id: officerId,
+        status: 'pending',
       },
       _sum: { amount: true },
     });
 
-    const recentCollections = await prisma.orderPayment.findMany({
-      where: { collectedBy: officerId },
+    const recentCollections = await prisma.cashInHand.findMany({
+      where: { officer_id: officerId },
       orderBy: { created_at: 'desc' },
       take: 10,
-      include: { order: { select: { customer_name: true, order_ref: true } } }
+      include: { order: { select: { order_ref: true } } }
     });
 
     return res.json({
       success: true,
       data: {
         cashInHand: cashInHand._sum.amount || 0,
-        recentCollections
+        recentCollections: recentCollections.map(c => ({
+          ...c,
+          customer_name: c.customer_name,
+          paymentType: 'installment'
+        }))
       }
     });
   } catch (error) {
@@ -401,41 +456,31 @@ const getDueOverdueInstallments = async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
       where: { recovery_officer_id: officerId, is_delivered: true },
-      include: { payments: true, delivery: true }
+      include: { installment_ledger: true, delivery: true }
     });
 
     const overdue = [];
     const now = new Date();
 
     for (const order of orders) {
-      const deliveryDate = order.delivery?.end_time || order.updated_at;
-      const totalMonths = order.months || 0;
-      const monthlyAmount = order.monthly_amount || 0;
+      if (!order.installment_ledger) continue;
 
-      let current = new Date(deliveryDate);
-      current.setMonth(current.getMonth() + 1);
-      current.setDate(5);
+      const rows = Array.isArray(order.installment_ledger.ledger_rows) ? order.installment_ledger.ledger_rows : [];
 
-      for (let i = 0; i < totalMonths; i++) {
-        const mNum = i + 1;
-        const dueDate = new Date(current);
-
-        if (dueDate < now) {
-          const isPaid = order.payments.some(p => p.paymentType === 'installment' && p.monthNumber === mNum);
-          if (!isPaid) {
-            overdue.push({
-              order_id: order.id,
-              order_ref: order.order_ref,
-              customer_name: order.customer_name,
-              whatsapp_number: order.whatsapp_number,
-              address: order.address,
-              monthNumber: mNum,
-              dueDate: dueDate.toISOString().split('T')[0],
-              amount: monthlyAmount,
-            });
-          }
+      for (const row of rows) {
+        const dueDate = new Date(row.due_date || row.dueDate);
+        if (dueDate < now && row.status !== 'paid') {
+          overdue.push({
+            order_id: order.id,
+            order_ref: order.order_ref,
+            customer_name: order.customer_name,
+            whatsapp_number: order.whatsapp_number,
+            address: order.address,
+            monthNumber: row.month,
+            dueDate: dueDate.toISOString().split('T')[0],
+            amount: row.amount || row.dueAmount,
+          });
         }
-        current.setMonth(current.getMonth() + 1);
       }
     }
     return res.json({ success: true, data: { overdue } });
@@ -449,53 +494,244 @@ const submitCollections = async (req, res) => {
   const officerId = req.user.id;
 
   try {
-    const unsubmitted = await prisma.orderPayment.count({
+    const unsubmitted = await prisma.cashInHand.count({
       where: {
-        collectedBy: officerId,
-        is_submitted: false,
+        officer_id: officerId,
+        status: 'pending',
       }
     });
 
-    // Get the total amount to submit
-    const unsubmittedPayments = await prisma.orderPayment.aggregate({
+    const unsubmittedAgg = await prisma.cashInHand.aggregate({
       where: {
-        collectedBy: officerId,
-        is_submitted: false,
+        officer_id: officerId,
+        status: 'pending',
       },
       _sum: { amount: true }
     });
-    const totalAmount = unsubmittedPayments._sum.amount || 0;
 
-    const updated = await prisma.orderPayment.updateMany({
-      where: {
-        collectedBy: officerId,
-        is_submitted: false,
-      },
+    const totalAmount = unsubmittedAgg._sum.amount || 0;
+
+    return res.json({
+      success: true,
       data: {
-        is_submitted: true,
-        submitted_at: new Date(),
+        count: unsubmitted,
+        totalAmount,
+        message: 'Pending collections ready for outlet submission'
+      }
+    });
+  } catch (error) {
+    console.error('submitCollections error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
+// =====================
+// INSTALLMENT PAYMENT MODULE (RECOVERY)
+// =====================
+
+// API 1: OTP generate karke purchaser ko bhejo
+const generateInstallmentOtp = async (req, res) => {
+  const { order_id } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: { include: { purchaser: true } }
       }
     });
 
-    // We assume the officer is assigned to an outlet
-    const officer = await prisma.user.findUnique({ where: { id: officerId } });
-    if (officer && officer.outlet_id && totalAmount > 0) {
-        await updateCashRegister(null, officer.outlet_id, 'cash_from_recovery', totalAmount, 'add');
-    }
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-    return res.json({ success: true, data: { count: updated.count, message: 'Collections submitted successfully' } });
+    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    if (!phone) return res.status(400).json({ success: false, message: 'Customer phone number not found' });
+
+    const otp = await saveOTP(phone, 'installment_payment');
+    await sendOTP(phone, otp);
+
+    return res.json({ success: true, message: 'OTP sent to customer' });
   } catch (error) {
-    console.error('submitCollections error:', error);
-    return res.status(500).json({ success: false, error: 'Failed to submit collections' });
+    console.error('generateInstallmentOtp error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
+
+// API for logging visit ONLY (when payment is NOT collected)
+const logRecoveryVisit = async (req, res) => {
+  const { order_id, latitude, longitude, customer_feedback, visit_notes } = req.body;
+  const officerId = req.user?.id || 24;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const visit = await prisma.recoveryVisit.create({
+      data: {
+        order_id: parseInt(order_id),
+        officer_id: officerId,
+        latitude: latitude ? parseFloat(latitude) : null,
+        longitude: longitude ? parseFloat(longitude) : null,
+        visit_time: new Date(),
+        customer_feedback,
+        visit_notes,
+        payment_collected: false,
+        amount_collected: null,
+      }
+    });
+
+    return res.json({ success: true, message: 'Recovery visit logged successfully', visit });
+  } catch (error) {
+    console.error('logRecoveryVisit error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
+// API 2: OTP verify karo + payment submit karo (exact outlet pattern)
+const verifyAndSubmitInstallment = async (req, res) => {
+  const {
+    order_id, month_number, otp, amount, payment_method, feedback, fuelCharges,
+    latitude, longitude, visit_notes
+  } = req.body;
+  const officerId = req.user?.id;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: { include: { purchaser: true } },
+        installment_ledger: true,
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
+      }
+    });
+
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    // OTP verify karo
+    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    const otpResult = await verifyOTP(phone, otp, 'installment_payment');
+    if (!otpResult.valid) {
+      return res.status(400).json({ success: false, message: otpResult.message });
+    }
+
+    // Ledger check
+    const ledger = order.installment_ledger;
+    if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
+
+    let rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+    const rowIndex = rows.findIndex(r => (r.month == month_number || r.monthNumber == month_number));
+
+    if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
+    if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
+
+    const paidAmount = parseFloat(amount || rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
+
+    // Fetch real product name from inventory using IMEI
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+    let finalProductName = order.product_name;
+
+    if (imeiSerial) {
+      const invInfo = await prisma.outletInventory.findFirst({
+        where: { imei_serial: imeiSerial },
+        select: { product_name: true }
+      });
+      if (invInfo?.product_name) {
+        finalProductName = invInfo.product_name;
+      }
+    }
+
+    // DB Transaction
+    await prisma.$transaction(async (tx) => {
+      rows[rowIndex].status = 'paid';
+      rows[rowIndex].paid_at = new Date();
+      rows[rowIndex].payment_method = payment_method;
+      rows[rowIndex].feedback = feedback;
+      rows[rowIndex].collected_by = officerId;
+      rows[rowIndex].fuel_charges = parseFloat(fuelCharges || 0);
+
+      await tx.installmentLedger.update({
+        where: { id: ledger.id },
+        data: { ledger_rows: rows }
+      });
+
+      // CashInHand entry (sirf cash payment ke liye)
+      const isCash = ['cash', 'recovery_cash', 'recovery cash'].includes(payment_method?.toLowerCase());
+      if (isCash) {
+        await tx.cashInHand.create({
+          data: {
+            officer_id: officerId,
+            order_id: order.id,
+            amount: paidAmount,
+            status: 'pending',
+            customer_name: order.verification?.purchaser?.name || order.customer_name,
+            product_name: finalProductName,
+            imei_serial: imeiSerial || order.imei_serial,
+            payment_method: payment_method
+          }
+        });
+      }
+
+      // Log the recovery visit along with payment
+      await tx.recoveryVisit.create({
+        data: {
+          order_id: parseInt(order_id),
+          officer_id: officerId,
+          latitude: latitude ? parseFloat(latitude) : null,
+          longitude: longitude ? parseFloat(longitude) : null,
+          visit_time: new Date(),
+          customer_feedback: feedback,
+          visit_notes: visit_notes,
+          payment_collected: true,
+          amount_collected: paidAmount,
+        }
+      });
+    });
+
+    // Wati Notifications
+    const customerName = order.verification?.purchaser?.name || order.customer_name;
+
+    sendInstallmentPaymentReceipt(phone, {
+      customerName,
+      amount: paidAmount,
+      productName: finalProductName,
+      orderRef: order.order_ref,
+      date: new Date().toLocaleDateString('en-PK')
+    }).catch(err => console.error('Wati Receipt Error:', err));
+
+    const nextRow = rows[rowIndex + 1];
+    if (nextRow) {
+      sendNextInstallmentReminder(phone, {
+        customerName,
+        productName: finalProductName,
+        monthlyAmount: nextRow.amount || nextRow.dueAmount,
+        dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
+        ledgerUrl: ledger.short_id ? `${process.env.LEDGER_BASE_URL}/api/ledger/pdf/${ledger.short_id}` : null
+      }).catch(err => console.error('Wati Reminder Error:', err));
+    }
+
+    return res.json({ success: true, message: 'Payment processed successfully' });
+  } catch (error) {
+    console.error('verifyAndSubmitInstallment error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+
 
 module.exports = {
   getAllRecoveryOfficers,
   getRecoveryOfficerStats,
   getRecoveryCustomers,
-  markPaymentPaid,
   getCollectionStats,
   getDueOverdueInstallments,
-  submitCollections
+  submitCollections,
+  generateInstallmentOtp,
+  verifyAndSubmitInstallment,
+  logRecoveryVisit
 };
+

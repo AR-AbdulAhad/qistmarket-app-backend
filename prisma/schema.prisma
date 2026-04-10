@@ -71,6 +71,7 @@ model User {
   verification_edit_history VerificationEditHistory[] @relation("user_edits")
   cash_in_hand             CashInHand[]            @relation("OfficerCashInHand")
   return_exchanges         ReturnExchange[]        @relation("OfficerReturnExchange")
+  recovery_visits          RecoveryVisit[]         @relation("OfficerRecoveryVisit")
 
   @@index([role_id])
   @@index([is_online])
@@ -137,6 +138,7 @@ model Order {
   cash_in_hand        CashInHand[]          @relation("OrderCashInHand")
   return_exchanges    ReturnExchange[]      @relation("OrderReturnExchange")
   installment_ledger  InstallmentLedger?
+  recovery_visits     RecoveryVisit[]       @relation("OrderRecoveryVisit")
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -575,7 +577,7 @@ model DeliveryUpload {
 
 model CashInHand {
   id                  Int      @id @default(autoincrement())
-  delivery_officer_id Int
+  officer_id          Int
   order_id            Int
   amount              Float
   status              String   @default("pending") // pending, paid
@@ -590,12 +592,12 @@ model CashInHand {
   created_at          DateTime @default(now())
   updated_at          DateTime @updatedAt
 
-  delivery_officer    User     @relation("OfficerCashInHand", fields: [delivery_officer_id], references: [id])
+  officer             User     @relation("OfficerCashInHand", fields: [officer_id], references: [id])
   order               Order    @relation("OrderCashInHand", fields: [order_id], references: [id])
   outlet              Outlet?  @relation("OutletCashInHand", fields: [outlet_id], references: [id])
   stock_transfer      StockTransfer? @relation(fields: [stock_transfer_id], references: [id])
 
-  @@index([delivery_officer_id])
+  @@index([officer_id])
   @@index([order_id])
   @@index([outlet_id])
   @@index([stock_transfer_id])
@@ -673,6 +675,7 @@ model OrderPayment {
   amount        Float
   paidAt        DateTime  @default(now())
   paymentMethod String?
+  feedback      String?
   collectedBy   Int?
   is_submitted  Boolean   @default(false)
   submitted_at  DateTime?
@@ -786,4 +789,25 @@ model InstallmentLedger {
   @@index([token])
   @@index([short_id])
   @@map("installment_ledgers")
+}
+
+model RecoveryVisit {
+  id                Int      @id @default(autoincrement())
+  order_id          Int
+  officer_id        Int
+  latitude          Float?
+  longitude         Float?
+  visit_time        DateTime @default(now())
+  customer_feedback String?  @db.Text
+  visit_notes       String?  @db.Text
+  payment_collected Boolean  @default(false)
+  amount_collected  Float?
+  created_at        DateTime @default(now())
+
+  order             Order    @relation("OrderRecoveryVisit", fields: [order_id], references: [id], onDelete: Cascade)
+  officer           User     @relation("OfficerRecoveryVisit", fields: [officer_id], references: [id])
+
+  @@index([order_id])
+  @@index([officer_id])
+  @@map("recovery_visits")
 }

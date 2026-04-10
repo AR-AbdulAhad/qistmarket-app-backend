@@ -115,8 +115,54 @@ const sendInstallmentLedger = async (phone, {
   return sendTemplate(phone, WATI_LEDGER_TEMPLATE, WATI_LEDGER_BROADCAST, parameters);
 };
 
+// ─── Template 3: Installment Received ──────────────────────────────────────
+// Params: customer_name, amount, product_name, order_ref, date
+const WATI_PAYMENT_RECEIVED_TEMPLATE = process.env.WATI_INSTALLMENT_RECEIVED_TEMPLATE || 'installment_received';
+const WATI_PAYMENT_RECEIVED_BROADCAST = process.env.WATI_INSTALLMENT_RECEIVED_TEMPLATE || 'installment_received';
+
+const sendInstallmentPaymentReceipt = async (phone, {
+  customerName,
+  amount,
+  productName,
+  orderRef,
+  date,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: String(amount || 0) },
+    { name: '3', value: productName || 'N/A' },
+    { name: '4', value: orderRef || 'N/A' },
+    { name: '5', value: date || new Date().toDateString() },
+  ];
+  return sendTemplate(phone, WATI_PAYMENT_RECEIVED_TEMPLATE, WATI_PAYMENT_RECEIVED_BROADCAST, parameters);
+};
+
+// ─── Template 4: Next Month Reminder ──────────────────────────────────────
+// Params: customer_name, product_name, monthly_amount, due_date, ledger_url
+const WATI_REMINDER_TEMPLATE = process.env.WATI_INSTALLMENT_REMINDER_TEMPLATE || 'installment_reminder';
+const WATI_REMINDER_BROADCAST = process.env.WATI_INSTALLMENT_REMINDER_TEMPLATE || 'installment_reminder';
+
+const sendNextInstallmentReminder = async (phone, {
+  customerName,
+  productName,
+  monthlyAmount,
+  dueDate,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: productName || 'N/A' },
+    { name: '3', value: String(monthlyAmount || 0) },
+    { name: '4', value: dueDate || 'N/A' },
+    { name: '5', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_REMINDER_TEMPLATE, WATI_REMINDER_BROADCAST, parameters);
+};
+
 module.exports = {
   sendOTP,
   sendDeliveryConfirmation,
   sendInstallmentLedger,
+  sendInstallmentPaymentReceipt,
+  sendNextInstallmentReminder,
 };

@@ -1,7 +1,10 @@
 const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 const jwt = require('jsonwebtoken');
 const puppeteer = require('puppeteer');
-const prisma = new PrismaClient();
+const { saveOTP, verifyOTP } = require('../utils/otpUtils');
+const { sendOTP, sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const logoDataURI = '';
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
@@ -32,7 +35,15 @@ async function fetchLedger(where) {
       order: {
         include: {
           verification: { include: { purchaser: true } },
-          cash_in_hand: { take: 1, orderBy: { created_at: 'desc' } },
+          cash_in_hand: {
+            take: 1,
+            orderBy: { created_at: 'desc' },
+            include: {
+              officer: {
+                select: { full_name: true, phone: true }
+              }
+            }
+          },
         },
       },
       delivery: {
@@ -58,11 +69,16 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
   const address = purchaser?.present_address || 'N/A';
 
   const cashRecord = order.cash_in_hand?.[0];
-  const plan = delivery?.selected_plan
-    ? (typeof delivery.selected_plan === 'string'
-      ? JSON.parse(delivery.selected_plan)
-      : delivery.selected_plan)
-    : null;
+  const collectorName = cashRecord?.officer?.full_name || null;
+
+  let plan = null;
+  if (delivery?.selected_plan) {
+    try {
+      plan = typeof delivery.selected_plan === 'string'
+        ? JSON.parse(delivery.selected_plan)
+        : delivery.selected_plan;
+    } catch (e) { plan = null; }
+  }
 
   const productName = cashRecord?.product_name
     || stockItem?.product_name
@@ -71,7 +87,7 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     || order.product_name
     || 'N/A';
 
-  const imei = cashRecord?.imei_serial || delivery?.product_imei || order.imei_serial || 'N/A';
+  const imei = cashRecord?.imei_serial || delivery?.product_imei || 'N/A';
 
   const colorVariant = (() => {
     if (cashRecord?.color_variant) {
@@ -86,19 +102,25 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     return color ? `${color}${variant ? ' / ' + variant : ''}` : 'N/A';
   })();
 
-  const advanceAmount = cashRecord?.amount
-    || plan?.advance
-    || plan?.advance_amount
-    || plan?.advancePayment
-    || plan?.advance_payment
-    || order.advance_amount
-    || 0;
   const deliveryDate = formatDate(delivery?.end_time || ledger.created_at);
 
-  const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
-  const totalAmount = rows.reduce((s, r) => s + (r.amount || 0), 0);
-  const paidAmount = rows.filter(r => r.status === 'paid').reduce((s, r) => s + (r.amount || 0), 0);
+  // ── Parse ledger rows: month=0 is Advance, month>0 are Installments ──────
+  const allRows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+  const advanceRow = allRows.find(r => r.month === 0) || null;
+  const installmentRows = allRows.filter(r => r.month > 0);
+
+  // Advance amount: prefer ledger row (month 0), fallback to cashRecord/plan/order
+  const advanceAmount = advanceRow?.amount
+    || cashRecord?.amount
+    || plan?.advance || plan?.advance_amount || plan?.advancePayment || plan?.advance_payment
+    || order.advance_amount
+    || 0;
+
+  // Stats cover ALL rows (advance + installments) — no double counting
+  const totalAmount = allRows.reduce((s, r) => s + (r.amount || 0), 0);
+  const paidAmount = allRows.filter(r => r.status === 'paid').reduce((s, r) => s + (r.amount || 0), 0);
   const remainingAmount = totalAmount - paidAmount;
+  const paidInstallmentCount = installmentRows.filter(r => r.status === 'paid').length;
 
   const printBtnHtml = showPrintBtn
     ? `<button class="print-btn no-print" onclick="window.print()">🖨️ PDF Save / Print Karen</button>`
@@ -444,6 +466,16 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       background: #fff5f0;
     }
 
+    .ledger-table tbody tr.advance-row {
+      background: #fffbeb;
+      border-left: 3px solid #f59e0b;
+    }
+
+    .ledger-table tbody tr.advance-row td {
+      color: #92400e;
+      font-weight: 600;
+    }
+
     tfoot tr {
       background: #f9fafb;
       font-weight: 800;
@@ -523,11 +555,15 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
   <div class="stats-grid">
     <div class="stat-item">
       <div class="stat-value">${formatPKR(totalAmount)}</div>
-      <div class="stat-label">Total Amount</div>
+      <div class="stat-label">Grand Total</div>
     </div>
     <div class="stat-item">
-      <div class="stat-value">${formatPKR(paidAmount + Number(advanceAmount))}</div>
-      <div class="stat-label">Amount Paid</div>
+      <div class="stat-value">${formatPKR(advanceAmount)}</div>
+      <div class="stat-label">Advance Paid</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">${formatPKR(paidAmount)}</div>
+      <div class="stat-label">Total Paid</div>
     </div>
     <div class="stat-item">
       <div class="stat-value">${formatPKR(remainingAmount)}</div>
@@ -551,8 +587,9 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
         <div class="info-row"><span class="info-label">Product</span><span class="info-val">${productName}</span></div>
         <div class="info-row"><span class="info-label">IMEI / Serial</span><span class="info-val">${imei}</span></div>
         <div class="info-row"><span class="info-label">Color / Variant</span><span class="info-val">${colorVariant}</span></div>
-        <div class="info-row"><span class="info-label">Stock Source</span><span class="info-val">${stockItem ? 'Outlet Inventory' : cashRecord ? 'Delivery Snapshot' : 'Order Record'}</span></div>
         <div class="info-row"><span class="info-label">Advance Paid</span><span class="info-val">${formatPKR(advanceAmount)}</span></div>
+        <div class="info-row"><span class="info-label">Installments</span><span class="info-val">${paidInstallmentCount} / ${installmentRows.length} Paid</span></div>
+        ${collectorName ? `<div class="info-row"><span class="info-label">Collected By</span><span class="info-val">${collectorName}</span></div>` : ''}
       </div>
     </div>
   </div>
@@ -570,11 +607,16 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
         </tr>
       </thead>
       <tbody>
-        ${rows.map((row, i) => {
-    const isNext = row.status === 'pending' && rows.slice(0, i).every(r => r.status === 'paid');
-    return `<tr class="${isNext ? 'current-month' : ''}">
-            <td>${row.month}</td>
-            <td>Month ${row.month}${isNext ? ' ⬅ Next' : ''}</td>
+        ${allRows.map((row) => {
+    const isAdvance = row.month === 0;
+    const rowLabel = row.label || (isAdvance ? 'Advance Payment' : `Month ${row.month}`);
+    const rowNum = isAdvance ? '✦' : row.month;
+    // "Next" applies only to regular installment rows
+    const priorInstallments = installmentRows.filter(r => r.month < row.month);
+    const isNext = !isAdvance && row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
+    return `<tr class="${isAdvance ? 'advance-row' : ''} ${isNext ? 'current-month' : ''}">
+            <td>${rowNum}</td>
+            <td>${rowLabel}${isNext ? ' ⬅ Next' : ''}</td>
             <td>${formatDate(row.due_date)}</td>
             <td>${formatPKR(row.amount)}</td>
             <td>${statusBadge(row.status)}</td>
@@ -584,7 +626,7 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       </tbody>
       <tfoot>
         <tr>
-          <td colspan="3"><strong>Total Installments</strong></td>
+          <td colspan="3"><strong>Grand Total (Advance + Installments)</strong></td>
           <td><strong>${formatPKR(totalAmount)}</strong></td>
           <td colspan="2"><strong>Remaining: ${formatPKR(remainingAmount)}</strong></td>
         </tr>
@@ -687,4 +729,125 @@ function renderErrorPage(message) {
   <p style="margin-top:16px;font-size:13px;color:#94a3b8;">QistMarket Support</p></div></body></html>`;
 }
 
-module.exports = { viewLedger, downloadLedgerPdf };
+const generateInstallmentPaymentOtp = async (req, res) => {
+  const { order_id } = req.body;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: { include: { purchaser: true } }
+      }
+    });
+
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    if (!phone) return res.status(400).json({ success: false, message: 'Customer phone number not found' });
+
+    const otp = await saveOTP(phone, 'installment_payment');
+    await sendOTP(phone, otp);
+
+    return res.json({ success: true, message: 'OTP sent to customer' });
+  } catch (error) {
+    console.error('generateInstallmentPaymentOtp error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const verifyInstallmentPaymentOtp = async (req, res) => {
+  const { order_id, month_number, otp, feedback, payment_method = 'Cash' } = req.body;
+  const outlet_id = req.user.outlet_id;
+
+  if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user' });
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: { include: { purchaser: true } },
+        installment_ledger: true
+      }
+    });
+
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    const verification = await verifyOTP(phone, otp, 'installment_payment');
+
+    if (!verification.valid) {
+      return res.status(400).json({ success: false, message: verification.message });
+    }
+
+    const ledger = order.installment_ledger;
+    if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
+
+    let rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+    const rowIndex = rows.findIndex(r => (r.month == month_number || r.monthNumber == month_number));
+
+    if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
+    if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
+
+    // Update row
+    const paidAmount = rows[rowIndex].amount || rows[rowIndex].dueAmount || 0;
+    rows[rowIndex].status = 'paid';
+    rows[rowIndex].paid_at = new Date();
+    rows[rowIndex].payment_method = payment_method;
+    rows[rowIndex].feedback = feedback;
+
+    // Save Ledger
+    await prisma.installmentLedger.update({
+      where: { id: ledger.id },
+      data: { ledger_rows: rows }
+    });
+
+    // Create OrderPayment record
+    await prisma.orderPayment.create({
+      data: {
+        order_id: order.id,
+        paymentType: 'installment',
+        monthNumber: parseInt(month_number),
+        amount: parseFloat(paidAmount),
+        paymentMethod: payment_method,
+        collectedBy: req.user.id
+      }
+    });
+
+    // Update Cash Register
+    await updateCashRegister(null, outlet_id, 'installments_received', paidAmount, 'add');
+
+    // Send Wati Receipt
+    const customerName = order.verification?.purchaser?.name || order.customer_name;
+    sendInstallmentPaymentReceipt(phone, {
+      customerName,
+      amount: paidAmount,
+      productName: order.product_name,
+      orderRef: order.order_ref,
+      date: new Date().toLocaleDateString('en-PK')
+    });
+
+    // Send Next Month Reminder if exists
+    const nextRow = rows[rowIndex + 1];
+    if (nextRow) {
+      sendNextInstallmentReminder(phone, {
+        customerName,
+        productName: order.product_name,
+        monthlyAmount: nextRow.amount || nextRow.dueAmount,
+        dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
+        ledgerUrl: ledger.short_id ? `${process.env.LEDGER_BASE_URL}/api/ledger/pdf/${ledger.short_id}` : null
+      });
+    }
+
+    return res.json({ success: true, message: 'Payment processed successfully' });
+  } catch (error) {
+    console.error('verifyInstallmentPaymentOtp error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+module.exports = {
+  viewLedger,
+  downloadLedgerPdf,
+  generateInstallmentPaymentOtp,
+  verifyInstallmentPaymentOtp
+};

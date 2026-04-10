@@ -1138,7 +1138,7 @@ const getVerificationByOrderId = async (req, res) => {
     if (verification.purchaser) {
       verification.purchaser.edit_history = purchaserHistory;
     }
-    
+
     verification.grantors = verification.grantors.map(grantor => {
       if (grantor.id === verification.grantors[0]?.id) {
         return { ...grantor, edit_history: grantor1History };
@@ -1243,7 +1243,7 @@ const submitVerificationReview = async (req, res) => {
     // Rule: 2 Approvals = Final Approved
     if (approvesCount >= 2) {
       orderStatusUpdate = 'approved';
-    } 
+    }
     // Rule: 2 Rejections = Auto Cancelled
     else if (rejectsCount >= 2) {
       orderStatusUpdate = 'rejected';
@@ -1457,25 +1457,31 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
 };
 
 const getMyCustomersWithOrdersAndLedger = async (req, res) => {
-  const now = new Date();
-  let startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  let endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-
-  if (req.query.year && req.query.month) {
-    const y = parseInt(req.query.year);
-    const m = parseInt(req.query.month) - 1;
-    if (!isNaN(y) && !isNaN(m) && m >= 0 && m <= 11) {
-      startOfMonth = new Date(y, m, 1);
-      endOfMonth = new Date(y, m + 1, 1);
-    }
-  }
   try {
     const orders = await prisma.order.findMany({
-      where: {}, // No filters - show all orders globally regardless of status or date
+      where: {
+        is_delivered: true,
+      },
       include: {
-        verification: { select: { status: true, start_time: true, end_time: true } },
-        delivery: { select: { status: true, end_time: true, verified: true } },
-        payments: true,
+        verification: {
+          include: {
+            purchaser: true,
+            documents: {
+              where: { document_type: 'photo', person_type: 'purchaser' },
+              orderBy: { uploaded_at: 'desc' },
+              take: 1,
+            },
+          },
+        },
+        delivery: {
+          include: {
+            installment_ledger: true,
+          },
+        },
+        cash_in_hand: {
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
       },
       orderBy: [{ customer_name: 'asc' }, { created_at: 'desc' }],
     });
@@ -1483,8 +1489,25 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
     if (orders.length === 0) {
       return res.status(200).json({
         success: true,
-        data: { month: startOfMonth.toISOString().slice(0, 7), totalCustomers: 0, totalOrders: 0, paidOrders: 0, pendingOrders: 0, customers: [] },
+        data: { totalCustomers: 0, totalOrders: 0, customers: [] },
       });
+    }
+
+    // ── Pre-fetch Inventory details based on IMEI ──────────────────
+    const allImeis = orders
+      .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+      .filter(Boolean);
+
+    const inventories = await prisma.outletInventory.findMany({
+      where: { imei_serial: { in: allImeis } },
+      select: { imei_serial: true, product_name: true, color_variant: true }
+    });
+
+    const inventoryMap = new Map();
+    for (const inv of inventories) {
+      if (inv.imei_serial) {
+        inventoryMap.set(inv.imei_serial, inv);
+      }
     }
 
     const customerMap = new Map();
@@ -1492,141 +1515,207 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
     for (const order of orders) {
       const key = (order.whatsapp_number || `unknown-${order.id}`).trim();
 
+      const purchaser = order.verification?.purchaser || null;
+      const cashInHand = order.cash_in_hand?.[0] || null;
+      const delivery = order.delivery;
+      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
+
+      // ── Customer details: purchaser se, fallback Order ────────
+      const customerName = purchaser?.name || order.customer_name;
+      const fatherHusbandName = purchaser?.father_husband_name || null;
+      const cnicNumber = purchaser?.cnic_number || null;
+      const presentAddress = purchaser?.present_address || order.address || null;
+      const permanentAddress = purchaser?.permanent_address || null;
+      const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
+      const nearestLocation = purchaser?.nearest_location || null;
+
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
-            name: order.customer_name,
+            name: customerName,
+            father_husband_name: fatherHusbandName,
+            cnic_number: cnicNumber,
             whatsapp_number: order.whatsapp_number,
-            address: order.address,
+            telephone_number: telephoneNumber,
+            present_address: presentAddress,
+            permanent_address: permanentAddress,
+            nearest_location: nearestLocation,
             city: order.city,
             area: order.area,
+            profile_photo: profilePhoto,
           },
           orders: [],
-          ledgerSummary: { totalOrders: 0, paidOrders: 0, pendingOrders: 0, totalAdvanceReceived: 0, totalPendingAmount: 0 },
+          ledgerSummary: {
+            totalOrders: 0,
+            totalAdvanceReceived: 0,
+            totalPaid: 0,
+            totalRemaining: 0,
+          },
         });
       }
 
       const group = customerMap.get(key);
 
-      const isDelivered = order.is_delivered || (order.delivery?.status === 'completed');
-      const deliveryDate = isDelivered ? (order.delivery?.end_time || order.updated_at) : null;
+      // ── Delivery date ──────────────────────────────────────────
+      const deliveryDate = delivery?.end_time || order.updated_at;
 
-      const advanceAmount = order.advance_amount || 0;
-      const monthlyAmount = order.monthly_amount || 0;
-      const totalMonths = order.months || 0;
+      // ── Product info: Fetch from Inventory via IMEI first ───────────────────────────
+      const imeiSerial = cashInHand?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
 
-      // Actual payments from database
-      const dbPayments = order.payments || [];
+      const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name;
+      const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      const hasPaidAdvance = dbPayments.some(p => p.paymentType === 'advance') || isDelivered;
+      // ── Advance: CashInHand.amount ─────────────────────────────
+      // Default from cashInHand (fallback if no ledger row 0 exists)
+      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
+      let hasPaidAdvance = !!cashInHand;
+      let advancePaidAt = cashInHand?.created_at || null;
+      let advancePaymentMethod = cashInHand?.payment_method || null;
 
-      let advancePayment = {
-        amount: advanceAmount,
-        paid: hasPaidAdvance,
-        paidAt: dbPayments.find(p => p.paymentType === 'advance')?.paidAt || (isDelivered ? deliveryDate : null),
-        status: hasPaidAdvance ? 'paid' : 'pending',
-        paidVia: dbPayments.find(p => p.paymentType === 'advance')?.paymentMethod || (isDelivered ? 'delivery' : null),
-      };
-
-      let installmentLedger = [];
-      let paidInstallments = 0;
-      let pendingInstallments = totalMonths;
-
-      if (isDelivered && deliveryDate && totalMonths > 0) {
-        let current = new Date(deliveryDate);
-        current.setMonth(current.getMonth() + 1);
-        current.setDate(5); // Qist Market standard due day
-
-        for (let i = 0; i < totalMonths; i++) {
-          const mNum = i + 1;
-          const dueDate = new Date(current);
-          const payment = dbPayments.find(p => p.paymentType === 'installment' && p.monthNumber === mNum);
-
-          if (payment) {
-            paidInstallments++;
-            pendingInstallments--;
-          }
-
-          installmentLedger.push({
-            monthNumber: mNum,
-            dueDate: dueDate.toISOString().split('T')[0],
-            yearMonth: dueDate.toISOString().slice(0, 7),
-            dueAmount: monthlyAmount,
-            paidAmount: payment ? payment.amount : 0,
-            remainingAmount: payment ? 0 : monthlyAmount,
-            status: payment ? 'paid' : (new Date() > dueDate ? 'overdue' : 'pending'),
-            paidAt: payment ? payment.paidAt : null,
-          });
-
-          // Move to next month
-          current.setMonth(current.getMonth() + 1);
-        }
+      // ── Plan info: Delivery.selected_plan se ──────────────────
+      let selectedPlan = delivery?.selected_plan || null;
+      if (typeof selectedPlan === 'string') {
+        try { selectedPlan = JSON.parse(selectedPlan); } catch { selectedPlan = null; }
       }
 
-      const totalPaid = dbPayments.reduce((sum, p) => sum + p.amount, 0);
-      const totalDue = advanceAmount + (monthlyAmount * totalMonths);
-      const totalRemaining = Math.max(0, totalDue - totalPaid);
+      // ── Installment Ledger: parse ledger_rows ─────────────────
+      // month === 0  →  Advance Payment row
+      // month  > 0  →  Monthly installment rows
+      let installmentLedger = [];
 
-      const orderEntry = {
+      if (installmentLedgerModel?.ledger_rows) {
+        const allLedgerRows = Array.isArray(installmentLedgerModel.ledger_rows)
+          ? installmentLedgerModel.ledger_rows
+          : [];
+
+        // Extract advance from month 0 row
+        const advanceLedgerRow = allLedgerRows.find(r => r.month === 0);
+        if (advanceLedgerRow) {
+          advanceAmount = Number(advanceLedgerRow.amount || 0);
+          hasPaidAdvance = advanceLedgerRow.status === 'paid';
+          advancePaidAt = advanceLedgerRow.paid_at || advanceLedgerRow.paidAt || null;
+          advancePaymentMethod = advanceLedgerRow.payment_method || advanceLedgerRow.paymentMethod || 'Cash';
+        }
+
+        // Map only month > 0 rows as installments
+        installmentLedger = allLedgerRows
+          .filter(r => r.month > 0)
+          .map((row) => {
+            const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
+            const rowStatus = row.status || 'pending';
+            const isPaid = rowStatus === 'paid';
+            return {
+              monthNumber: row.month,
+              label: row.label || `Month ${row.month}`,
+              dueDate: row.due_date || row.dueDate || null,
+              dueAmount: rowDueAmount,
+              paidAmount: isPaid ? rowDueAmount : 0,
+              remainingAmount: isPaid ? 0 : rowDueAmount,
+              status: rowStatus,
+              paidAt: row.paid_at || row.paidAt || null,
+              paymentMethod: row.payment_method || row.paymentMethod || null,
+            };
+          });
+      }
+
+      const advancePayment = {
+        amount: advanceAmount,
+        paid: hasPaidAdvance,
+        paidAt: advancePaidAt,
+        paymentMethod: advancePaymentMethod,
+        status: hasPaidAdvance ? 'paid' : 'pending',
+      };
+
+      // Use actual row amounts (not plan formula) for accurate totals
+      const monthlyAmount = installmentLedger[0]?.dueAmount
+        || Number(selectedPlan?.monthly_amount || selectedPlan?.monthlyAmount || 0);
+      const totalMonths = installmentLedger.length
+        || Number(selectedPlan?.months || selectedPlan?.totalMonths || 0);
+
+      const paidInstallments = installmentLedger.filter((r) => r.status === 'paid').length;
+      const pendingInstallments = installmentLedger.filter((r) => r.status !== 'paid').length;
+
+      // ── Financial Summary ──────────────────────────────────────
+      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+      const totalInstallmentPaid = installmentLedger
+        .filter((r) => r.status === 'paid')
+        .reduce((sum, r) => sum + r.dueAmount, 0);
+      const totalInstallmentRemaining = Math.max(0, totalInstallmentDue - totalInstallmentPaid);
+
+      const grandTotalDue = advanceAmount + totalInstallmentDue;
+      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
+      const grandTotalRemaining = Math.max(0, grandTotalDue - grandTotalPaid);
+
+      group.orders.push({
         order_id: order.id,
         order_ref: order.order_ref,
         token_number: order.token_number,
-        product_name: order.product_name,
-        total_amount: order.total_amount,
-        advance_amount: advanceAmount,
-        monthly_amount: monthlyAmount,
-        months: totalMonths,
         status: order.status,
+        is_delivered: true,
+        delivery_date: deliveryDate ? deliveryDate.toISOString() : null,
         created_at: order.created_at.toISOString(),
-        is_delivered: isDelivered,
-        delivered_at: deliveryDate ? deliveryDate.toISOString() : null,
         verification_status: order.verification?.status || null,
 
-        ledgerHistory: {
-          advancePayment,
-          installmentLedger,
+        product_details: {
+          product_name: productName,
+          imei_serial: imeiSerial,
+          color_variant: colorVariant,
+        },
+
+        plan: {
+          selected_plan: selectedPlan,
+          advance_amount: advanceAmount,       // CashInHand.amount
+          monthly_amount: monthlyAmount,       // selectedPlan.monthlyAmount (camelCase fixed)
+          months: totalMonths,         // selectedPlan.months
+          total_plan_value: grandTotalDue,       // advance + (monthly * months)
+        },
+
+        ledger: {
+          advance_payment: advancePayment,
+          installment_ledger: installmentLedger,
+          ledger_token: installmentLedgerModel?.short_id || null,
           summary: {
-            totalDue,
-            totalPaid,
-            totalRemaining,
+            totalInstallmentDue,
+            totalInstallmentPaid,
+            totalInstallmentRemaining,
+            grandTotalDue,
+            grandTotalPaid,
+            grandTotalRemaining,
             paidInstallments,
             pendingInstallments,
-            installmentsStarted: isDelivered && totalMonths > 0,
-            firstInstallmentDate: installmentLedger[0]?.dueDate || null,
+            installmentsStarted: totalMonths > 0,
+            firstInstallmentDate: installmentLedger[0]?.dueDate ?? null,
           },
         },
-      };
+      });
 
-      group.orders.push(orderEntry);
-
+      // ── Customer ledger summary update ─────────────────────────
       group.ledgerSummary.totalOrders += 1;
       group.ledgerSummary.totalAdvanceReceived += advanceAmount;
-
-      if (isDelivered) {
-        group.ledgerSummary.paidOrders += 1;
-      } else {
-        group.ledgerSummary.pendingOrders += 1;
-        group.ledgerSummary.totalPendingAmount += totalRemaining;
-      }
+      group.ledgerSummary.totalPaid += grandTotalPaid;
+      group.ledgerSummary.totalRemaining += grandTotalRemaining;
     }
 
-    const customers = Array.from(customerMap.values())
-      .sort((a, b) => a.customer.name.localeCompare(b.customer.name));
+    const customers = Array.from(customerMap.values()).sort((a, b) =>
+      a.customer.name.localeCompare(b.customer.name)
+    );
 
     return res.status(200).json({
       success: true,
       data: {
-        month: startOfMonth.toISOString().slice(0, 7),
         totalCustomers: customers.length,
         totalOrders: orders.length,
-        paidOrders: orders.filter(o => o.is_delivered || o.delivery?.status === 'completed').length,
-        pendingOrders: orders.length - orders.filter(o => o.is_delivered || o.delivery?.status === 'completed').length,
         customers,
       },
     });
   } catch (error) {
     console.error('Error in getMyCustomersWithOrdersAndLedger:', error);
-    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
   }
 };
 

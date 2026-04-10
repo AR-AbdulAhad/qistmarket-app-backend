@@ -128,14 +128,38 @@ const getReportSummary = async (req, res) => {
         where: baseWhere,
         _count: { _all: true },
       }),
-      prisma.orderPayment.groupBy({
-        by: ['paymentType'],
-        _sum: { amount: true },
+      prisma.installmentLedger.findMany({
         where: {
           order: baseWhere,
         },
+        select: {
+          ledger_rows: true
+        }
       }),
     ]);
+
+    // Manually aggregate collections from ledger rows in JS (since it's a JSON field)
+    let totalInstallments = 0;
+    let totalAdvance = 0;
+
+    for (const ledger of collectionAgg) {
+      const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+      for (const row of rows) {
+        if (row.status === 'paid') {
+          const amount = parseFloat(row.amount || row.dueAmount || 0);
+          if (row.month === 0) {
+            totalAdvance += amount;
+          } else {
+            totalInstallments += amount;
+          }
+        }
+      }
+    }
+
+    const collectionResults = [
+      { paymentType: 'advance', _sum: { amount: totalAdvance } },
+      { paymentType: 'installment', _sum: { amount: totalInstallments } }
+    ];
 
     const dailyMap = {};
     for (const row of ordersByDay) {
@@ -178,15 +202,7 @@ const getReportSummary = async (req, res) => {
 
     const totalCustomers = customerCount.length;
 
-    let totalReceived = 0;
-    let totalPending = 0;
-    if (Array.isArray(collectionAgg) && collectionAgg.length > 0) {
-      const advancePaid =
-        collectionAgg.find((r) => r.paymentType === 'advance')?._sum.amount || 0;
-      const installmentsPaid =
-        collectionAgg.find((r) => r.paymentType === 'installment')?._sum.amount || 0;
-      totalReceived = advancePaid + installmentsPaid;
-    }
+    totalReceived = totalAdvance + totalInstallments;
 
     // Simple pending estimate based on orders in range
     const pendingAgg = await prisma.order.aggregate({
