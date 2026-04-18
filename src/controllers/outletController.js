@@ -171,6 +171,55 @@ const getDashboardStats = async (req, res) => {
             orderBy: { date: 'desc' }
         });
 
+        // ─── Installment Summary ──────────────────────────────────────
+        const deliveredOrders = await prisma.order.findMany({
+            where: {
+                outlet_id: outlet_id,
+                is_delivered: true
+            },
+            include: {
+                delivery: {
+                    include: {
+                        installment_ledger: true
+                    }
+                }
+            }
+        });
+
+        let totalInstallmentDue = 0;
+        let totalInstallmentPaid = 0;
+        let totalArrears = 0;
+        let pendingInstallmentCount = 0;
+        let ordersWithPendingInstallments = 0;
+
+        for (const order of deliveredOrders) {
+            const ledger = order.delivery?.installment_ledger;
+            if (!ledger) continue;
+
+            const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            const installmentRows = rows.filter(r => r.month > 0);
+
+            for (const row of installmentRows) {
+                const amount = Number(row.amount || 0);
+                totalInstallmentDue += amount;
+
+                if (row.status === 'paid') {
+                    totalInstallmentPaid += amount;
+                } else {
+                    pendingInstallmentCount += 1;
+                }
+
+                if (row.arrears) {
+                    totalArrears += Number(row.arrears);
+                }
+            }
+
+            // Count orders with at least one pending installment
+            if (installmentRows.some(r => r.status !== 'paid')) {
+                ordersWithPendingInstallments += 1;
+            }
+        }
+
         res.json({
             success: true,
             stats: {
@@ -185,6 +234,14 @@ const getDashboardStats = async (req, res) => {
                     dailySales,
                     weeklySales,
                     monthlySales
+                },
+                installments: {
+                    totalInstallmentDue,
+                    totalInstallmentPaid,
+                    totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
+                    totalArrears,
+                    pendingInstallmentCount,
+                    ordersWithPendingInstallments
                 },
                 financials: latestRegister || {
                     down_payments: 0,
@@ -209,20 +266,31 @@ const getGlobalCashInHand = async (req, res) => {
             where: { status: 'pending' },
             include: {
                 officer: { select: { full_name: true, phone: true } },
-                order: {
-                    select: {
-                        order_ref: true,
-                        delivery: { select: { selected_plan: true } }
-                    }
-                },
                 outlet: { select: { name: true } }
             },
             orderBy: { created_at: 'desc' }
         });
 
+        // Hide product/customer details and calculate balance
+        const formattedEntries = entries.map(entry => {
+            const submittedAmt = entry.submitted_amount || 0;
+            return {
+                id: entry.id,
+                amount: entry.amount,
+                submitted_amount: submittedAmt,
+                balance: entry.amount - submittedAmt,
+                status: entry.status,
+                created_at: entry.created_at,
+                cash_type: entry.cash_type || 'Advance amount payment',
+                payment_method: entry.payment_method,
+                officer: entry.officer,
+                outlet: entry.outlet
+            };
+        });
+
         return res.status(200).json({
             success: true,
-            data: entries
+            data: formattedEntries
         });
     } catch (error) {
         console.error('getGlobalCashInHand error:', error);
@@ -238,30 +306,45 @@ const verifyCashSubmissionOTP = async (req, res) => {
     }
 
     try {
-        const entries = await prisma.cashInHand.findMany({
+        const histories = await prisma.cashSubmissionHistory.findMany({
             where: {
                 outlet_id: parseInt(outlet_id),
                 otp: otp,
                 status: 'pending'
+            },
+            include: {
+                cash_in_hand: true
             }
         });
 
-        if (entries.length === 0) {
+        if (histories.length === 0) {
             return res.status(400).json({ success: false, message: 'Invalid OTP or no pending submissions found' });
         }
 
-        await prisma.cashInHand.updateMany({
-            where: {
-                id: { in: entries.map(e => e.id) }
-            },
-            data: {
-                status: 'paid',
-                otp: null
-            }
-        });
+        // Process each partial submission
+        for (const history of histories) {
+            // Mark history as paid
+            await prisma.cashSubmissionHistory.update({
+                where: { id: history.id },
+                data: { status: 'paid', otp: null }
+            });
 
-        // Sum amounts
-        const totalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
+            // Update parent CashInHand
+            let newSubmitted = (history.cash_in_hand.submitted_amount || 0) + history.amount_submitted;
+            const isFullyPaid = newSubmitted >= history.cash_in_hand.amount;
+
+            await prisma.cashInHand.update({
+                where: { id: history.cash_in_hand_id },
+                data: {
+                    submitted_amount: newSubmitted,
+                    status: isFullyPaid ? 'paid' : 'pending',
+                    otp: null // Clear just in case
+                }
+            });
+        }
+
+        // Sum amounts for Cash Register update
+        const totalAmount = histories.reduce((sum, h) => sum + h.amount_submitted, 0);
 
         // Update Cash Register
         await updateCashRegister(null, parseInt(outlet_id), 'cash_from_delivery', totalAmount, 'add');
@@ -277,8 +360,12 @@ const verifyCashSubmissionOTP = async (req, res) => {
 };
 
 const getOutletCashHistory = async (req, res) => {
-    const { date_from, date_to, officer_id } = req.query;
+    const { date_from, date_to, officer_id, page = 1, limit = 20 } = req.query;
     const outletId = req.user.outlet_id;
+
+    const pageCount = Math.max(1, parseInt(page) || 1);
+    const take = Math.max(1, parseInt(limit) || 20);
+    const skip = (pageCount - 1) * take;
 
     try {
         let where = { status: 'paid' };
@@ -288,32 +375,62 @@ const getOutletCashHistory = async (req, res) => {
         }
 
         if (officer_id) {
-            where.officer_id = parseInt(officer_id);
+            where.cash_in_hand = { officer_id: parseInt(officer_id) };
         }
 
         if (date_from || date_to) {
-            where.created_at = {};
-            if (date_from) where.created_at.gte = new Date(date_from);
-            if (date_to) where.created_at.lte = new Date(date_to);
+            where.submission_date = {};
+            if (date_from) where.submission_date.gte = new Date(date_from);
+            if (date_to) {
+                const toDate = new Date(date_to);
+                toDate.setHours(23, 59, 59, 999);
+                where.submission_date.lte = toDate;
+            }
         }
 
-        const entries = await prisma.cashInHand.findMany({
-            where,
-            include: {
-                officer: { select: { full_name: true, phone: true } },
-                order: {
-                    select: {
-                        order_ref: true,
-                        delivery: { select: { selected_plan: true } }
+        const [total, totalSum, histories] = await Promise.all([
+            prisma.cashSubmissionHistory.count({ where }),
+            prisma.cashSubmissionHistory.aggregate({
+                where,
+                _sum: { amount_submitted: true }
+            }),
+            prisma.cashSubmissionHistory.findMany({
+                where,
+                skip,
+                take,
+                include: {
+                    cash_in_hand: {
+                        include: {
+                            officer: { select: { full_name: true, phone: true } },
+                            order: { select: { order_ref: true } }
+                        }
                     }
-                }
-            },
-            orderBy: { created_at: 'desc' }
-        });
+                },
+                orderBy: { submission_date: 'desc' }
+            })
+        ]);
+
+        const formattedEntries = histories.map(h => ({
+            id: h.id, 
+            amount: h.amount_submitted, 
+            status: h.status,
+            created_at: h.submission_date,
+            cash_type: h.cash_in_hand.cash_type || 'Advance amount payment',
+            payment_method: h.cash_in_hand.payment_method,
+            officer: h.cash_in_hand.officer,
+            order: h.cash_in_hand.order
+        }));
 
         return res.status(200).json({
             success: true,
-            data: entries
+            data: formattedEntries,
+            totalAmount: totalSum._sum.amount_submitted || 0,
+            pagination: {
+                total,
+                page: pageCount,
+                limit: take,
+                pages: Math.ceil(total / take)
+            }
         });
     } catch (error) {
         console.error('getOutletCashHistory error:', error);
@@ -722,10 +839,6 @@ const getOutletInstallments = async (req, res) => {
         search = '',
     } = req.query;
 
-    if (!outlet_id) {
-        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
-    }
-
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
@@ -733,8 +846,8 @@ const getOutletInstallments = async (req, res) => {
 
     try {
         const orderWhere = {
-            outlet_id: outlet_id,
             is_delivered: true,
+            ...(outlet_id && { outlet_id: outlet_id }),
             ...(q && {
                 OR: [
                     { customer_name: { contains: q } },
@@ -763,6 +876,12 @@ const getOutletInstallments = async (req, res) => {
                     take: 1,
                     orderBy: { created_at: 'desc' },
                 },
+                outlet: {
+                    select: {
+                        name: true,
+                        code: true
+                    }
+                }
             },
             orderBy: { created_at: 'desc' },
             skip,
@@ -814,6 +933,7 @@ const getOutletInstallments = async (req, res) => {
                 status: row.status || 'pending',
                 paidAt: row.paid_at || row.paidAt || null,
                 paymentMethod: row.payment_method || row.paymentMethod || null,
+                arrears: row.arrears || 0,
             }));
 
             // Calculate summaries from actual row data
@@ -823,6 +943,7 @@ const getOutletInstallments = async (req, res) => {
 
             const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
             const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
+            const totalArrears = installmentLedger.reduce((sum, r) => sum + (r.arrears || 0), 0);
 
             return {
                 order_id: order.id,
@@ -833,6 +954,8 @@ const getOutletInstallments = async (req, res) => {
                 imei_serial: imeiSerial,
                 status: order.status,
                 created_at: order.created_at,
+                outlet_name: order.outlet?.name || 'N/A',
+                outlet_code: order.outlet?.code || 'N/A',
                 ledgerSummaries: {
                     advanceAmount,
                     monthlyAmount,
@@ -840,6 +963,7 @@ const getOutletInstallments = async (req, res) => {
                     totalInstallmentDue,
                     totalInstallmentPaid,
                     totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
+                    totalArrears,
                     paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
                     totalInstallments: installmentLedger.length,
                 },
@@ -897,7 +1021,7 @@ const generateInstallmentOtp = async (req, res) => {
 };
 
 const verifyInstallmentPayment = async (req, res) => {
-    const { order_id, month_number, otp, feedback, payment_method = 'Cash' } = req.body;
+    const { order_id, month_number, feedback, payment_method = 'Cash', amount } = req.body;
     const outlet_id = req.user.outlet_id;
 
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user' });
@@ -916,11 +1040,6 @@ const verifyInstallmentPayment = async (req, res) => {
         if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
         const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
-        const verification = await verifyOTP(phone, otp, 'installment_payment');
-
-        if (!verification.valid) {
-            return res.status(400).json({ success: false, message: verification.message });
-        }
 
         const ledger = order.installment_ledger;
         if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
@@ -932,11 +1051,41 @@ const verifyInstallmentPayment = async (req, res) => {
         if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
         // Update row
-        const paidAmount = rows[rowIndex].amount || rows[rowIndex].dueAmount || 0;
+        const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
+        const paidAmount = amount !== undefined ? parseFloat(amount) : dueAmount;
+
+        // Reject overpayment for now
+        // if (paidAmount > dueAmount) {
+        //     return res.status(400).json({ success: false, message: 'Paid amount cannot exceed due amount' });
+        // }
+
+        const remaining = dueAmount - paidAmount;
+
+        rows[rowIndex].amount = paidAmount;
         rows[rowIndex].status = 'paid';
         rows[rowIndex].paid_at = new Date();
         rows[rowIndex].payment_method = payment_method;
         rows[rowIndex].feedback = feedback;
+
+        // Carry forward the remaining balance to the next month
+        if (remaining > 0) {
+            if (rows[rowIndex + 1]) {
+                rows[rowIndex + 1].amount = parseFloat(rows[rowIndex + 1].amount || rows[rowIndex + 1].dueAmount || 0) + remaining;
+                rows[rowIndex + 1].arrears = (rows[rowIndex + 1].arrears || 0) + remaining;
+            } else {
+                // If this was the last month, append a new row for the balance
+                const nextMonthDate = new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate || new Date());
+                nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
+                
+                rows.push({
+                    month: parseInt(month_number) + 1,
+                    due_date: nextMonthDate.toISOString().split('T')[0],
+                    amount: remaining,
+                    arrears: remaining,
+                    status: 'pending'
+                });
+            }
+        }
 
         // Save Ledger
         await prisma.installmentLedger.update({
@@ -982,7 +1131,7 @@ const verifyInstallmentPayment = async (req, res) => {
                 productName: finalProductName,
                 monthlyAmount: nextRow.amount || nextRow.dueAmount,
                 dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-                ledgerUrl: ledger.short_id ? `${process.env.LEDGER_BASE_URL}/api/ledger/pdf/${ledger.short_id}` : null
+                ledgerUrl: ledger.token ? `${ledger.token}` : null
             }).catch(err => console.error('Wati Reminder Error:', err));
         }
 
@@ -990,6 +1139,207 @@ const verifyInstallmentPayment = async (req, res) => {
     } catch (error) {
         console.error('verifyInstallmentPayment error:', error);
         return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getOutletOfficers = async (req, res) => {
+    const { role_id } = req.query; // 2 for DO, 3 for RO
+    const outletId = req.user.outlet_id;
+
+    if (!role_id) return res.status(400).json({ success: false, message: 'role_id is required' });
+
+    try {
+        const officers = await prisma.user.findMany({
+            where: {
+                outlet_id: outletId,
+                role_id: parseInt(role_id)
+            },
+            select: {
+                id: true,
+                full_name: true,
+                phone: true,
+                username: true,
+                image: true,
+                status: true,
+                created_at: true
+            }
+        });
+
+        const officersWithStats = await Promise.all(officers.map(async (off) => {
+            // 1. Exact Cash Aggregation
+            // Paid: Sum of verified histories
+            const paidSum = await prisma.cashSubmissionHistory.aggregate({
+                where: {
+                    cash_in_hand: { officer_id: off.id },
+                    status: 'paid'
+                },
+                _sum: { amount_submitted: true }
+            });
+            const paidAmount = paidSum._sum.amount_submitted || 0;
+
+            // Pending: sum of (amount - submitted_amount) for pending rows
+            const pendingItems = await prisma.cashInHand.findMany({
+                where: { officer_id: off.id, status: 'pending' }
+            });
+            const pendingAmount = pendingItems.reduce((acc, curr) => acc + (curr.amount - curr.submitted_amount), 0);
+
+            // 2. Orders stats (Units Delivered or Paid Submissions)
+            let deliveredCount = 0;
+            if (parseInt(role_id) === 3) {
+                // For RO: Count successful paid submissions
+                deliveredCount = await prisma.cashSubmissionHistory.count({
+                    where: {
+                        cash_in_hand: { officer_id: off.id },
+                        status: 'paid'
+                    }
+                });
+            } else {
+                // For DO: Count delivered orders
+                deliveredCount = await prisma.order.count({
+                    where: {
+                        delivery_officer_id: off.id,
+                        is_delivered: true
+                    }
+                });
+            }
+
+            // 3. Stock stats (for DO)
+            let stockCount = 0;
+            if (parseInt(role_id) === 2) {
+                stockCount = await prisma.stockTransfer.count({
+                    where: {
+                        to_id: off.id,
+                        to_type: 'Delivery Officer',
+                        inventory: {
+                            status: 'Out Of Stock'
+                        }
+                    }
+                });
+            }
+
+            return {
+                ...off,
+                paid_cash: paidAmount,
+                pending_cash: pendingAmount,
+                total_collection: paidAmount + pendingAmount,
+                stock_count: stockCount,
+                orders: {
+                    delivered: deliveredCount
+                }
+            };
+        }));
+
+        res.json({ success: true, officers: officersWithStats });
+    } catch (error) {
+        console.error('getOutletOfficers error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getOfficerDetails = async (req, res) => {
+    const { id } = req.params;
+    const outletId = req.user.outlet_id;
+
+    try {
+        const officer = await prisma.user.findUnique({
+            where: { id: parseInt(id) },
+            select: { id: true, full_name: true, phone: true, role_id: true, outlet_id: true }
+        });
+
+        if (!officer || (officer.outlet_id !== outletId && req.user.role_id !== 7)) {
+            return res.status(403).json({ success: false, message: 'Unauthorized access to officer details' });
+        }
+
+        const role = officer.role_id;
+
+        const [inventory, delivered_products, cash, paidSumRes, submissionHistory] = await Promise.all([
+            // 1. Inventory in hand (Only for DO)
+            role === 2 ? prisma.stockTransfer.findMany({
+                where: {
+                    to_id: officer.id,
+                    to_type: 'Delivery Officer',
+                    inventory: { status: 'Out Of Stock' }
+                },
+                include: { inventory: true },
+                orderBy: { created_at: 'desc' }
+            }) : Promise.resolve([]),
+
+            // 2. Delivered Products (Only for DO)
+            role === 2 ? prisma.delivery.findMany({
+                where: { delivery_agent_id: officer.id },
+                include: { 
+                    order: {
+                        select: { order_ref: true, customer_name: true, product_name: true, created_at: true }
+                    }
+                },
+                orderBy: { created_at: 'desc' }
+            }) : Promise.resolve([]),
+
+            // 3. Cash in hand list (All collections)
+            prisma.cashInHand.findMany({
+                where: { officer_id: officer.id },
+                include: {
+                    order: { select: { order_ref: true } }
+                },
+                orderBy: { created_at: 'desc' }
+            }),
+
+            // 4. Paid Sum
+             prisma.cashSubmissionHistory.aggregate({
+                where: {
+                    cash_in_hand: { officer_id: officer.id },
+                    status: 'paid'
+                },
+                _sum: { amount_submitted: true }
+            }),
+
+            // 5. Submission History (Live Ledger)
+            prisma.cashSubmissionHistory.findMany({
+                where: { cash_in_hand: { officer_id: officer.id } },
+                include: { 
+                    cash_in_hand: { 
+                        include: { order: { select: { order_ref: true } } }
+                    } 
+                },
+                orderBy: { submission_date: 'desc' },
+                take: 100
+            })
+        ]);
+
+        const paidAmount = paidSumRes._sum.amount_submitted || 0;
+        const pendingAmount = cash.reduce((acc, curr) => {
+            if (curr.status === 'pending') acc += (curr.amount - curr.submitted_amount);
+            return acc;
+        }, 0);
+
+        res.json({
+            success: true,
+            officer,
+            inventory: role === 2 ? inventory.map(t => t.inventory) : null,
+            delivered_products: role === 2 ? delivered_products.map(d => ({
+                order_ref: d.order.order_ref,
+                customer_name: d.order.customer_name,
+                product_name: d.order.product_name,
+                imei_serial: d.product_imei,
+                delivery_date: d.created_at
+            })) : null,
+            cash,
+            submission_history: submissionHistory.map(h => ({
+                id: h.id,
+                amount: h.amount_submitted,
+                status: h.status,
+                date: h.submission_date,
+                order_ref: h.cash_in_hand?.order?.order_ref
+            })),
+            stats: {
+                paid_cash: paidAmount,
+                pending_cash: pendingAmount,
+                total_collection: paidAmount + pendingAmount
+            }
+        });
+    } catch (error) {
+        console.error('getOfficerDetails error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
@@ -1009,5 +1359,7 @@ module.exports = {
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,
-    verifyInstallmentPayment
+    verifyInstallmentPayment,
+    getOutletOfficers,
+    getOfficerDetails
 };

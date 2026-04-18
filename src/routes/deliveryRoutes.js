@@ -15,10 +15,11 @@ const {
   generateRefundOtp,
   verifyRefundOtp,
   getDeliveryBoyInventory,
-  pickOrder,
+  // pickOrder,
   unpickOrder,
   submitCashToOutlet,
-  initiateReturnExchange
+  initiateReturnExchange,
+  getDeliveryOfficerOTPLogs
 } = require('../controllers/deliveryController');
 
 // Delivery Officer Analytics
@@ -47,13 +48,14 @@ router.get('/delivery-boy/inventory', authenticateJWT, getDeliveryBoyInventory);
 router.post('/delivery/generate-otp', authenticateJWT, generateDeliveryOtp);
 router.post('/delivery/verify-otp', authenticateJWT, verifyDeliveryOtp);
 router.post('/delivery/return', authenticateJWT, returnProduct);
+router.get('/delivery/otp-logs', authenticateJWT, getDeliveryOfficerOTPLogs);
 
 // OTP Verified Refund Flows
 router.post('/delivery/refund/generate-otp', authenticateJWT, generateRefundOtp);
 router.post('/delivery/refund/verify-otp', authenticateJWT, verifyRefundOtp);
 
 // Pick/Unpick Order Status
-router.post('/delivery/pick-order', authenticateJWT, pickOrder);
+// router.post('/delivery/pick-order', authenticateJWT, pickOrder);
 router.post('/delivery/unpick-order', authenticateJWT, unpickOrder);
 
 // Cash handling routes

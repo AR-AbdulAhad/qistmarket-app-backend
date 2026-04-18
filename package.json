@@ -36,6 +36,7 @@
     "nodemon": "^3.1.10",
     "pg": "^8.16.3",
     "puppeteer": "^24.40.0",
+    "qrcode": "^1.5.4",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {

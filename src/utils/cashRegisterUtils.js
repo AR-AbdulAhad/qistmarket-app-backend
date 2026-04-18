@@ -7,36 +7,40 @@ const prisma = new PrismaClient();
  * 
  * @param {object} tx - Prisma transaction context. If not provided, uses `prisma`.
  * @param {number} outletId - The ID of the outlet.
- * @param {string} field - The specific field of CashRegister being impacted:
- *  - 'down_payments' (e.g. from cash_in_hand / Delivery)
- *  - 'installments_received' (e.g. order monthly payments)
- *  - 'cash_from_recovery' (overall sum of recoveries or specific installments)
- *  - 'cash_from_delivery' (total cash brought in by delivery rider)
- *  - 'expenses' (Expense Vouchers)
- *  - 'vendor_payments' (Vendor Payments)
+ * @param {string} field - The specific field of CashRegister being impacted.
  * @param {number} amount - The amount to log.
- * @param {string} operation - 'add' or 'subtract'. 'add' implies money coming IN. 'subtract' implies going OUT.
+ * @param {string} operation - 'add' or 'subtract'.
  */
 const updateCashRegister = async (tx, outletId, field, amount, operation) => {
     const db = tx || prisma;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Ensure the register exists for today, else find yesterday's closing
+    const val = parseFloat(amount);
+    const validFields = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery', 'expenses', 'vendor_payments'];
+    
+    if (!validFields.includes(field)) {
+        throw new Error(`Invalid CashRegister field: ${field}`);
+    }
+
+    // Determine impact on closing_cash.
+    const inflows = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery'];
+    const outflows = ['expenses', 'vendor_payments'];
+
+    // We use a find-create logic to ensure the row exists.
+    // However, to avoid transaction timeouts, we do the check/create quickly.
     let register = await db.cashRegister.findUnique({
-        where: {
-            outlet_id_date: { outlet_id: outletId, date: today }
-        }
+        where: { outlet_id_date: { outlet_id: outletId, date: today } }
     });
 
     if (!register) {
-        // Find latest register before today
+        // Find latest register before today to get opening balance
         const lastRegister = await db.cashRegister.findFirst({
             where: { outlet_id: outletId, date: { lt: today } },
             orderBy: { date: 'desc' }
         });
         
-        let opening = lastRegister ? lastRegister.closing_cash : 0;
+        const opening = lastRegister ? lastRegister.closing_cash : 0;
         register = await db.cashRegister.create({
             data: {
                 outlet_id: outletId,
@@ -47,57 +51,38 @@ const updateCashRegister = async (tx, outletId, field, amount, operation) => {
         });
     }
 
-    // Determine math
-    const val = parseFloat(amount);
-    const validFields = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery', 'expenses', 'vendor_payments'];
-    
-    if (!validFields.includes(field)) {
-        throw new Error(`Invalid CashRegister field: ${field}`);
-    }
+    // Now perform atomic update to reduce lock time and prevent data structure mismatch
+    // 'add' to inflow field -> increment closing_cash
+    // 'add' to outflow field -> decrement closing_cash
+    // 'subtract' from inflow field -> decrement closing_cash
+    // 'subtract' from outflow field -> increment closing_cash
 
-    // Determine impact on closing_cash.
-    // Inflows (add to closing cash)
-    const inflows = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery'];
-    // Outflows (subtract from closing cash)
-    const outflows = ['expenses', 'vendor_payments'];
-
-    let newFieldTotal = register[field];
-    let newClosingCash = register.closing_cash;
-
-    // Regardless of inflow/outflow, if the operation is 'add', it increases that specific record's total.
-    // E.g., adding an expense -> operation='add' to 'expenses' -> newFieldTotal += val.
-    // E.g., refunding an expense -> operation='subtract' from 'expenses' -> newFieldTotal -= val.
+    let fieldUpdate = { increment: 0 };
+    let closingUpdate = { increment: 0 };
 
     if (operation === 'add') {
-        newFieldTotal += val;
-        
+        fieldUpdate = { increment: val };
         if (inflows.includes(field)) {
-            newClosingCash += val; // adding an inflow = more cash
-        } else if (outflows.includes(field)) {
-            newClosingCash -= val; // adding an outflow = less cash
+            closingUpdate = { increment: val };
+        } else {
+            closingUpdate = { decrement: val };
         }
     } else if (operation === 'subtract') {
-        newFieldTotal -= val;
-
+        fieldUpdate = { decrement: val };
         if (inflows.includes(field)) {
-            newClosingCash -= val; // withdrawing an inflow = less cash
-        } else if (outflows.includes(field)) {
-            newClosingCash += val; // reversing an outflow = more cash
+            closingUpdate = { decrement: val };
+        } else {
+            closingUpdate = { increment: val };
         }
-    } else {
-        throw new Error(`Invalid operation: ${operation}`);
     }
 
-    // Save
-    const updated = await db.cashRegister.update({
+    return await db.cashRegister.update({
         where: { id: register.id },
         data: {
-            [field]: newFieldTotal,
-            closing_cash: newClosingCash
+            [field]: fieldUpdate,
+            closing_cash: closingUpdate
         }
     });
-
-    return updated;
 };
 
 module.exports = {

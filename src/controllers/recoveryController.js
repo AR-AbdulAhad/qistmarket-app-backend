@@ -7,6 +7,7 @@ const {
   sendInstallmentPaymentReceipt,
   sendNextInstallmentReminder
 } = require('../services/watiService');
+const { logAction } = require('../utils/auditLogger');
 
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
@@ -234,7 +235,7 @@ const getRecoveryCustomers = async (req, res) => {
     const customerMap = new Map();
 
     for (const order of orders) {
-      const key = (order.whatsapp_number || `unknown-${order.id}`).trim();
+      const key = `order-${order.id}`;
 
       const purchaser = order.verification?.purchaser || null;
       const cashInHand = order.cash_in_hand?.[0] || null;
@@ -243,10 +244,10 @@ const getRecoveryCustomers = async (req, res) => {
       const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
       // ── Customer details: purchaser se, fallback Order ────────
-      const customerName = purchaser?.name || order.customer_name;
+      const customerName = purchaser?.name;
       const fatherHusbandName = purchaser?.father_husband_name || null;
       const cnicNumber = purchaser?.cnic_number || null;
-      const presentAddress = purchaser?.present_address || order.address || null;
+      const presentAddress = purchaser?.present_address || null;
       const permanentAddress = purchaser?.permanent_address || null;
       const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
       const nearestLocation = purchaser?.nearest_location || null;
@@ -278,7 +279,7 @@ const getRecoveryCustomers = async (req, res) => {
 
       // ── Product info: Fetch from Inventory via IMEI first ───────────────────────────
       const imeiSerial = cashInHand?.imei_serial || delivery?.product_imei || order.imei_serial || null;
-      const invInfo    = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
 
       const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name || null;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
@@ -329,6 +330,7 @@ const getRecoveryCustomers = async (req, res) => {
               status: rowStatus,
               paidAt: row.paid_at || row.paidAt || null,
               paymentMethod: row.payment_method || row.paymentMethod || null,
+              arrears: row.arrears || 0,
             };
           });
       }
@@ -561,49 +563,113 @@ const logRecoveryVisit = async (req, res) => {
   const { order_id, latitude, longitude, customer_feedback, visit_notes } = req.body;
   const officerId = req.user?.id || 24;
 
+  // Extract uploaded files
+  const visitPhotos = req.files?.['visit_photos'] || [];
+  const profilePhotoFile = req.files?.['profile_photo']?.[0] || null;
+
+  // Validate photo counts
+  if (visitPhotos.length > 5) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Maximum 5 visit photos allowed' }
+    });
+  }
+
   try {
     const order = await prisma.order.findUnique({
-      where: { id: parseInt(order_id) }
+      where: { id: parseInt(order_id) },
+      include: {
+        verification: { include: { documents: { where: { document_type: 'photo', person_type: 'purchaser' }, orderBy: { uploaded_at: 'desc' }, take: 1 } } }
+      }
     });
 
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
-    const visit = await prisma.recoveryVisit.create({
-      data: {
-        order_id: parseInt(order_id),
-        officer_id: officerId,
-        latitude: latitude ? parseFloat(latitude) : null,
-        longitude: longitude ? parseFloat(longitude) : null,
-        visit_time: new Date(),
-        customer_feedback,
-        visit_notes,
-        payment_collected: false,
-        amount_collected: null,
+    // Use transaction for visit and photos
+    const result = await prisma.$transaction(async (tx) => {
+      const visit = await tx.recoveryVisit.create({
+        data: {
+          order_id: parseInt(order_id),
+          officer_id: officerId,
+          latitude: latitude ? parseFloat(latitude) : null,
+          longitude: longitude ? parseFloat(longitude) : null,
+          visit_time: new Date(),
+          customer_feedback,
+          visit_notes,
+          payment_collected: false,
+          amount_collected: null,
+        }
+      });
+
+      // Prepare photo records for batch insert
+      const photoRecords = [];
+
+      // Add profile photo (from upload or from verification)
+      let profilePhotoUrl = profilePhotoFile?.url || null;
+      if (!profilePhotoUrl && order.verification?.documents?.[0]?.file_url) {
+        profilePhotoUrl = order.verification.documents[0].file_url;
       }
+
+      if (profilePhotoUrl) {
+        photoRecords.push({
+          recovery_visit_id: visit.id,
+          file_url: profilePhotoUrl,
+          photo_type: 'profile'
+        });
+      }
+
+      // Add visit photos
+      visitPhotos.forEach((file) => {
+        photoRecords.push({
+          recovery_visit_id: visit.id,
+          file_url: file.url,
+          photo_type: 'visit_location'
+        });
+      });
+
+      // Batch insert all photos
+      if (photoRecords.length > 0) {
+        await tx.recoveryVisitPhoto.createMany({
+          data: photoRecords
+        });
+      }
+
+      return visit;
     });
 
-    return res.json({ success: true, message: 'Recovery visit logged successfully', visit });
+    return res.json({ success: true, message: 'Recovery visit logged successfully with photos', visit: result });
   } catch (error) {
     console.error('logRecoveryVisit error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
 
-// API 2: OTP verify karo + payment submit karo (exact outlet pattern)
-const verifyAndSubmitInstallment = async (req, res) => {
+const submitInstallment = async (req, res) => {
   const {
-    order_id, month_number, otp, amount, payment_method, feedback, fuelCharges,
+    order_id, month_number, amount, payment_method, feedback, fuelCharges,
     latitude, longitude, visit_notes
   } = req.body;
   const officerId = req.user?.id;
+
+  // Extract uploaded files
+  const visitPhotos = req.files?.['visit_photos'] || [];
+  const profilePhotoFile = req.files?.['profile_photo']?.[0] || null;
+
+  // Validate photo counts
+  if (visitPhotos.length > 5) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Maximum 5 visit photos allowed' }
+    });
+  }
 
   try {
     const order = await prisma.order.findUnique({
       where: { id: parseInt(order_id) },
       include: {
-        verification: { include: { purchaser: true } },
+        verification: { include: { purchaser: true, documents: { where: { document_type: 'photo', person_type: 'purchaser' }, orderBy: { uploaded_at: 'desc' }, take: 1 } } },
         installment_ledger: true,
         delivery: true,
         cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
@@ -611,13 +677,6 @@ const verifyAndSubmitInstallment = async (req, res) => {
     });
 
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-
-    // OTP verify karo
-    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
-    const otpResult = await verifyOTP(phone, otp, 'installment_payment');
-    if (!otpResult.valid) {
-      return res.status(400).json({ success: false, message: otpResult.message });
-    }
 
     // Ledger check
     const ledger = order.installment_ledger;
@@ -629,7 +688,15 @@ const verifyAndSubmitInstallment = async (req, res) => {
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
-    const paidAmount = parseFloat(amount || rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
+    const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
+    const paidAmount = amount !== undefined ? parseFloat(amount) : dueAmount;
+
+    // Reject overpayment for now
+    // if (paidAmount > dueAmount) {
+    //   return res.status(400).json({ success: false, message: 'Paid amount cannot exceed due amount' });
+    // }
+
+    const remaining = dueAmount - paidAmount;
 
     // Fetch real product name from inventory using IMEI
     const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
@@ -647,12 +714,33 @@ const verifyAndSubmitInstallment = async (req, res) => {
 
     // DB Transaction
     await prisma.$transaction(async (tx) => {
+      rows[rowIndex].amount = paidAmount;
       rows[rowIndex].status = 'paid';
       rows[rowIndex].paid_at = new Date();
       rows[rowIndex].payment_method = payment_method;
       rows[rowIndex].feedback = feedback;
       rows[rowIndex].collected_by = officerId;
       rows[rowIndex].fuel_charges = parseFloat(fuelCharges || 0);
+
+      // Carry forward the remaining balance to the next month
+      if (remaining > 0) {
+        if (rows[rowIndex + 1]) {
+          rows[rowIndex + 1].amount = parseFloat(rows[rowIndex + 1].amount || rows[rowIndex + 1].dueAmount || 0) + remaining;
+          rows[rowIndex + 1].arrears = (rows[rowIndex + 1].arrears || 0) + remaining;
+        } else {
+          // If this was the last month, append a new row for the balance
+          const nextMonthDate = new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate || new Date());
+          nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
+
+          rows.push({
+            month: parseInt(month_number) + 1,
+            due_date: nextMonthDate.toISOString().split('T')[0],
+            amount: remaining,
+            arrears: remaining,
+            status: 'pending'
+          });
+        }
+      }
 
       await tx.installmentLedger.update({
         where: { id: ledger.id },
@@ -661,6 +749,7 @@ const verifyAndSubmitInstallment = async (req, res) => {
 
       // CashInHand entry (sirf cash payment ke liye)
       const isCash = ['cash', 'recovery_cash', 'recovery cash'].includes(payment_method?.toLowerCase());
+      console.log('Is cash payment:', isCash, 'Payment method:', payment_method);
       if (isCash) {
         await tx.cashInHand.create({
           data: {
@@ -671,13 +760,15 @@ const verifyAndSubmitInstallment = async (req, res) => {
             customer_name: order.verification?.purchaser?.name || order.customer_name,
             product_name: finalProductName,
             imei_serial: imeiSerial || order.imei_serial,
-            payment_method: payment_method
+            payment_method: payment_method,
+            cash_type: 'Installment payment',
+            submitted_amount: 0
           }
         });
       }
 
       // Log the recovery visit along with payment
-      await tx.recoveryVisit.create({
+      const visit = await tx.recoveryVisit.create({
         data: {
           order_id: parseInt(order_id),
           officer_id: officerId,
@@ -690,10 +781,40 @@ const verifyAndSubmitInstallment = async (req, res) => {
           amount_collected: paidAmount,
         }
       });
+
+      // Prepare photo records for batch insert
+      const photoRecords = [];
+
+      let profilePhotoUrl = profilePhotoFile?.url || null;
+
+      if (profilePhotoUrl) {
+        photoRecords.push({
+          recovery_visit_id: visit.id,
+          file_url: profilePhotoUrl,
+          photo_type: 'profile'
+        });
+      }
+
+      // Add visit photos
+      visitPhotos.forEach((file, index) => {
+        photoRecords.push({
+          recovery_visit_id: visit.id,
+          file_url: file.url,
+          photo_type: 'visit_location'
+        });
+      });
+
+      // Batch insert all photos
+      if (photoRecords.length > 0) {
+        await tx.recoveryVisitPhoto.createMany({
+          data: photoRecords
+        });
+      }
     });
 
     // Wati Notifications
     const customerName = order.verification?.purchaser?.name || order.customer_name;
+    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
 
     sendInstallmentPaymentReceipt(phone, {
       customerName,
@@ -710,9 +831,17 @@ const verifyAndSubmitInstallment = async (req, res) => {
         productName: finalProductName,
         monthlyAmount: nextRow.amount || nextRow.dueAmount,
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-        ledgerUrl: ledger.short_id ? `${process.env.LEDGER_BASE_URL}/api/ledger/pdf/${ledger.short_id}` : null
+        ledgerUrl: ledger.token ? `${ledger.token}` : null
       }).catch(err => console.error('Wati Reminder Error:', err));
     }
+
+    // await logAction(
+    //   req,
+    //   'INSTALLMENT_COLLECTION',
+    //   `Collected PKR ${paidAmount} from ${customerName} for order ${order.order_ref} (Month: ${month_number}).`,
+    //   order.id,
+    //   'Order'
+    // );
 
     return res.json({ success: true, message: 'Payment processed successfully' });
   } catch (error) {
@@ -731,7 +860,6 @@ module.exports = {
   getDueOverdueInstallments,
   submitCollections,
   generateInstallmentOtp,
-  verifyAndSubmitInstallment,
+  submitInstallment,
   logRecoveryVisit
 };
-

@@ -35,6 +35,10 @@ const expenseRoutes = require('./src/routes/expenseRoutes');
 const vendorRoutes = require('./src/routes/vendorRoutes');
 const inventoryRoutes = require('./src/routes/inventoryRoutes');
 const outletReportRoutes = require('./src/routes/outletReportRoutes');
+const searchRoutes = require('./src/routes/searchRoutes');
+const securityLogRoutes = require('./src/routes/securityLogRoutes');
+const complaintRoutes = require('./src/routes/complaintRoutes');
+
 
 // JWT secret (must be set in .env)
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -73,49 +77,49 @@ app.set('io', io);
 const officerVerificationActiveMap = require('./src/utils/officerVerificationActiveMap');
 
 io.on('connection', (socket) => {
-    // Officer marks a verification as active (enters verification screen)
-    socket.on('officer_verification_active', async ({ officerId, verificationId }) => {
-      try {
-        // Persist in DB
-        await prisma.user.update({
-          where: { id: officerId },
-          data: { current_active_verification_id: verificationId },
-        });
-        const verification = await prisma.verification.findUnique({
-          where: { id: verificationId },
-          include: { order: { select: { order_ref: true, customer_name: true } } }
-        });
-        if (verification) {
-          io.to('admins').emit('officer_current_verification_update', {
-            officerId,
-            current_verification: {
-              id: verification.id,
-              status: verification.status,
-              order: verification.order,
-            },
-          });
-        }
-      } catch (err) {
-        console.error('officer_verification_active error:', err.message);
-      }
-    });
-
-    // Officer leaves verification screen (becomes inactive)
-    socket.on('officer_verification_inactive', async ({ officerId }) => {
-      try {
-        // Persist in DB
-        await prisma.user.update({
-          where: { id: officerId },
-          data: { current_active_verification_id: null },
-        });
+  // Officer marks a verification as active (enters verification screen)
+  socket.on('officer_verification_active', async ({ officerId, verificationId }) => {
+    try {
+      // Persist in DB
+      await prisma.user.update({
+        where: { id: officerId },
+        data: { current_active_verification_id: verificationId },
+      });
+      const verification = await prisma.verification.findUnique({
+        where: { id: verificationId },
+        include: { order: { select: { order_ref: true, customer_name: true } } }
+      });
+      if (verification) {
         io.to('admins').emit('officer_current_verification_update', {
           officerId,
-          current_verification: null,
+          current_verification: {
+            id: verification.id,
+            status: verification.status,
+            order: verification.order,
+          },
         });
-      } catch (err) {
-        console.error('officer_verification_inactive error:', err.message);
       }
-    });
+    } catch (err) {
+      console.error('officer_verification_active error:', err.message);
+    }
+  });
+
+  // Officer leaves verification screen (becomes inactive)
+  socket.on('officer_verification_inactive', async ({ officerId }) => {
+    try {
+      // Persist in DB
+      await prisma.user.update({
+        where: { id: officerId },
+        data: { current_active_verification_id: null },
+      });
+      io.to('admins').emit('officer_current_verification_update', {
+        officerId,
+        current_verification: null,
+      });
+    } catch (err) {
+      console.error('officer_verification_inactive error:', err.message);
+    }
+  });
   console.log(`Client connected → ${socket.id}`);
 
   // Admin joins notifications room
@@ -156,10 +160,14 @@ io.on('connection', (socket) => {
 
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
+      console.log(`[socket][officer_login] token decoded → id=${decoded.id}, role=${decoded.role}, role_id=${decoded.role_id}`);
+
       const isVerificationOfficer = decoded.role === 'Verification Officer' || decoded.role_id === 1;
       const isDeliveryAgent = decoded.role === 'Delivery Agent' || decoded.role_id === 3;
+      const isDeliveryOfficer = decoded.role === 'Delivery Officer' || decoded.role_id === 2;
 
-      if (!isVerificationOfficer && !isDeliveryAgent) {
+      if (!isVerificationOfficer && !isDeliveryAgent && !isDeliveryOfficer) {
+        console.warn(`[socket][officer_login] REJECTED → role not allowed: ${decoded.role} (role_id=${decoded.role_id})`);
         socket.emit('auth_error', { message: 'Not an authorized Officer/Agent' });
         return;
       }
@@ -167,82 +175,94 @@ io.on('connection', (socket) => {
       officerId = decoded.id;
       socket.officerId = officerId;
 
-      await prisma.user.update({
-        where: { id: officerId },
-        data: { is_online: true, last_online_at: new Date() },
-      });
-
-      // Create session if none open
-      let session = await prisma.officerSession.findFirst({
-        where: { officer_id: officerId, end_time: null },
-      });
-
-      if (!session) {
-        session = await prisma.officerSession.create({
-          data: { officer_id: officerId, start_time: new Date() },
-        });
-      }
-
+      // ─── Join rooms immediately so events can be sent ───────────────────────
       socket.join('verification_officers');
       socket.join(`officer_${officerId}`);
-
-      // Emit status update
-      io.to('admins').emit('officer_status_update', {
-        officerId,
-        is_online: true,
-        timestamp: new Date().toISOString(),
-      });
+      socket.join(`user_${officerId}`);
+      console.log(`[socket][officer_login] ✅ Officer ${officerId} joined rooms: officer_${officerId}, user_${officerId}`);
 
       socket.emit('officer_online_confirmed', { officerId, is_online: true });
 
-      // ────────────────────────────────────────────────
-      // Emit initial daily & monthly deltas on login
-      // ────────────────────────────────────────────────
-      const today = new Date().toISOString().split('T')[0];
+      // ─── DB operations in separate try/catch so they can't block above ─────
+      try {
+        await prisma.user.update({
+          where: { id: officerId },
+          data: { is_online: true, last_online_at: new Date() },
+        });
 
-      const dailyAgg = await prisma.officerSession.aggregate({
-        where: {
-          officer_id: officerId,
-          start_time: {
-            gte: new Date(`${today}T00:00:00.000Z`),
-            lt: new Date(`${today}T23:59:59.999Z`),
+        let session = await prisma.officerSession.findFirst({
+          where: { officer_id: officerId, end_time: null },
+        });
+
+        if (!session) {
+          session = await prisma.officerSession.create({
+            data: { officer_id: officerId, start_time: new Date() },
+          });
+        }
+
+        io.to('admins').emit('officer_status_update', {
+          officerId,
+          is_online: true,
+          timestamp: new Date().toISOString(),
+        });
+
+        const today = new Date().toISOString().split('T')[0];
+        const dailyAgg = await prisma.officerSession.aggregate({
+          where: {
+            officer_id: officerId,
+            start_time: {
+              gte: new Date(`${today}T00:00:00.000Z`),
+              lt: new Date(`${today}T23:59:59.999Z`),
+            },
           },
-        },
-        _sum: { duration_minutes: true },
-      });
+          _sum: { duration_minutes: true },
+        });
+        const dailyHours = ((dailyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
+        io.to('admins').emit('officer_daily_update', { officerId, date: today, online_hours: dailyHours });
 
-      const dailyHours = ((dailyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const monthlyAgg = await prisma.officerSession.aggregate({
+          where: { officer_id: officerId, start_time: { gte: startOfMonth } },
+          _sum: { duration_minutes: true },
+        });
+        const monthlyHours = ((monthlyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
+        io.to('admins').emit('officer_monthly_update', {
+          officerId,
+          monthly_online_hours: monthlyHours,
+          month: now.toISOString().slice(0, 7),
+        });
 
-      io.to('admins').emit('officer_daily_update', {
-        officerId,
-        date: today,
-        online_hours: dailyHours,
-      });
+        console.log(`Officer ${officerId} → ONLINE ✅`);
+      } catch (dbErr) {
+        console.error(`[socket][officer_login] DB error for officer ${officerId} (non-critical):`, dbErr.message);
+      }
 
-      // Monthly (current month)
-      const now = new Date();
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-      const monthlyAgg = await prisma.officerSession.aggregate({
-        where: {
-          officer_id: officerId,
-          start_time: { gte: startOfMonth },
-        },
-        _sum: { duration_minutes: true },
-      });
-
-      const monthlyHours = ((monthlyAgg._sum.duration_minutes || 0) / 60).toFixed(2);
-
-      io.to('admins').emit('officer_monthly_update', {
-        officerId,
-        monthly_online_hours: monthlyHours,
-        month: now.toISOString().slice(0, 7),
-      });
-
-      console.log(`Officer ${officerId} → ONLINE ✅`);
     } catch (err) {
-      console.error('officer_login error:', err.message);
+      console.error('officer_login auth error:', err.message);
       socket.emit('auth_error', { message: 'Invalid token' });
+    }
+  });
+
+
+
+  // Transfer OTP Event Handler
+  socket.on('stock_transfer_otp', (data) => {
+    const { otp_log_id, action, message, otp, created_at } = data;
+    try {
+      console.log(`[Stock Transfer OTP] OTP Log ID: ${otp_log_id}, Action: ${action}, Created: ${created_at}`);
+    } catch (err) {
+      console.error('stock_transfer_otp handler error:', err.message);
+    }
+  });
+
+  // Cash Submission OTP Event Handler (Mirroring Stock Transfer)
+  socket.on('cash_submission_otp', (data) => {
+    const { otp_log_id, action, message, otp, created_at } = data;
+    try {
+      console.log(`[Cash Submission OTP] OTP Log ID: ${otp_log_id}, Action: ${action}, Created: ${created_at}`);
+    } catch (err) {
+      console.error('cash_submission_otp handler error:', err.message);
     }
   });
 
@@ -404,6 +424,7 @@ app.get('/', (req, res) => {
 // Routes
 // ────────────────────────────────────────────────
 app.use('/ledger', ledgerRoutes);    // Public ledger routes — no auth required, must be first!
+app.use('/api/ledger', ledgerRoutes);
 app.use('/api', authRoutes);
 app.use('/api', outletRoutes); // Moved up
 app.use('/api', orderRoutes);
@@ -418,14 +439,16 @@ app.use('/api/address', addressRoutes);
 app.use('/api', productRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/customers', customerRoutes);
-const complaintRoutes = require('./src/routes/complaintRoutes');
-app.use('/api/complaints', complaintRoutes);
+app.use('/api', complaintRoutes);
 app.use('/api', reportRoutes);
 app.use('/api', cashRegisterRoutes);
 app.use('/api', expenseRoutes);
 app.use('/api', vendorRoutes);
 app.use('/api', inventoryRoutes);
 app.use('/api', outletReportRoutes);
+app.use('/api', searchRoutes);
+app.use('/api/security-logs', securityLogRoutes);
+
 
 // 404 handler
 app.use((req, res) => {

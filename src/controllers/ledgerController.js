@@ -5,6 +5,7 @@ const puppeteer = require('puppeteer');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP, sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
+const { logAction } = require('../utils/auditLogger');
 const logoDataURI = '';
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
@@ -616,7 +617,7 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     const isNext = !isAdvance && row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
     return `<tr class="${isAdvance ? 'advance-row' : ''} ${isNext ? 'current-month' : ''}">
             <td>${rowNum}</td>
-            <td>${rowLabel}${isNext ? ' ⬅ Next' : ''}</td>
+            <td>${rowLabel}${isNext ? ' ⬅ Next' : ''}${row.arrears ? `<br/><small style="color: #ef4444; font-size: 0.6rem;">Included Arrears: ${formatPKR(row.arrears)}</small>` : ''}</td>
             <td>${formatDate(row.due_date)}</td>
             <td>${formatPKR(row.amount)}</td>
             <td>${statusBadge(row.status)}</td>
@@ -756,7 +757,7 @@ const generateInstallmentPaymentOtp = async (req, res) => {
 };
 
 const verifyInstallmentPaymentOtp = async (req, res) => {
-  const { order_id, month_number, otp, feedback, payment_method = 'Cash' } = req.body;
+  const { order_id, month_number, otp, feedback, payment_method = 'Cash', amount } = req.body;
   const outlet_id = req.user.outlet_id;
 
   if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user' });
@@ -788,12 +789,42 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
-    // Update row
-    const paidAmount = rows[rowIndex].amount || rows[rowIndex].dueAmount || 0;
+    const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
+    const paidAmount = amount !== undefined ? parseFloat(amount) : dueAmount;
+
+    // Reject overpayment for now
+    // if (paidAmount > dueAmount) {
+    //   return res.status(400).json({ success: false, message: 'Paid amount cannot exceed due amount' });
+    // }
+
+    const remaining = dueAmount - paidAmount;
+
+    // Update current row
+    rows[rowIndex].amount = paidAmount;
     rows[rowIndex].status = 'paid';
     rows[rowIndex].paid_at = new Date();
     rows[rowIndex].payment_method = payment_method;
     rows[rowIndex].feedback = feedback;
+
+    // Carry forward the remaining balance to the next month
+    if (remaining > 0) {
+      if (rows[rowIndex + 1]) {
+        rows[rowIndex + 1].amount = parseFloat(rows[rowIndex + 1].amount || rows[rowIndex + 1].dueAmount || 0) + remaining;
+        rows[rowIndex + 1].arrears = (rows[rowIndex + 1].arrears || 0) + remaining;
+      } else {
+        // If this was the last month, append a new row for the balance
+        const nextMonthDate = new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate || new Date());
+        nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
+
+        rows.push({
+          month: parseInt(month_number) + 1,
+          due_date: nextMonthDate.toISOString().split('T')[0],
+          amount: remaining,
+          arrears: remaining,
+          status: 'pending'
+        });
+      }
+    }
 
     // Save Ledger
     await prisma.installmentLedger.update({
@@ -834,9 +865,17 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         productName: order.product_name,
         monthlyAmount: nextRow.amount || nextRow.dueAmount,
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-        ledgerUrl: ledger.short_id ? `${process.env.LEDGER_BASE_URL}/api/ledger/pdf/${ledger.short_id}` : null
+        ledgerUrl: ledger.token ? `${ledger.token}` : null
       });
     }
+
+    await logAction(
+      req,
+      'INSTALLMENT_COLLECTION',
+      `Collected PKR ${paidAmount} from ${customerName} for order ${order.order_ref} at outlet. (Month: ${month_number})`,
+      order.id,
+      'Order'
+    );
 
     return res.json({ success: true, message: 'Payment processed successfully' });
   } catch (error) {

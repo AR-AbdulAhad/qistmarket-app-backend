@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const upload = require('../config/multer-local');
+const fixUploadPath = require('../middlewares/fixUploadPath');
 const {
     getAllRecoveryOfficers,
     getRecoveryOfficerStats,
@@ -8,7 +10,7 @@ const {
     getDueOverdueInstallments,
     submitCollections,
     generateInstallmentOtp,
-    verifyAndSubmitInstallment,
+    submitInstallment,
     logRecoveryVisit
 } = require('../controllers/recoveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
@@ -22,12 +24,30 @@ router.get('/collection-stats', authenticateJWT, getCollectionStats);
 router.get('/overdue', authenticateJWT, getDueOverdueInstallments);
 router.post('/submit-collections', authenticateJWT, submitCollections);
 
-// Installment Payment flows (Recovery Officers) — same as outlet pattern
+// Installment Payment flows (Recovery Officers) — with file uploads (up to 5 images)
 router.post('/installment/generate-otp', authenticateJWT, generateInstallmentOtp);
-router.post('/submit-installment', authenticateJWT, verifyAndSubmitInstallment);
+router.post(
+  '/submit-installment',
+  authenticateJWT,
+  upload.fields([
+    { name: 'visit_photos', maxCount: 5 },
+    { name: 'profile_photo', maxCount: 1 }
+  ]),
+  fixUploadPath,
+  submitInstallment
+);
 
-// Visit Logging Route (without payment)
-router.post('/visit', authenticateJWT, logRecoveryVisit);
+// Visit Logging Route (without payment) — with file uploads (up to 5 images)
+router.post(
+  '/visit',
+  authenticateJWT,
+  upload.fields([
+    { name: 'visit_photos', maxCount: 5 },
+    { name: 'profile_photo', maxCount: 1 }
+  ]),
+  fixUploadPath,
+  logRecoveryVisit
+);
 
 module.exports = router;
 

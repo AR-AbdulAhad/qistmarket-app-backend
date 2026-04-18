@@ -1025,14 +1025,15 @@ const completeVerification = async (req, res) => {
       });
     }
 
-    const { home_location_required = false } = req.body;
+    const { home_location_required = false, feedback = null } = req.body;
 
     const updatedVerification = await prisma.verification.update({
       where: { id: parseInt(verification_id) },
       data: {
         status: 'completed',
         end_time: getPKTDate(new Date()),
-        home_location_required: home_location_required === true || home_location_required === 'true'
+        home_location_required: home_location_required === true || home_location_required === 'true',
+        verification_feedback: feedback || null
       },
       include: {
         order: { select: { order_ref: true, id: true } },
@@ -1513,7 +1514,7 @@ const getMyCustomersWithOrdersAndLedger = async (req, res) => {
     const customerMap = new Map();
 
     for (const order of orders) {
-      const key = (order.whatsapp_number || `unknown-${order.id}`).trim();
+      const key = `order-${order.id}`;
 
       const purchaser = order.verification?.purchaser || null;
       const cashInHand = order.cash_in_hand?.[0] || null;

@@ -4,7 +4,45 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('../services/watiService');
-const { notifyAdmins } = require('../utils/notificationUtils');
+const { notifyUser, notifyAdmins } = require('../utils/notificationUtils');
+const admin = require('firebase-admin');
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    }),
+  });
+}
+
+// ─── Cash Submission OTP Notification Helper ──────────────────────────────────
+
+async function sendCashSubmissionOTPNotification(user, otp, io = null) {
+  const title = 'Cash Submission OTP';
+  const message = `Your Cash Submission OTP is: ${otp}`;
+  const notificationType = 'cash_submission_otp';
+
+  if (user?.id) {
+    await notifyUser(user.id, title, message, notificationType, null, io);
+  }
+
+  if (!user?.fcm_token) return;
+
+  try {
+    await admin.messaging().send({
+      token: user.fcm_token,
+      notification: { title, body: message },
+      data: {
+        type: notificationType,
+        otp: otp
+      },
+    });
+  } catch (fcmError) {
+    console.error('FCM send failed for cash submission OTP:', fcmError);
+  }
+}
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
 const LEDGER_BASE_URL = (process.env.LEDGER_BASE_URL).replace(/\/$/, '')
@@ -27,7 +65,7 @@ const addMonths = (date, n) => {
 
 // Submit Delivery (Batch Upload)
 const submitDelivery = async (req, res) => {
-  const { order_id, product_imei, selected_plan } = req.body;
+  const { order_id, product_imei, selected_plan, phone } = req.body;
 
   if (!order_id) {
     return res.status(400).json({
@@ -61,6 +99,15 @@ const submitDelivery = async (req, res) => {
         success: false,
         error: { code: 400, message: 'Delivery already submitted for this order' }
       });
+    }
+
+    // Update purchaser phone number if provided
+    if (phone && order.verification?.purchaser) {
+      await prisma.purchaserVerification.update({
+        where: { id: order.verification.purchaser.id },
+        data: { telephone_number: phone }
+      });
+      order.verification.purchaser.telephone_number = phone;
     }
 
     // Process files and tags
@@ -558,30 +605,40 @@ const getCashInHand = async (req, res) => {
         },
         outlet: {
           select: { name: true, code: true }
+        },
+        submission_history: {
+          orderBy: { submission_date: 'desc' }
         }
       },
       orderBy: { created_at: 'desc' }
     });
 
-    const formattedEntries = cashEntries.map(entry => ({
-      id: entry.id,
-      amount: entry.amount,
-      status: entry.status,
-      created_at: entry.created_at,
-      payment_method: entry.payment_method,
-      order_id: entry.order_id,
-      order_ref: entry.order?.order_ref || 'N/A',
-      customer_name: entry.customer_name || entry.order?.customer_name || 'Unknown',
-      product_name: entry.product_name || entry.order?.product_name || 'Unknown',
-      imei: entry.imei_serial || entry.order?.imei_serial || entry.order?.delivery?.product_imei,
-      color_variant: entry.color_variant,
-      selected_plan: entry.order?.delivery?.selected_plan,
-      outlet: entry.outlet
-    }));
+    const formattedEntries = cashEntries.map(entry => {
+      const submittedAmt = entry.submitted_amount || 0;
+      return {
+        id: entry.id,
+        amount: entry.amount,
+        submitted_amount: submittedAmt,
+        balance: entry.amount - submittedAmt,
+        cash_type: entry.cash_type || 'Advance amount payment',
+        status: entry.status,
+        created_at: entry.created_at,
+        payment_method: entry.payment_method,
+        order_id: entry.order_id,
+        order_ref: entry.order?.order_ref || 'N/A',
+        customer_name: entry.customer_name || entry.order?.customer_name || 'Unknown',
+        product_name: entry.product_name || entry.order?.product_name || 'Unknown',
+        imei: entry.imei_serial || entry.order?.imei_serial || entry.order?.delivery?.product_imei,
+        color_variant: entry.color_variant,
+        selected_plan: entry.order?.delivery?.selected_plan,
+        outlet: entry.outlet,
+        submission_history: entry.submission_history || []
+      };
+    });
 
     const totalUnpaid = formattedEntries
       .filter(e => e.status === 'pending')
-      .reduce((sum, e) => sum + (e.amount || 0), 0);
+      .reduce((sum, e) => sum + e.balance, 0);
 
     return res.status(200).json({
       success: true,
@@ -595,7 +652,7 @@ const getCashInHand = async (req, res) => {
 };
 
 const submitCashToOutlet = async (req, res) => {
-  const { cash_in_hand_ids, cash_in_hand_id, outlet_id, payment_method } = req.body;
+  const { cash_in_hand_ids, cash_in_hand_id, outlet_id, payment_method, submit_amount } = req.body;
   const deliveryBoyId = req.user?.id;
 
   let ids = [];
@@ -605,73 +662,141 @@ const submitCashToOutlet = async (req, res) => {
     ids = [parseInt(cash_in_hand_id)];
   }
 
-  if (ids.length === 0 || !outlet_id) {
-    return res.status(400).json({ success: false, message: 'cash_in_hand_ids and outlet_id are required' });
+  if (!outlet_id) {
+    return res.status(400).json({ success: false, message: 'outlet_id is required' });
   }
 
   try {
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+    // 1. Fetch available pending entries
+    let queryArgs = {
+      officer_id: deliveryBoyId,
+      status: 'pending'
+    };
+    if (ids.length > 0) {
+      queryArgs.id = { in: ids };
+    }
 
-    await prisma.cashInHand.updateMany({
-      where: {
-        id: { in: ids },
-        officer_id: deliveryBoyId,
-      },
-      data: {
-        outlet_id: parseInt(outlet_id),
-        payment_method: payment_method || 'Cash',
-        otp: otp
-      }
-    });
-
-    const entries = await prisma.cashInHand.findMany({
-      where: { id: { in: ids } },
+    const availableEntries = await prisma.cashInHand.findMany({
+      where: queryArgs,
+      orderBy: { created_at: 'asc' }, // Oldest first for FIFO
       include: {
-        officer: { select: { full_name: true, phone: true } },
+        officer: { select: { id: true, full_name: true, phone: true, fcm_token: true } },
         order: { select: { product_name: true, order_ref: true } }
       }
     });
 
-    if (entries.length === 0) {
-      return res.status(404).json({ success: false, message: 'No pending cash entries found' });
+    if (availableEntries.length === 0) {
+      return res.status(404).json({ success: false, message: 'No pending cash entries found to submit' });
     }
 
-    const totalAmount = entries.reduce((sum, e) => sum + e.amount, 0);
-    const officerName = entries[0]?.officer?.full_name || 'Officer';
-    const officerPhone = entries[0]?.officer?.phone;
+    // Calculate maximum available to submit
+    let totalPendingAvailable = 0;
+    availableEntries.forEach(e => {
+      totalPendingAvailable += (e.amount - (e.submitted_amount || 0));
+    });
 
-    // Send OTP to Delivery Officer via WhatsApp (Wati)
-    if (officerPhone) {
-      try {
-        await sendOTP(officerPhone, otp);
-        console.log(`OTP ${otp} sent to officer ${officerName} at ${officerPhone}`);
-      } catch (err) {
-        console.error('Error sending OTP to officer:', err);
+    let amountToSubmit = parseFloat(submit_amount);
+    if (isNaN(amountToSubmit) || amountToSubmit <= 0) {
+      amountToSubmit = totalPendingAvailable; // Default to full submission
+    }
+
+    if (amountToSubmit > totalPendingAvailable) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot submit more than available pending cash (PKR ${totalPendingAvailable})`
+      });
+    }
+
+    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+
+    // 2. Distribute the `amountToSubmit` across `availableEntries` (FIFO logic)
+    let remainingToSubmit = amountToSubmit;
+    const historyCreations = [];
+    const entriesToReport = [];
+
+    for (const entry of availableEntries) {
+      if (remainingToSubmit <= 0) break;
+
+      const availableInEntry = entry.amount - (entry.submitted_amount || 0);
+      const drawAmount = Math.min(availableInEntry, remainingToSubmit);
+
+      historyCreations.push({
+        cash_in_hand_id: entry.id,
+        amount_submitted: drawAmount,
+        status: 'pending',
+        otp: otp,
+        outlet_id: parseInt(outlet_id)
+      });
+
+      entriesToReport.push({
+        customer_name: entry.customer_name,
+        order_ref: entry.order?.order_ref || 'N/A',
+        product_name: entry.product_name,
+        imei: entry.imei_serial,
+        color: entry.color_variant,
+        amount: drawAmount, // Amount drawn from this entry
+        cash_type: entry.cash_type || 'Advance amount payment'
+      });
+
+      remainingToSubmit -= drawAmount;
+    }
+
+    // 3. Create the CashSubmissionHistory records
+    await prisma.cashSubmissionHistory.createMany({
+      data: historyCreations
+    });
+
+    const officer = availableEntries[0]?.officer;
+    const officerName = officer?.full_name || 'Officer';
+    const officerPhone = officer?.phone;
+
+    // 4. Persistence & Notifications
+    const otpMessage = `Your Cash Submission OTP is: ${otp}`;
+
+    // Save to OtpLog
+    const otpLog = await prisma.otpLog.create({
+      data: {
+        user_id: deliveryBoyId,
+        action: "cash_submission_otp",
+        message: otpMessage,
+        otp
       }
-    }
+    });
 
     const io = req.app.get('io');
     if (io) {
-      io.to(`outlet_${outlet_id}`).emit('cash_submission_requested', {
+      // Real-time: Emit to Officer's room (App pickup)
+      const officerRoom = `user_${deliveryBoyId}`;
+      io.to(officerRoom).emit('cash_submission_otp', {
+        otp_log_id: otpLog.id,
+        action: otpLog.action,
+        message: otpMessage,
+        otp,
+        created_at: otpLog.created_at
+      });
+
+      // Real-time: Notify Outlet
+      io.to(`outlet_${outlet_id}`).emit('cash_submission_otp', {
         officer_name: officerName,
-        amount: totalAmount,
+        amount: amountToSubmit,
         payment_method: payment_method || 'Cash',
         otp: otp,
-        entries: entries.map(e => ({
-          customer_name: e.customer_name,
-          order_ref: e.order?.order_ref || 'N/A',
-          product_name: e.product_name,
-          imei: e.imei_serial,
-          color: e.color_variant,
-          amount: e.amount
-        }))
+        entries: entriesToReport
       });
+    }
+
+    // Send through helper (App Push + Internal)
+    await sendCashSubmissionOTPNotification(officer, otp, io);
+
+    // Legacy: Send through WATI (WhatsApp)
+    if (officerPhone) {
+      sendOTP(officerPhone, otp).catch(err => console.error('WATI OTP Error:', err));
     }
 
     return res.status(200).json({
       success: true,
-      message: 'Cash submission initiated. OTP has been sent to your WhatsApp.',
-      total_amount: totalAmount
+      message: 'Cash submission initiated. OTP has been sent to your App & WhatsApp.',
+      total_amount: amountToSubmit
     });
   } catch (error) {
     console.error('submitCashToOutlet error:', error);
@@ -681,7 +806,7 @@ const submitCashToOutlet = async (req, res) => {
 
 
 const generateDeliveryOtp = async (req, res) => {
-  const { order_id } = req.body;
+  const { order_id, phone } = req.body;
 
   try {
     const order = await prisma.order.findUnique({
@@ -707,7 +832,13 @@ const generateDeliveryOtp = async (req, res) => {
       return res.status(403).json({ success: false, error: { message: 'Order not assigned to you' } });
     }
 
-    const purchaserNumber = order.verification.purchaser.telephone_number;
+    // Use provided phone if available, otherwise use purchaser phone
+    const purchaserNumber = phone || order.verification.purchaser.telephone_number;
+
+    if (!purchaserNumber) {
+      return res.status(400).json({ success: false, error: { message: 'No phone number available' } });
+    }
+
     const otp = await saveOTP(purchaserNumber, 'delivery');
     await sendOTP(purchaserNumber, otp);
 
@@ -728,7 +859,7 @@ const generateDeliveryOtp = async (req, res) => {
 };
 
 const verifyDeliveryOtp = async (req, res) => {
-  const { order_id, otp } = req.body;
+  const { order_id, phone, otp } = req.body;
 
   try {
     const order = await prisma.order.findUnique({
@@ -748,7 +879,12 @@ const verifyDeliveryOtp = async (req, res) => {
       return res.status(404).json({ success: false, error: { message: 'Verification or purchaser details not found' } });
     }
 
-    const purchaserNumber = order.verification.purchaser.telephone_number;
+    const purchaserNumber = phone || order.verification.purchaser.telephone_number;
+
+    if (!purchaserNumber) {
+      return res.status(400).json({ success: false, error: { message: 'No phone number available' } });
+    }
+
     const verification = await verifyOTP(purchaserNumber, otp, 'delivery');
     if (!verification.valid) {
       return res.status(400).json({ success: true, valid: false, message: verification.message });
@@ -940,57 +1076,65 @@ const getDeliveryBoyInventory = async (req, res) => {
   }
 };
 
-const pickOrder = async (req, res) => {
-  const { order_id } = req.body;
+// const pickOrder = async (req, res) => {
+//   const { order_id } = req.body;
 
-  try {
-    if (!order_id) {
-      return res.status(404).json({ success: false, error: { message: 'Order not found' } });
-    }
+//   try {
+//     if (!order_id) {
+//       return res.status(404).json({ success: false, error: { message: 'Order not found' } });
+//     }
 
-    await prisma.order.update({
-      where: { id: parseInt(order_id) },
-      data: { status: 'picked' }
-    });
+//     await prisma.order.update({
+//       where: { id: parseInt(order_id) },
+//       data: { status: 'picked' }
+//     });
 
-    const io = req.app.get('io');
-    await notifyAdmins(
-      'Order Picked',
-      `Order #${order_id} has been picked`,
-      'order_picked',
-      order_id,
-      io
-    );
+//     const io = req.app.get('io');
+//     await notifyAdmins(
+//       'Order Picked',
+//       `Order #${order_id} has been picked`,
+//       'order_picked',
+//       order_id,
+//       io
+//     );
 
-    return res.status(200).json({ success: true, message: 'Order status changed to Picked' });
-  } catch (error) {
-    console.error('pickOrder error:', error);
-    return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
-  }
-};
+//     return res.status(200).json({ success: true, message: 'Order status changed to Picked' });
+//   } catch (error) {
+//     console.error('pickOrder error:', error);
+//     return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
+//   }
+// };
 
 const unpickOrder = async (req, res) => {
-  const { order_id } = req.body;
+  const { order_id, feedback } = req.body;
 
   try {
     if (!order_id) {
       return res.status(404).json({ success: false, error: { message: 'Order not found' } });
     }
+
+    if (!feedback) {
+      return res.status(400).json({ success: false, error: { message: 'Feedback/reason is required' } });
+    }
+
     await prisma.order.update({
       where: { id: parseInt(order_id) },
-      data: { status: 'approved' }
+      data: {
+        status: 'postponed',
+        postponed_feedback: feedback
+      }
     });
 
     const io = req.app.get('io');
     await notifyAdmins(
-      'Order Unpicked',
-      `Order #${order_id} has been unpicked and status changed back to approved`,
+      'Order Postponed',
+      `Order #${order_id} has been unpicked and postponed. Reason: ${feedback}`,
       'order_unpicked',
       order_id,
       io
     );
 
-    return res.status(200).json({ success: true, message: 'Order status changed back to approved' });
+    return res.status(200).json({ success: true, message: 'Order has been postponed successfully', feedback });
   } catch (error) {
     console.error('unpickOrder error:', error);
     return res.status(500).json({ success: false, error: { message: 'Internal server error' } });
@@ -1148,6 +1292,32 @@ const initiateReturnExchange = async (req, res) => {
   }
 };
 
+const getDeliveryOfficerOTPLogs = async (req, res) => {
+  const deliveryBoyId = req.user?.id;
+
+  if (!deliveryBoyId) {
+    return res.status(401).json({ success: false, message: 'Authentication required' });
+  }
+
+  try {
+    const logs = await prisma.otpLog.findMany({
+      where: {
+        user_id: deliveryBoyId,
+        action: { in: ["stock_transfer_otp", "cash_submission_otp"] }
+      },
+      orderBy: { created_at: 'desc' }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: logs
+    });
+  } catch (error) {
+    console.error('getDeliveryOfficerOTPLogs error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error while fetching OTP logs' });
+  }
+};
+
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
@@ -1159,8 +1329,9 @@ module.exports = {
   generateRefundOtp,
   verifyRefundOtp,
   getDeliveryBoyInventory,
-  pickOrder,
+  // pickOrder,
   unpickOrder,
   submitCashToOutlet,
-  initiateReturnExchange
+  initiateReturnExchange,
+  getDeliveryOfficerOTPLogs
 };

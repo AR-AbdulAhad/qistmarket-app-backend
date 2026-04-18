@@ -1,8 +1,10 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const crypto = require('crypto');
+const axios = require('axios');
 const { notifyUser } = require('../utils/notificationUtils');
 const { getPKTDate } = require("../utils/dateUtils");
+const { logAction } = require('../utils/auditLogger');
 
 const admin = require('firebase-admin');
 
@@ -62,6 +64,22 @@ async function sendOrderAssignmentNotification(order, user, type, io = null) {
     });
   } catch (fcmError) {
     console.error('FCM send failed:', fcmError);
+  }
+}
+
+async function sendOrderTransferNotification(order, outletId, io = null) {
+  const users = await prisma.user.findMany({
+    where: { outlet_id: outletId },
+    select: { id: true }
+  });
+
+  const title = 'New Order Transferred';
+  const message = `Order ${order.order_ref} has been transferred to your outlet.`;
+  const notificationType = 'order_transfer';
+
+  for (const user of users) {
+    // We only send to dashboard (Database + Socket.io), NOT to mobile app FCM
+    await notifyUser(user.id, title, message, notificationType, order.id, io);
   }
 }
 
@@ -328,7 +346,8 @@ const createOrder = async (req, res) => {
         created_at: getPKTDate(new Date()),
         created_by_user_id: req.user.id,
         outlet_id: currentUser?.outlet_id || null,
-        assigned_to_user_id: assignedOfficerId
+        assigned_to_user_id: assignedOfficerId,
+        verification_assigned_at: assignedOfficerId ? new Date() : null
       },
       include: {
         created_by: { select: { username: true } },
@@ -341,6 +360,14 @@ const createOrder = async (req, res) => {
       const io = req.app.get('io');
       await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
     }
+
+    await logAction(
+      req,
+      'ORDER_CREATION',
+      `New order ${order.order_ref} created for ${order.customer_name} (${order.product_name})`,
+      order.id,
+      'Order'
+    );
 
     return res.status(201).json({
       success: true,
@@ -387,6 +414,179 @@ const createOrder = async (req, res) => {
   }
 };
 
+const createOrderFromWebsitePickup = async (req, res) => {
+  const {
+    customer_name,
+    whatsapp_number,
+    alternate_contact,
+    address,
+    city,
+    area,
+    product_name,
+    total_amount,
+    advance_amount,
+    monthly_amount,
+    months,
+    channel,
+    order_notes,
+    website_token_number
+  } = req.body;
+
+  if (!customer_name || !whatsapp_number || !address || !product_name ||
+    !total_amount || !advance_amount || !monthly_amount || !months || !website_token_number) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 400, message: 'Required fields are missing.' }
+    });
+  }
+
+  try {
+    const currentUser = await prisma.user.findUnique({ where: { id: req.user.id } });
+
+    // Check if already picked up
+    const existing = await prisma.order.findUnique({
+      where: { token_number: website_token_number }
+    });
+
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: 'This order has already been picked up by someone else.'
+      });
+    }
+
+    // Generate references
+    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const order_ref = `QIST-${dateStr}-${randomNum}`;
+    // Use website's token number as our unique token number
+    const token_number = website_token_number;
+
+    const order = await prisma.order.create({
+      data: {
+        order_ref,
+        token_number,
+        customer_name: customer_name.trim(),
+        whatsapp_number: whatsapp_number.trim(),
+        alternate_contact: alternate_contact ? alternate_contact.trim() : null,
+        address: address.trim(),
+        city: city ? city.trim() : null,
+        area: area ? area.trim() : null,
+        product_name: product_name.trim(),
+        total_amount: parseFloat(total_amount),
+        advance_amount: parseFloat(advance_amount),
+        monthly_amount: parseFloat(monthly_amount),
+        months: parseInt(months),
+        channel: channel || 'Website',
+        status: 'pending',
+        created_at: getPKTDate(new Date()),
+        created_by_user_id: req.user.id,
+        assigned_to_user_id: null,
+        verification_assigned_at: null,
+        outlet_id: (currentUser?.role?.name?.toLowerCase() === 'sales officer') ? null : (currentUser?.outlet_id || null),
+        order_notes: order_notes || `Website Pickup: ${website_token_number}`
+      },
+      include: {
+        created_by: { select: { username: true } },
+        assigned_to: { select: { id: true, username: true } }
+      }
+    });
+
+    await logAction(
+      req,
+      'WEBSITE_ORDER_PICKUP',
+      `Website order ${website_token_number} picked up by ${currentUser.full_name}. Local ref: ${order.order_ref}`,
+      order.id,
+      'Order'
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Order picked up and created successfully.',
+      data: { order }
+    });
+  } catch (error) {
+    if (error.code === 'P2002') {
+      return res.status(409).json({
+        success: false,
+        message: 'This order has already been picked up (Unique constraint).'
+      });
+    }
+    console.error('Website pickup error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+const getWebsiteOrderFeed = async (req, res) => {
+  const { page = 1, limit = 10, search = '' } = req.query;
+  const WEBSITE_API_URL = 'https://api.qistmarket.pk/api/orders';
+
+  try {
+    const targetPage = parseInt(page);
+    const targetLimit = parseInt(limit);
+    const targetOffset = (targetPage - 1) * targetLimit;
+
+    // 1. Get ALL local website token numbers to filter out
+    const localOrders = await prisma.order.findMany({
+      where: { channel: 'Website' },
+      select: { token_number: true }
+    });
+    const localTokens = new Set(localOrders.map(o => o.token_number));
+
+    let accumulatedOrders = [];
+    let currentWebPage = 1;
+    let webTotalItems = 0;
+    const CHUNK_SIZE = 50; // Fetch in larger chunks for efficiency
+
+    // 2. Fetch iteratively until we have enough "Fresh" orders to satisfy the offset + limit
+    // We limit this to a reasonable number of pages to prevent long-running loops (e.g., max 10 pages)
+    while (accumulatedOrders.length < (targetOffset + targetLimit) && currentWebPage <= 10) {
+      const response = await axios.get(WEBSITE_API_URL, {
+        params: { page: currentWebPage, limit: CHUNK_SIZE, search }
+      });
+      const webData = response.data;
+
+      if (!webData.data || webData.data.length === 0) break;
+
+      webTotalItems = webData.pagination?.totalItems || 0;
+
+      // Filter local duplicates
+      const fresh = webData.data.filter(wo => !localTokens.has(wo.tokenNumber.toString()));
+      accumulatedOrders.push(...fresh);
+
+      if (webData.data.length < CHUNK_SIZE) break; // End of source
+      currentWebPage++;
+    }
+
+    // 3. Slice the accumulated results for the current page
+    const paginatedData = accumulatedOrders.slice(targetOffset, targetOffset + targetLimit);
+
+    // 4. Calculate adjusted total
+    const adjustedTotal = Math.max(0, webTotalItems - localTokens.size);
+    const totalPages = Math.ceil(adjustedTotal / targetLimit);
+
+    return res.status(200).json({
+      success: true,
+      data: paginatedData,
+      pagination: {
+        totalItems: adjustedTotal,
+        totalPages: totalPages || 1,
+        currentPage: targetPage,
+        limit: targetLimit
+      }
+    });
+  } catch (error) {
+    console.error('Website feed proxy error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch website orders through proxy.'
+    });
+  }
+};
+
 const getOrders = async (req, res) => {
   const { page = 1, limit = 10, search = '', sortBy = 'created_at', sortDir = 'desc', ...filters } = req.query;
 
@@ -409,6 +609,10 @@ const getOrders = async (req, res) => {
           ]
         }
       ];
+    }
+
+    if (userRole === 'sales officer') {
+      where.created_by_user_id = req.user.id;
     }
 
     if (search.trim()) {
@@ -505,7 +709,7 @@ const getOrdersWithPagination = async (req, res) => {
     const baseWhere = {};
     const userRole = (req.user?.role || '').toLowerCase();
 
-    if (userRole === 'outlet') {
+    if (userRole === 'branch user') {
       baseWhere.AND = [
         {
           OR: [
@@ -514,6 +718,10 @@ const getOrdersWithPagination = async (req, res) => {
           ]
         }
       ];
+    }
+
+    if (userRole === 'sales officer') {
+      baseWhere.created_by_user_id = req.user.id;
     }
 
     if (search.trim()) {
@@ -584,6 +792,14 @@ const getOrdersWithPagination = async (req, res) => {
       },
     });
 
+    // Map orders to explicitly include timestamp fields
+    const formattedOrders = orders.map(order => ({
+      ...order,
+      verification_assigned_at: order.verification_assigned_at,
+      delivery_assigned_at: order.delivery_assigned_at,
+      recovery_assigned_at: order.recovery_assigned_at
+    }));
+
     let nextLastId = null;
     if (orders.length > 0) {
       nextLastId = orders[orders.length - 1].id;
@@ -594,12 +810,12 @@ const getOrdersWithPagination = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
-        orders,
+        orders: formattedOrders,
         pagination: {
           nextLastId,
           hasMore,
           limit: take,
-          count: orders.length,
+          count: formattedOrders.length,
           totalCount
         },
       },
@@ -636,6 +852,7 @@ const takeOrder = async (req, res) => {
       where: { id: Number(id) },
       data: {
         assigned_to_user_id: req.user.id,
+        verification_assigned_at: new Date(),
         status: 'pending',
       },
       include: {
@@ -905,6 +1122,14 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
       },
     });
 
+    // Map orders to explicitly include timestamp fields
+    const formattedOrders = orders.map(order => ({
+      ...order,
+      verification_assigned_at: order.verification_assigned_at,
+      delivery_assigned_at: order.delivery_assigned_at,
+      recovery_assigned_at: order.recovery_assigned_at
+    }));
+
     let nextLastId = null;
     if (orders.length > 0) {
       nextLastId = orders[orders.length - 1].id;
@@ -915,12 +1140,12 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
-        orders,
+        orders: formattedOrders,
         pagination: {
           nextLastId,
           hasMore,
           limit: take,
-          count: orders.length,
+          count: formattedOrders.length,
           totalCount
         },
       },
@@ -1024,7 +1249,10 @@ const assignOrder = async (req, res) => {
 
       const updated = await prisma.order.update({
         where: { id: parseInt(id) },
-        data: { assigned_to_user_id: null },
+        data: {
+          assigned_to_user_id: null,
+          verification_assigned_at: null
+        },
         include: {
           created_by: { select: { username: true } },
           assigned_to: { select: { username: true } },
@@ -1059,6 +1287,7 @@ const assignOrder = async (req, res) => {
       where: { id: parseInt(id) },
       data: {
         assigned_to_user_id: parseInt(user_id),
+        verification_assigned_at: getPKTDate(new Date()),
         status: 'pending'
       },
       include: {
@@ -1095,7 +1324,10 @@ const assignBulk = async (req, res) => {
           id: { in: order_ids.map(Number) },
           assigned_to_user_id: { not: null },
         },
-        data: { assigned_to_user_id: null },
+        data: {
+          assigned_to_user_id: null,
+          verification_assigned_at: null
+        },
       });
 
       return res.status(200).json({
@@ -1120,8 +1352,8 @@ const assignBulk = async (req, res) => {
     const verificationEntries = order_ids.map(id => ({
       order_id: parseInt(id),
       verification_officer_id: parseInt(user_id),
-      status: 'in_progress',
-      start_time: new Date()
+      status: 'pending',
+      start_time: getPKTDate(new Date())
     }));
 
     await prisma.$transaction([
@@ -1129,6 +1361,7 @@ const assignBulk = async (req, res) => {
         where: { id: { in: order_ids.map(Number) } },
         data: {
           assigned_to_user_id: parseInt(user_id),
+          verification_assigned_at: getPKTDate(new Date()),
           status: 'pending'
         }
       }),
@@ -1157,6 +1390,102 @@ const assignBulk = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const transferOrder = async (req, res) => {
+  const { id } = req.params;
+  const { outlet_id } = req.body;
+
+  if (!outlet_id) {
+    return res.status(400).json({ success: false, message: 'Outlet ID is required for transfer' });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(id) }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: parseInt(id) },
+      data: {
+        outlet_id: parseInt(outlet_id),
+        assigned_to_user_id: null, // Unassign when transferring to a new outlet queue
+        verification_assigned_at: null,
+        status: 'pending' // Reverted to pending per user request
+      },
+      include: {
+        outlet: { select: { name: true } }
+      }
+    });
+
+    const io = req.app.get('io');
+    await sendOrderTransferNotification(updatedOrder, parseInt(outlet_id), io);
+
+    await logAction(
+      req,
+      'ORDER_TRANSFER',
+      `Order ${order.order_ref} transferred to outlet: ${updatedOrder.outlet?.name || outlet_id}`,
+      order.id,
+      'Order'
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Order transferred successfully',
+      data: { order: updatedOrder },
+    });
+  } catch (error) {
+    console.error('transferOrder error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const transferBulk = async (req, res) => {
+  const { order_ids, outlet_id } = req.body;
+
+  if (!Array.isArray(order_ids) || order_ids.length === 0 || !outlet_id) {
+    return res.status(400).json({ success: false, message: 'Order IDs array and Outlet ID are required' });
+  }
+
+  try {
+    await prisma.order.updateMany({
+      where: { id: { in: order_ids.map(Number) } },
+      data: {
+        outlet_id: parseInt(outlet_id),
+        assigned_to_user_id: null,
+        verification_assigned_at: null,
+        status: 'pending'
+      }
+    });
+
+    const io = req.app.get('io');
+    const updatedOrders = await prisma.order.findMany({
+      where: { id: { in: order_ids.map(Number) } }
+    });
+
+    for (const order of updatedOrders) {
+      await sendOrderTransferNotification(order, parseInt(outlet_id), io);
+      await logAction(
+        req,
+        'ORDER_TRANSFER',
+        `Order ${order.order_ref} bulk transferred to outlet: ${outlet_id}`,
+        order.id,
+        'Order'
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `${order_ids.length} orders transferred successfully`,
+    });
+  } catch (error) {
+    console.error('transferBulk error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
@@ -1313,11 +1642,6 @@ const assignDelivery = async (req, res) => {
       include: { verification: true }
     });
 
-    console.log('Order for delivery assignment:', order?.status);
-
-    // if (!order || order?.status !== 'picked') {
-    //   return res.status(400).json({ success: false, message: 'Order not found or not approved' });
-    // }
 
     if (action === 'unassign') {
       const updatedOrder = await prisma.order.update({
@@ -1325,6 +1649,7 @@ const assignDelivery = async (req, res) => {
         data: {
           delivery_officer_id: null,
           outlet_id: null, // Also unassign from outlet
+          status: 'approved'
         },
         include: {
           delivery_officer: { select: { username: true } }
@@ -1352,7 +1677,9 @@ const assignDelivery = async (req, res) => {
       where: { id: Number(id) },
       data: {
         delivery_officer_id: Number(user_id),
+        delivery_assigned_at: getPKTDate(new Date()),
         outlet_id: officer?.outlet_id || null,
+        status: 'picked'
       },
       include: {
         delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
@@ -1389,6 +1716,7 @@ const assignBulkDelivery = async (req, res) => {
         where: { id: { in: order_ids.map(Number) } },
         data: {
           delivery_officer_id: null,
+          delivery_assigned_at: null,
           outlet_id: null, // Also unassign from outlet
           status: 'approved'
         }
@@ -1413,8 +1741,9 @@ const assignBulkDelivery = async (req, res) => {
       where: { id: { in: order_ids.map(Number) } },
       data: {
         delivery_officer_id: Number(user_id),
+        delivery_assigned_at: getPKTDate(new Date()),
         outlet_id: officer?.outlet_id || null, // Connects order to the outlet
-        status: 'approved'
+        status: 'picked'
       }
     });
 
@@ -1454,6 +1783,14 @@ const cancelOrder = async (req, res) => {
         cancelled_reason: reason || 'Cancelled by admin',
       },
     });
+
+    await logAction(
+      req,
+      'ORDER_CANCELLATION',
+      `Order ${updatedOrder.order_ref} was cancelled. Reason: ${reason || 'Cancelled by admin'}`,
+      updatedOrder.id,
+      'Order'
+    );
 
     return res.status(200).json({
       success: true,
@@ -1497,6 +1834,14 @@ const updateOrderItem = async (req, res) => {
         },
       });
     });
+
+    await logAction(
+      req,
+      'ORDER_UPDATE',
+      `Order ${updatedOrder.order_ref} details or product name were updated.`,
+      updatedOrder.id,
+      'Order'
+    );
 
     return res.status(200).json({
       success: true,
@@ -1551,6 +1896,7 @@ const getDeliveredOrders = async (req, res) => {
       include: {
         created_by: { select: { username: true } },
         delivery_officer: { select: { username: true, full_name: true } },
+        recovery_officer: { select: { username: true, full_name: true } },
       },
     });
 
@@ -1580,7 +1926,10 @@ const assignRecovery = async (req, res) => {
   try {
     const updatedOrder = await prisma.order.update({
       where: { id: parseInt(id) },
-      data: { recovery_officer_id: parseInt(user_id) },
+      data: {
+        recovery_officer_id: parseInt(user_id),
+        recovery_assigned_at: getPKTDate(new Date())
+      },
       include: {
         recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
       }
@@ -1609,7 +1958,10 @@ const assignBulkRecovery = async (req, res) => {
   try {
     await prisma.order.updateMany({
       where: { id: { in: order_ids.map(Number) } },
-      data: { recovery_officer_id: parseInt(user_id) },
+      data: {
+        recovery_officer_id: parseInt(user_id),
+        recovery_assigned_at: getPKTDate(new Date())
+      },
     });
 
     // Send notifications for bulk recovery assignment
@@ -1879,5 +2231,9 @@ module.exports = {
   getOfficerApprovedOrders,
   getHandoverHistory,
   expireOrders,
-  sendOrderAssignmentNotification
+  sendOrderAssignmentNotification,
+  createOrderFromWebsitePickup,
+  getWebsiteOrderFeed,
+  transferOrder,
+  transferBulk
 };

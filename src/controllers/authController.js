@@ -6,6 +6,7 @@ const sendEmail = require('../utils/sendEmail');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP } = require('../services/watiService');
 const { getOTPEmailTemplate } = require('../utils/emailTemplates');
+const { logAction } = require('../utils/auditLogger');
 
 const notifyAdmins = async (title, message, type, relatedId = null, io = null) => {
   try {
@@ -253,7 +254,7 @@ const verifyLoginOTP = async (req, res) => {
       phone: user.phone,
       role_id: user.role_id,
       role: user.role.name,
-      permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
+      permissions: user.permissions_json ? user.permissions_json : null,
     };
 
     const token = jwt.sign(payload, jwtSecret);
@@ -309,10 +310,23 @@ const verifyWebLoginOTP = async (req, res) => {
       phone: user.phone,
       role_id: user.role_id,
       role: user.role.name,
-      permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
+      permissions: user.permissions_json ? user.permissions_json : null,
     };
 
     const token = jwt.sign(payload, jwtSecret);
+
+    // Manual log since req.user is not yet set in middleware
+    await prisma.securityLog.create({
+        data: {
+            outlet_id: user.outlet_id || 0,
+            user_id: user.id,
+            user_name: user.full_name,
+            action: 'USER_LOGIN',
+            details: `User logged into dashboard from ${req.ip || 'unknown IP'}`,
+            target_id: user.id,
+            target_type: 'User'
+        }
+    });
 
     return res.json({ success: true, message: 'Login successful.', token, user: payload });
   } catch (error) {
@@ -526,7 +540,7 @@ const getUsers = async (req, res) => {
       bio: user.bio,
       image: user.image,
       coverImage: user.coverImage,
-      permissions: user.permissions_json ? JSON.parse(user.permissions_json) : null,
+      permissions: user.permissions_json ? user.permissions_json : null,
       outlet_id: user.outlet_id,
       outlet: user.outlet,
     }));
@@ -661,7 +675,7 @@ const updateUserPermissions = async (req, res) => {
 
     const updated = await prisma.user.update({
       where: { id: parseInt(userId) },
-      data: { permissions_json: JSON.stringify(permissions_json) },
+      data: { permissions_json: permissions_json },
       include: { role: true },
     });
 
@@ -671,7 +685,7 @@ const updateUserPermissions = async (req, res) => {
       data: {
         user: {
           id: updated.id,
-          permissions: updated.permissions_json ? JSON.parse(updated.permissions_json) : {},
+          permissions: updated.permissions_json ? updated.permissions_json : {},
         },
       },
     });
@@ -738,7 +752,7 @@ const getMe = async (req, res) => {
     }
 
     if (user.role && user.role.permissions_json) {
-      user.permissions = JSON.parse(user.role.permissions_json);
+      user.permissions = user.role.permissions_json;
       delete user.role.permissions_json;
     }
 
@@ -810,7 +824,7 @@ const updateProfile = async (req, res) => {
       bio: updatedUser.bio,
       image: updatedUser.image,
       coverImage: updatedUser.coverImage,
-      permissions: updatedUser.permissions_json ? JSON.parse(updatedUser.permissions_json) : null,
+      permissions: updatedUser.permissions_json ? updatedUser.permissions_json : null,
     };
 
     const newToken = jwt.sign(payload, jwtSecret);

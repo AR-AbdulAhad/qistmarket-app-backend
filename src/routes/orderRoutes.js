@@ -25,7 +25,11 @@ const {
   getHandoverHistory,
   takeOrder,
   getCsrDashboardStats,
-  getExpiredAssignedOrders
+  getExpiredAssignedOrders,
+  createOrderFromWebsitePickup,
+  getWebsiteOrderFeed,
+  transferOrder,
+  transferBulk
 } = require('../controllers/ordersController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -41,6 +45,8 @@ router.get('/orders/delivery-status', authenticateJWT, getDeliveryStatus);
 router.post('/orders/create', authenticateJWT, createOrder);
 router.get('/orders', authenticateJWT, getOrders);
 router.get('/orders/csr-dashboard-stats', authenticateJWT, getCsrDashboardStats);
+router.post('/orders/website-pickup', authenticateJWT, createOrderFromWebsitePickup);
+router.get('/orders/website-feed', authenticateJWT, getWebsiteOrderFeed);
 router.get('/orders/expired/assigned', authenticateJWT, getExpiredAssignedOrders);
 router.get('/orders/scroll', authenticateJWT, getOrdersWithPagination);
 router.get('/orders/deliver/scroll', authenticateJWT, getMyDeliveryOrdersWithPagination);
@@ -52,6 +58,8 @@ router.post('/orders/assign-bulk-delivery', authenticateJWT, assignBulkDelivery)
 router.patch('/orders/:id/cancel', authenticateJWT, cancelOrder);
 router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
 router.patch('/orders/:id/take', authenticateJWT, takeOrder);
+router.patch('/orders/:id/transfer', authenticateJWT, transferOrder);
+router.post('/orders/transfer-bulk', authenticateJWT, transferBulk);
 
 // Handover Routes
 router.post('/orders/:id/initiate-handover', authenticateJWT, initiateHandover);

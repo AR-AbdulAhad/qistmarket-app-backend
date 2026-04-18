@@ -2,6 +2,48 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const { notifyUser, notifyAdmins } = require('../utils/notificationUtils');
 const { sendOTP } = require('../services/watiService');
+const { logAction } = require('../utils/auditLogger');
+const axios = require('axios');
+const admin = require('firebase-admin');
+
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    }),
+  });
+}
+
+// ─── Stock Transfer OTP Notification Helper ──────────────────────────────────
+
+async function sendStockTransferOTPNotification(user, otp, recipientType, io = null) {
+  const title = 'Stock Transfer OTP';
+  const message = `Your Stock Transfer OTP is: ${otp}`;
+  const notificationType = 'transfer_otp';
+  
+  if (user?.id) {
+    await notifyUser(user.id, title, message, notificationType, null, io);
+  }
+
+  if (!user?.fcm_token) return;
+
+  try {
+    await admin.messaging().send({
+      token: user.fcm_token,
+      notification: { title, body: message },
+      data: {
+        type: notificationType,
+        otp: otp,
+        recipient_type: recipientType,
+      },
+    });
+  } catch (fcmError) {
+    console.error('FCM send failed for transfer OTP:', fcmError);
+  }
+}
+
 
 function roundUpToNearest50(amount) {
     return Math.ceil(amount / 50) * 50;
@@ -73,10 +115,58 @@ const getInventory = async (req, res) => {
     }
 
     try {
-        const inventory = await prisma.outletInventory.findMany({
+        // 1. Fetch Master Products from the external API
+        let masterProducts = [];
+        try {
+            const externalRes = await axios.get('https://api.qistmarket.pk/api/product');
+            masterProducts = externalRes.data || [];
+        } catch (err) {
+            console.warn('Sync warning: Could not fetch master products.', err.message);
+        }
+
+        // 2. Fetch current inventory for the outlet
+        const currentInventory = await prisma.outletInventory.findMany({
             where: { outlet_id }
         });
-        res.json({ success: true, inventory });
+
+        // 3. Sync: Ensure every unique master product has at least one record in the outlet's table.
+        if (masterProducts.length > 0) {
+            const activeProductNames = new Set(currentInventory.map(i => i.product_name.toLowerCase().trim()));
+            
+            const toCreate = masterProducts.filter(mp => 
+                mp.name && !activeProductNames.has(mp.name.toLowerCase().trim())
+            );
+
+            if (toCreate.length > 0) {
+                const batchData = toCreate.map(mp => {
+                    const price = parseFloat(mp.price) || 0;
+                    return {
+                        outlet_id,
+                        product_name: mp.name,
+                        category: mp.category_name || 'General',
+                        imei_serial: null,
+                        color_variant: null,
+                        quantity: 1, 
+                        purchase_price: price,
+                        installment_price: 0,
+                        installment_plans: generateInstallments(mp.category_name || 'General', price),
+                        status: 'In Stock'
+                    };
+                });
+
+                await prisma.outletInventory.createMany({
+                    data: batchData,
+                    skipDuplicates: true
+                });
+
+                const updatedInventory = await prisma.outletInventory.findMany({
+                    where: { outlet_id }
+                });
+                return res.json({ success: true, inventory: updatedInventory });
+            }
+        }
+
+        res.json({ success: true, inventory: currentInventory });
     } catch (error) {
         console.error('getInventory error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -98,17 +188,19 @@ const addInventory = async (req, res) => {
     try {
         const createdItems = [];
         for (const item of items) {
-            const { product_name, category, imei_serial, purchase_price, status, color_variant, quantity } = item;
+            const { product_name, category, imei_serial, purchase_price, status, color_variant, quantity, installment_plans } = item;
 
             if (!product_name || purchase_price === undefined) {
                 continue;
             }
 
-            // Uniqueness is ignored for generic cases; but if IMEI exists and given, we avoid dupes if quantity=1 maybe. 
-            // In Prisma schema imei_serial is Optional string now without unique. So we can just add.
-
             const purchasePriceNum = parseFloat(purchase_price);
-            const instPlans = generateInstallments(category || '', purchasePriceNum);
+            
+            // If installment_plans are provided in the request (from external API), use them.
+            // Otherwise, generate new ones.
+            const instPlans = (installment_plans && Array.isArray(installment_plans)) 
+                ? installment_plans 
+                : generateInstallments(category || '', purchasePriceNum);
 
             const created = await prisma.outletInventory.create({
                 data: {
@@ -125,6 +217,16 @@ const addInventory = async (req, res) => {
                 }
             });
             createdItems.push(created);
+        }
+
+        if (createdItems.length > 0) {
+            await logAction(
+                req, 
+                'STOCK_ADDITION', 
+                `Added ${createdItems.length} items to inventory. (First item: ${createdItems[0].product_name})`,
+                createdItems[0].id,
+                'Inventory'
+            );
         }
 
         res.status(201).json({ success: true, count: createdItems.length, items: createdItems });
@@ -145,9 +247,10 @@ const initiateStockTransfer = async (req, res) => {
     try {
         let recipientIdentifier = '';
         let recipientPhone = '';
+        let doUser = null;
 
         if (to_type === 'Delivery Officer') {
-            const doUser = await prisma.user.findFirst({
+            doUser = await prisma.user.findFirst({
                 where: { id: parseInt(to_id), role_id: 2 }
             });
             if (!doUser) return res.status(404).json({ success: false, message: 'Delivery officer not found.' });
@@ -187,8 +290,47 @@ const initiateStockTransfer = async (req, res) => {
             }
         });
 
-        // Use WATI to dispatch the OTP message via WhatsApp
-        await sendOTP(recipientPhone, otp);
+        // Dispatch OTP
+        if (to_type === 'Delivery Officer') {
+            const message = `Your Stock Transfer OTP is: ${otp}`;
+            console.log(`[initiateStockTransfer] Delivery Officer detected. to_id=${to_id}, otp=${otp}`);
+
+            // Save to dedicated OtpLog table
+             const otpLog = await prisma.otpLog.create({
+                data: {
+                    user_id: parseInt(to_id),
+                    action: "stock_transfer_otp",
+                    message,
+                    otp
+                }
+            });
+            console.log(`[initiateStockTransfer] OtpLog created: id=${otpLog.id}`);
+
+            const io = req.app.get('io');
+            if (io) {
+                const room = `user_${to_id}`;
+                const sockets = await io.in(room).fetchSockets();
+                console.log(`[initiateStockTransfer] Emitting to room "${room}" - ${sockets.length} connected socket(s)`);
+                io.to(room).emit('stock_transfer_otp', {
+                    otp_log_id: otpLog.id,
+                    action: otpLog.action,
+                    message: otpLog.message,
+                    otp,
+                    created_at: otpLog.created_at
+                });
+                console.log(`[initiateStockTransfer] ✅ stock_transfer_otp emitted to ${room}`);
+            } else {
+                console.warn(`[initiateStockTransfer] ⚠️ io is not available on req.app`);
+            }
+
+            await sendStockTransferOTPNotification(doUser, otp, 'Delivery Officer', io);
+        } else {
+    
+            // Outlet to Outlet still uses WATI
+            if (recipientPhone) {
+                await sendOTP(recipientPhone, otp).catch(e => console.error('WATI OTP Error:', e));
+            }
+        }
 
         res.json({ success: true, message: `OTP sent successfully to ${to_type}.` });
     } catch (error) {
@@ -245,9 +387,18 @@ const verifyStockTransfer = async (req, res) => {
                 let isFullTransfer = (item.quantity <= transferQty);
                 let actualTransferQty = isFullTransfer ? item.quantity : transferQty;
 
-                let targetPayload = { status: 'In Stock' }; 
+                let targetPayload = { 
+                    status: 'Out Of Stock',
+                    imei_serial: item.imei_serial || payloadItem.imei_serial || null,
+                    color_variant: item.color_variant || payloadItem.color_variant || null
+                }; 
                 if (to_type === 'Outlet') {
-                    targetPayload = { status: 'In Stock', outlet_id: targetId };
+                    targetPayload = { 
+                        status: 'In Stock', 
+                        outlet_id: targetId,
+                        imei_serial: item.imei_serial || payloadItem.imei_serial || null,
+                        color_variant: item.color_variant || payloadItem.color_variant || null
+                    };
                 }
 
                 if (isFullTransfer) {
@@ -268,8 +419,8 @@ const verifyStockTransfer = async (req, res) => {
                             outlet_id: (to_type === 'Outlet') ? targetId : outlet_id,
                             product_name: item.product_name,
                             category: item.category,
-                            imei_serial: item.imei_serial,
-                            color_variant: item.color_variant,
+                            imei_serial: item.imei_serial || payloadItem.imei_serial || null,
+                            color_variant: item.color_variant || payloadItem.color_variant || null,
                             quantity: actualTransferQty,
                             purchase_price: item.purchase_price,
                             installment_price: item.installment_price,
@@ -500,5 +651,6 @@ module.exports = {
     updateInventoryItem,
     deleteInventoryItem,
     bulkUpdateInventory,
-    bulkDeleteInventory
+    bulkDeleteInventory,
+    generateInstallments
 };

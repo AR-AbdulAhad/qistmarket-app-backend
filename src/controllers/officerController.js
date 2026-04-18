@@ -91,7 +91,7 @@ const getAllVerificationOfficers = async (req, res) => {
             : null,
         current_verification: o.current_active_verification,
         monthly_online_hours: monthlyStatsMap.get(o.id) || '0.00',
-        profile_history: Array.isArray(o.officer_profile_history) ? o.officer_profile_history : [],
+        profile_history: o.officer_profile_history || [],
       };
     });
 
@@ -146,7 +146,7 @@ const getOfficerProfileDetail = async (req, res) => {
         bike_km_range: officer.bike_km_range,
         working_hours_start: officer.working_hours_start,
         working_hours_end: officer.working_hours_end,
-        profile_history: Array.isArray(officer.officer_profile_history) ? officer.officer_profile_history : [],
+        profile_history: officer.officer_profile_history || [],
       },
     });
   } catch (error) {
@@ -171,6 +171,12 @@ const updateOfficerProfile = async (req, res) => {
 
     if (!currentUser) {
       return res.status(404).json({ success: false, error: { code: 404, message: 'User not found' } });
+    }
+
+    // Parse existing history from JSON string
+    let existingHistory = [];
+    if (currentUser.officer_profile_history) {
+      existingHistory = currentUser.officer_profile_history;
     }
 
     const updatedBikeKmRange =
@@ -210,12 +216,7 @@ const updateOfficerProfile = async (req, res) => {
         ...(working_hours_start !== undefined && { working_hours_start: updatedStart }),
         ...(working_hours_end !== undefined && { working_hours_end: updatedEnd }),
         ...(historyEntry && {
-          officer_profile_history: [
-            ...(Array.isArray(currentUser.officer_profile_history)
-              ? currentUser.officer_profile_history
-              : []),
-            historyEntry,
-          ],
+          officer_profile_history: [...existingHistory, historyEntry],
         }),
       },
       select: {
@@ -226,20 +227,27 @@ const updateOfficerProfile = async (req, res) => {
       },
     });
 
+    // Parse the updated history for response
+    let parsedHistory = [];
+    if (updated.officer_profile_history) {
+      parsedHistory = updated.officer_profile_history;
+    }
+
     // Emit socket event if profile was updated
     if (hasChange) {
       const io = req.app.get('io');
       if (io) {
         io.to('admins').emit('officer_profile_updated', {
           officerId: req.user.id,
-          profile_history: Array.isArray(updated.officer_profile_history)
-            ? updated.officer_profile_history
-            : [],
+          profile_history: parsedHistory,
         });
       }
     }
 
-    return res.json({ success: true, message: 'Profile updated', data: updated });
+    return res.json({ success: true, message: 'Profile updated', data: {
+      ...updated,
+      officer_profile_history: parsedHistory,
+    } });
   } catch (error) {
     console.error('updateOfficerProfile error:', error);
     return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
@@ -420,7 +428,7 @@ const getAllDeliveryOfficers = async (req, res) => {
           : null,
       current_delivery: o.deliveries[0] || null,
       monthly_online_hours: monthlyStatsMap.get(o.id) || '0.00',
-      profile_history: Array.isArray(o.officer_profile_history) ? o.officer_profile_history : [],
+      profile_history: o.officer_profile_history || [],
     }));
 
     return res.json({ success: true, data: { officers: formatted } });
@@ -506,7 +514,7 @@ const getAllRecoveryOfficers = async (req, res) => {
           : null,
       current_recovery: o.recovery_orders[0] || null,
       monthly_online_hours: monthlyStatsMap.get(o.id) || '0.00',
-      profile_history: Array.isArray(o.officer_profile_history) ? o.officer_profile_history : [],
+      profile_history: o.officer_profile_history || [],
     }));
 
     return res.json({ success: true, data: { officers: formatted } });

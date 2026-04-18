@@ -77,22 +77,16 @@ const getDeliveryOfficerAnalytics = async (req, res) => {
     let totalWorkingHours = 0;
     let totalKM = 0;
     if (user && user.officer_profile_history) {
-      try {
-        const history = Array.isArray(user.officer_profile_history)
-          ? user.officer_profile_history
-          : JSON.parse(user.officer_profile_history);
-        // Filter by date range if possible
-        history.forEach(h => {
-          const date = new Date(h.date || h.day || h.timestamp);
-          if (date >= gte && date < lt) {
-            if (h.working_hours) totalWorkingHours += Number(h.working_hours);
-            if (h.km) totalKM += Number(h.km);
-            if (h.bike_km) totalKM += Number(h.bike_km);
-          }
-        });
-      } catch (e) {
-        // ignore parse errors
-      }
+      const history = user.officer_profile_history;
+      // Filter by date range if possible
+      history.forEach(h => {
+        const date = new Date(h.date || h.day || h.timestamp);
+        if (date >= gte && date < lt) {
+          if (h.working_hours) totalWorkingHours += Number(h.working_hours);
+          if (h.km) totalKM += Number(h.km);
+          if (h.bike_km) totalKM += Number(h.bike_km);
+        }
+      });
     }
 
     return res.status(200).json({

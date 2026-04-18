@@ -16,8 +16,11 @@ const {
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,
-    verifyInstallmentPayment
+    verifyInstallmentPayment,
+    getOutletOfficers,
+    getOfficerDetails
 } = require('../controllers/outletController');
+const { generateSmartPayQr, checkSmartPayQr } = require('../controllers/smartPayController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
 router.post('/outlets', authenticateJWT, createOutlet);
@@ -42,5 +45,11 @@ router.get('/outlet/installments', authenticateJWT, getOutletInstallments);
 // Installment Payment flows (Outlet Managers)
 router.post('/outlet/installment/generate-otp', authenticateJWT, generateInstallmentOtp);
 router.post('/outlet/installment/verify-and-pay', authenticateJWT, verifyInstallmentPayment);
+router.post('/outlet/installment/generate-smartpay-qr', authenticateJWT, generateSmartPayQr);
+router.get('/outlet/installment/check-smartpay-qr', authenticateJWT, checkSmartPayQr);
+
+// Team Management (Delivery/Recovery Officers)
+router.get('/outlet/team/list', authenticateJWT, getOutletOfficers);
+router.get('/outlet/team/details/:id', authenticateJWT, getOfficerDetails);
 
 module.exports = router;

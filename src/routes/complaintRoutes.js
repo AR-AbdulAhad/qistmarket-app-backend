@@ -1,9 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { createComplaint, getComplaints } = require('../controllers/complaintController');
+const { createComplaint, getComplaints, updateComplaint } = require('../controllers/complaintController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
+const upload = require('../middlewares/uploadMiddleware');
+const fixUploadPath = require('../middlewares/fixUploadPath');
 
-router.get('/', authenticateJWT, getComplaints);
-router.post('/', authenticateJWT, createComplaint);
+router.get('/complaints', authenticateJWT, getComplaints);
+router.post('/complaints', authenticateJWT, upload.array('media', 5), fixUploadPath, createComplaint);
+router.put('/complaints/:id', authenticateJWT, updateComplaint);
 
 module.exports = router;

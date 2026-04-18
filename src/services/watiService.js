@@ -159,10 +159,38 @@ const sendNextInstallmentReminder = async (phone, {
   return sendTemplate(phone, WATI_REMINDER_TEMPLATE, WATI_REMINDER_BROADCAST, parameters);
 };
 
+// ─── Template 5: Complaint Received ───────────────────────────────────────
+const WATI_COMPLAINT_RECEIVED_TEMPLATE = process.env.WATI_COMPLAINT_RECEIVED_TEMPLATE || 'complaint_received';
+const WATI_COMPLAINT_RECEIVED_BROADCAST = process.env.WATI_COMPLAINT_RECEIVED_TEMPLATE || 'complaint_received';
+
+const sendComplaintReceived = async (phone, { customerName, complaintId }) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: complaintId || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_COMPLAINT_RECEIVED_TEMPLATE, WATI_COMPLAINT_RECEIVED_BROADCAST, parameters);
+};
+
+// ─── Template 6: Complaint Resolved ───────────────────────────────────────
+const WATI_COMPLAINT_RESOLVED_TEMPLATE = process.env.WATI_COMPLAINT_RESOLVED_TEMPLATE || 'complaint_resolved';
+const WATI_COMPLAINT_RESOLVED_BROADCAST = process.env.WATI_COMPLAINT_RESOLVED_TEMPLATE || 'complaint_resolved';
+
+const sendComplaintResolved = async (phone, { customerName, complaintId, note }) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: complaintId || 'N/A' },
+    { name: '3', value: note || 'Resolved gracefully' },
+  ];
+  return sendTemplate(phone, WATI_COMPLAINT_RESOLVED_TEMPLATE, WATI_COMPLAINT_RESOLVED_BROADCAST, parameters);
+};
+
+
 module.exports = {
   sendOTP,
   sendDeliveryConfirmation,
   sendInstallmentLedger,
   sendInstallmentPaymentReceipt,
   sendNextInstallmentReminder,
+  sendComplaintReceived,
+  sendComplaintResolved,
 };

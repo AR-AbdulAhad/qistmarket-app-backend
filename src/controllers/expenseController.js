@@ -1,6 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
+const { logAction } = require('../utils/auditLogger');
 
 // Helper to generate sequential Voucher Number: EV-YYYY-XXXX
 const generateVoucherNumber = async () => {
@@ -79,6 +80,14 @@ const createExpenseVoucher = async (req, res) => {
             return voucher;
         });
 
+        await logAction(
+            req, 
+            'EXPENSE_ENTRY', 
+            `New expense voucher ${result.voucher_number} created for PKR ${result.total_amount}.`,
+            result.id,
+            'ExpenseVoucher'
+        );
+
         res.status(201).json({ success: true, voucher: result });
     } catch (error) {
         console.error('createExpenseVoucher error:', error);
@@ -104,6 +113,14 @@ const deleteExpenseVoucher = async (req, res) => {
 
             return voucher;
         });
+
+        await logAction(
+            req, 
+            'EXPENSE_DELETION', 
+            `Expense voucher ${result.voucher_number} (PKR ${result.total_amount}) was deleted.`,
+            result.id,
+            'ExpenseVoucher'
+        );
 
         res.json({ success: true, message: 'Voucher deleted successfully.' });
     } catch (error) {

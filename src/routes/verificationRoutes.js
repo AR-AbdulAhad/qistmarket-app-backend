@@ -43,6 +43,7 @@ router.get('/officer/orders/cancelled', authenticateJWT, getMyCancelledOrders);
 
 router.get(
   '/officer/customers',
+  authenticateJWT,
   getMyCustomersWithOrdersAndLedger
 );
 
