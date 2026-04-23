@@ -955,6 +955,17 @@ model OtpLog {
   @@map("otp_logs")
 }
 
+model AppVersion {
+  id            Int      @id @default(autoincrement())
+  version       String   @unique
+  force_update  Boolean  @default(false)
+  message       String?  @db.Text
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  @@map("app_versions")
+}
+
 enum EmploymentType {
   EMPLOYED
   SELF_EMPLOYED

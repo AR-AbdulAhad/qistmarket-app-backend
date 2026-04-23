@@ -13,6 +13,7 @@ const jwt = require('jsonwebtoken');
 // Route Imports
 // ────────────────────────────────────────────────
 const ledgerRoutes = require('./src/routes/ledgerRoutes');
+const appVersionRoutes = require('./src/routes/appVersionRoutes');
 const authRoutes = require('./src/routes/authRoutes');
 const orderRoutes = require('./src/routes/orderRoutes');
 const { expireOrders } = require('./src/controllers/ordersController');
@@ -422,7 +423,8 @@ app.get('/', (req, res) => {
 // ────────────────────────────────────────────────
 // Routes
 // ────────────────────────────────────────────────
-app.use('/ledger', ledgerRoutes);    // Public ledger routes — no auth required, must be first!
+app.use('/ledger', ledgerRoutes); 
+app.use('/api/app-version', appVersionRoutes);   // Public ledger routes — no auth required, must be first!
 app.use('/api/ledger', ledgerRoutes);
 app.use('/api', authRoutes);
 app.use('/api', outletRoutes); // Moved up
