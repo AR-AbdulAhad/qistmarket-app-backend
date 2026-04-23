@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const { notifyAdmins } = require('../utils/notificationUtils');
 const { sendOrderAssignmentNotification } = require('./ordersController');
 const { getPKTDate } = require("../utils/dateUtils");
@@ -192,6 +191,7 @@ const startVerification = async (req, res) => {
 };
 
 // Save Purchaser Verification (updated with nearest_location)
+// Save Purchaser Verification - WITH ORDER DATA SWAP LOGIC
 const savePurchaserVerification = async (req, res) => {
   const { verification_id } = req.params;
   const {
@@ -225,17 +225,91 @@ const savePurchaserVerification = async (req, res) => {
     business_name,
     established_since,
     business_address,
-    net_income
+    net_income,
+    order_id
   } = req.body;
 
   try {
-    const verification = await prisma.verification.findUnique({
-      where: { id: parseInt(verification_id) }
+    const orders = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
     });
 
-    if (!verification) {
-      return res.status(404).json({ success: false, error: { code: 404, message: 'Verification not found' } });
+    if (!orders) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Order not found' } });
     }
+
+    // ============================================================
+    // 🔥 STEP 1: ORDER KA PURANA DUMMY DATA DUMMY_CUSTOMER TABLE MEIN SAVE KARO
+    // ============================================================
+    const ordersData = orders;
+
+    // Check agar already dummy customer record exist karta hai toh update karo
+    const existingDummyCustomer = await prisma.dummyCustomer.findFirst({
+      where: { order_id: ordersData.id }
+    });
+
+    if (existingDummyCustomer) {
+      // Update existing dummy record
+      await prisma.dummyCustomer.update({
+        where: { id: existingDummyCustomer.id },
+        data: {
+          customer_name: ordersData.customer_name,
+          whatsapp_number: ordersData.whatsapp_number,
+          address: ordersData.address,
+          city: ordersData.city,
+          area: ordersData.area,
+          block: ordersData.block,
+          house_no: ordersData.house_no,
+          street: ordersData.street,
+          zone: ordersData.zone,
+          alternate_contact: ordersData.alternate_contact,
+          moved_at: getPKTDate(new Date())
+        }
+      });
+    } else {
+      // Create new dummy customer record
+      await prisma.dummyCustomer.create({
+        data: {
+          order_id: ordersData.id,
+          customer_name: ordersData.customer_name,
+          whatsapp_number: ordersData.whatsapp_number,
+          address: ordersData.address,
+          city: ordersData.city,
+          area: ordersData.area,
+          block: ordersData.block,
+          house_no: ordersData.house_no,
+          street: ordersData.street,
+          zone: ordersData.zone,
+          alternate_contact: ordersData.alternate_contact,
+          moved_at: getPKTDate(new Date())
+        }
+      });
+    }
+
+    // ============================================================
+    // 🔥 STEP 2: PURCHASER KI REAL DETAILS ORDER TABLE MEIN UPDATE KARO
+    // ============================================================
+    
+    await prisma.order.update({
+      where: { id: ordersData.id },
+      data: {
+        customer_name: name,  // Real name from purchaser
+        whatsapp_number: telephone_number,  // Real phone from purchaser
+        address: present_address,  // Real address from purchaser
+        city: ordersData.city,
+        area: present_area,
+        block: present_block,
+        house_no: present_house_no,
+        street: present_street,
+        zone: present_zone,
+        alternate_contact: telephone_number,
+        updated_at: getPKTDate(new Date())
+      }
+    });
+
+    // ============================================================
+    // 🔥 STEP 3: PURCHASER VERIFICATION TABLE SAVE KARO (NORMAL)
+    // ============================================================
 
     const data = {
       name: name || '',
@@ -297,10 +371,21 @@ const savePurchaserVerification = async (req, res) => {
       }
     });
 
+    // ============================================================
+    // 🔥 OPTIONAL: Response mein batayein ke dummy data shift ho gaya
+    // ============================================================
+
     return res.status(200).json({
       success: true,
-      message: 'Purchaser verification saved successfully',
-      data: { purchaser }
+      message: 'Purchaser verification saved successfully!',
+      data: { 
+        purchaser,
+        order_updated: {
+          customer_name: name,
+          whatsapp_number: telephone_number,
+          address: present_address
+        }
+      }
     });
   } catch (error) {
     console.error('Save purchaser error:', error);
@@ -1087,7 +1172,17 @@ const getVerificationByOrderId = async (req, res) => {
           select: {
             id: true,
             order_ref: true,
-            status: true
+            status: true,
+            customer_name: true,
+            whatsapp_number: true,
+            address: true,
+            city: true,
+            area: true,
+            block: true,
+            house_no: true,
+            street: true,
+            zone: true,
+            alternate_contact: true
           }
         },
         verification_officer: {
@@ -2114,6 +2209,286 @@ const updateLocationVerified = async (req, res) => {
   }
 };
 
+const getDeliveredProductDetails = async (req, res) => {
+  const { order_id } = req.params;
+
+  try {
+    // Fetch order with delivery and cash_in_hand data
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        delivery: {
+          include: {
+            installment_ledger: true
+          }
+        },
+        cash_in_hand: {
+          orderBy: { created_at: 'desc' },
+          take: 1
+        }
+      }
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 404, message: 'Order not found' }
+      });
+    }
+
+    // Check if order is delivered
+    if (!order.is_delivered && order.status !== 'delivered') {
+      return res.status(400).json({
+        success: false,
+        error: { code: 400, message: 'Order is not delivered yet' }
+      });
+    }
+
+    // Get IMEI from delivery or cash_in_hand
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || 
+                      order.delivery?.product_imei || 
+                      order.imei_serial;
+
+    let inventoryDetails = null;
+
+    // Fetch inventory details if IMEI exists
+    if (imeiSerial) {
+      const inventory = await prisma.outletInventory.findFirst({
+        where: { imei_serial: imeiSerial }
+      });
+
+      if (inventory) {
+        inventoryDetails = {
+          product_name: inventory.product_name,
+          category: inventory.category,
+          color_variant: inventory.color_variant,
+          imei_serial: inventory.imei_serial,
+          purchase_price: inventory.purchase_price,
+          installment_price: inventory.installment_price,
+          status: inventory.status
+        };
+      }
+    }
+
+    // Extract delivery details
+    let deliveryDetails = null;
+      if (order.delivery) {
+        // Fetch delivery agent details
+        let deliveryAgentName = null;
+        if (order.delivery.delivery_agent_id) {
+          const deliveryAgent = await prisma.user.findUnique({
+            where: { id: order.delivery.delivery_agent_id },
+            select: { full_name: true, username: true }
+          });
+          if (deliveryAgent) {
+            deliveryAgentName = `${deliveryAgent.full_name} (${deliveryAgent.username})`;
+          }
+        }
+        
+        deliveryDetails = {
+          id: order.delivery.id,
+          status: order.delivery.status,
+          start_time: order.delivery.start_time,
+          end_time: order.delivery.end_time,
+          feedback: order.delivery.feedback,
+          verified: order.delivery.verified,
+          product_imei: order.delivery.product_imei,
+          selected_plan: order.delivery.selected_plan,
+          self_pickup: order.delivery.self_pickup,
+          delivery_agent_id: order.delivery.delivery_agent_id,
+          delivery_agent_name: deliveryAgentName // Add agent name here
+        };
+      }
+
+    // Extract advance payment details
+    const advancePayment = order.cash_in_hand?.[0] ? {
+      amount: order.cash_in_hand[0].amount,
+      payment_method: order.cash_in_hand[0].payment_method,
+      status: order.cash_in_hand[0].status,
+      created_at: order.cash_in_hand[0].created_at,
+      imei_serial: order.cash_in_hand[0].imei_serial,
+      product_name: order.cash_in_hand[0].product_name,
+      color_variant: order.cash_in_hand[0].color_variant
+    } : null;
+
+    // Extract installment ledger details
+    let installmentDetails = null;
+    if (order.delivery?.installment_ledger?.ledger_rows) {
+      const ledgerRows = order.delivery.installment_ledger.ledger_rows;
+      const advanceRow = ledgerRows.find((r) => r.month === 0);
+      const monthlyRows = ledgerRows.filter((r) => r.month > 0);
+      
+      installmentDetails = {
+        token: order.delivery.installment_ledger.short_id,
+        advance_payment: advanceRow ? {
+          amount: advanceRow.amount,
+          status: advanceRow.status,
+          paid_at: advanceRow.paid_at,
+          payment_method: advanceRow.payment_method
+        } : null,
+        installments: monthlyRows.map((row) => ({
+          month: row.month,
+          label: row.label,
+          due_date: row.due_date,
+          due_amount: row.amount,
+          status: row.status,
+          paid_at: row.paid_at,
+          payment_method: row.payment_method
+        })),
+        summary: {
+          total_installments: monthlyRows.length,
+          paid_installments: monthlyRows.filter((r) => r.status === 'paid').length,
+          pending_installments: monthlyRows.filter((r) => r.status !== 'paid').length,
+          total_due_amount: monthlyRows.reduce((sum, r) => sum + (r.amount || 0), 0),
+          total_paid_amount: monthlyRows
+            .filter((r) => r.status === 'paid')
+            .reduce((sum, r) => sum + (r.amount || 0), 0)
+        }
+      };
+    }
+
+    // Compile delivered product details
+    const deliveredProductDetails = {
+      order_info: {
+        id: order.id,
+        order_ref: order.order_ref,
+        token_number: order.token_number,
+        customer_name: order.customer_name,
+        whatsapp_number: order.whatsapp_number,
+        is_delivered: order.is_delivered,
+        status: order.status,
+        delivered_at: order.updated_at
+      },
+      product_details: inventoryDetails || {
+        product_name: order.product_name,
+        imei_serial: imeiSerial,
+        total_amount: order.total_amount,
+        advance_amount: order.advance_amount,
+        monthly_amount: order.monthly_amount,
+        months: order.months
+      },
+      delivery_details: deliveryDetails,
+      payment_details: {
+        advance_payment: advancePayment,
+        installment_plan: installmentDetails
+      }
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: deliveredProductDetails
+    });
+
+  } catch (error) {
+    console.error('Get delivered product details error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
+// Get all delivered products for an outlet or officer
+const getDeliveredProductsList = async (req, res) => {
+  const { page = 1, limit = 10, search = '', outlet_id } = req.query;
+  
+  const skip = (Number(page) - 1) * Number(limit);
+  const take = Number(limit);
+
+  try {
+    const where = {
+      is_delivered: true
+    };
+
+    // Filter by outlet if provided
+    if (outlet_id) {
+      where.outlet_id = parseInt(outlet_id);
+    }
+
+    // Search by customer name, order_ref, or product name
+    if (search.trim()) {
+      where.OR = [
+        { customer_name: { contains: search } },
+        { order_ref: { contains: search } },
+        { token_number: { contains: search } },
+        { product_name: { contains: search } }
+      ];
+    }
+
+    const orders = await prisma.order.findMany({
+      where,
+      skip,
+      take,
+      orderBy: { updated_at: 'desc' },
+      include: {
+        delivery: {
+          include: {
+            installment_ledger: true
+          }
+        },
+        cash_in_hand: {
+          orderBy: { created_at: 'desc' },
+          take: 1
+        },
+        outlet: {
+          select: { id: true, name: true, code: true }
+        }
+      }
+    });
+
+    // Enrich each order with inventory details
+    const enrichedOrders = await Promise.all(orders.map(async (order) => {
+      const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || 
+                        order.delivery?.product_imei || 
+                        order.imei_serial;
+      
+      let inventoryDetails = null;
+      if (imeiSerial) {
+        const inventory = await prisma.outletInventory.findFirst({
+          where: { imei_serial: imeiSerial }
+        });
+        if (inventory) {
+          inventoryDetails = {
+            product_name: inventory.product_name,
+            category: inventory.category,
+            color_variant: inventory.color_variant,
+            imei_serial: inventory.imei_serial
+          };
+        }
+      }
+
+      return {
+        ...order,
+        inventory_details: inventoryDetails
+      };
+    }));
+
+    const total = await prisma.order.count({ where });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders: enrichedOrders,
+        pagination: {
+          page: Number(page),
+          limit: take,
+          total,
+          totalPages: Math.ceil(total / take),
+          hasNext: skip + take < total,
+          hasPrev: Number(page) > 1
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Get delivered products list error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
+
 module.exports = {
   getVerifications,
   startVerification,
@@ -2141,5 +2516,7 @@ module.exports = {
   getMyCustomersWithOrdersAndLedger,
   sendToVOForLocation,
   sendToDOForLocation,
-  updateLocationVerified
+  updateLocationVerified,
+  getDeliveredProductDetails,
+  getDeliveredProductsList
 };

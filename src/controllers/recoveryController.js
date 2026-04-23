@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const {
@@ -8,6 +7,7 @@ const {
   sendNextInstallmentReminder
 } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
+const { getPKTDate } = require('../utils/dateUtils');
 
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
@@ -761,8 +761,9 @@ const submitInstallment = async (req, res) => {
             product_name: finalProductName,
             imei_serial: imeiSerial || order.imei_serial,
             payment_method: payment_method,
-            cash_type: 'Installment payment',
-            submitted_amount: 0
+            cash_type: 'Installment payment',         
+            submitted_amount: 0,                                              
+            created_at: getPKTDate(new Date()),
           }
         });
       }
@@ -850,7 +851,40 @@ const submitInstallment = async (req, res) => {
   }
 };
 
+const getOrderRecoveryVisits = async (req, res) => {
+  const { order_id } = req.params;
 
+  try {
+    const recoveryVisits = await prisma.recoveryVisit.findMany({
+      where: { order_id: parseInt(order_id) },
+      include: {
+        officer: {
+          select: {
+            id: true,
+            full_name: true,
+            username: true,
+            phone: true
+          }
+        },
+        photos: {
+          orderBy: { uploaded_at: 'desc' }
+        }
+      },
+      orderBy: { visit_time: 'desc' }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: recoveryVisits
+    });
+  } catch (error) {
+    console.error('Get recovery visits error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' }
+    });
+  }
+};
 
 module.exports = {
   getAllRecoveryOfficers,
@@ -861,5 +895,6 @@ module.exports = {
   submitCollections,
   generateInstallmentOtp,
   submitInstallment,
-  logRecoveryVisit
+  logRecoveryVisit,
+  getOrderRecoveryVisits
 };

@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const { notifyUser, notifyAdmins } = require('../utils/notificationUtils');
 const { sendOTP } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');

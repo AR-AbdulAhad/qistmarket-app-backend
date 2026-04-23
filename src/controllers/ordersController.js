@@ -1,10 +1,11 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const crypto = require('crypto');
 const axios = require('axios');
 const { notifyUser } = require('../utils/notificationUtils');
 const { getPKTDate } = require("../utils/dateUtils");
 const { logAction } = require('../utils/auditLogger');
+const { sendOTP } = require('../services/watiService');
+const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 
 const admin = require('firebase-admin');
 
@@ -873,15 +874,59 @@ const takeOrder = async (req, res) => {
 
 const getCsrDashboardStats = async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const { startDate, endDate } = req.query;
+
+    let start, end;
+    if (startDate && endDate) {
+      start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+    } else {
+      // Default to last 30 days if no dates provided for a better initial chart view
+      end = new Date();
+      start = new Date();
+      start.setDate(start.getDate() - 29);
+      start.setHours(0, 0, 0, 0);
+    }
+
+    const dateFilter = { gte: start, lte: end };
+
+    // Get orders in date range for the trend chart
+    const ordersInRange = await prisma.order.findMany({
+      where: {
+        created_at: dateFilter,
+        status: { not: 'cancelled' }
+      },
+      select: {
+        created_at: true,
+        total_amount: true
+      },
+      orderBy: {
+        created_at: 'asc'
+      }
+    });
+
+    // Generate salesTrend array (Daily grouping)
+    const salesTrendMap = {};
+    ordersInRange.forEach(order => {
+      // Use YYYY-MM-DD
+      const dateKey = order.created_at.toISOString().split('T')[0];
+      if (!salesTrendMap[dateKey]) {
+        salesTrendMap[dateKey] = 0;
+      }
+      salesTrendMap[dateKey] += order.total_amount;
+    });
+
+    const salesTrend = Object.keys(salesTrendMap).map(key => ({
+      x: key,
+      y: salesTrendMap[key]
+    }));
 
     const [totalToday, websitePending, repeatCustomerGroups, clearAccountsCount, statusCounts] = await Promise.all([
       prisma.order.count({
         where: {
-          created_at: { gte: today, lt: tomorrow },
+          created_at: dateFilter,
         },
       }),
       prisma.order.count({
@@ -893,7 +938,7 @@ const getCsrDashboardStats = async (req, res) => {
       prisma.order.groupBy({
         by: ['whatsapp_number'],
         where: {
-          created_at: { gte: today, lt: tomorrow },
+          created_at: dateFilter,
           whatsapp_number: { not: '' },
         },
         _count: { whatsapp_number: true },
@@ -905,31 +950,10 @@ const getCsrDashboardStats = async (req, res) => {
       }),
       prisma.order.groupBy({
         by: ['status'],
+        where: {
+          created_at: dateFilter,
+        },
         _count: { id: true },
-      }),
-    ]);
-
-    const [dailySalesSum, weeklySalesSum, monthlySalesSum] = await Promise.all([
-      prisma.order.aggregate({
-        _sum: { total_amount: true },
-        where: {
-          created_at: { gte: today, lt: tomorrow },
-          status: { not: 'cancelled' },
-        },
-      }),
-      prisma.order.aggregate({
-        _sum: { total_amount: true },
-        where: {
-          created_at: { gte: new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6), lt: tomorrow },
-          status: { not: 'cancelled' },
-        },
-      }),
-      prisma.order.aggregate({
-        _sum: { total_amount: true },
-        where: {
-          created_at: { gte: new Date(today.getFullYear(), today.getMonth(), 1), lt: tomorrow },
-          status: { not: 'cancelled' },
-        },
       }),
     ]);
 
@@ -939,18 +963,24 @@ const getCsrDashboardStats = async (req, res) => {
       return acc;
     }, {});
 
-    const dailySales = dailySalesSum._sum.total_amount || 0;
-    const weeklySales = weeklySalesSum._sum.total_amount || 0;
-    const monthlySales = monthlySalesSum._sum.total_amount || 0;
+    const rangeSalesSum = await prisma.order.aggregate({
+      _sum: { total_amount: true },
+      where: {
+        created_at: dateFilter,
+        status: { not: 'cancelled' },
+      },
+    });
+
+    const rangeSales = rangeSalesSum._sum.total_amount || 0;
     const target = Number(process.env.CSR_SALES_TARGET || 0);
-    const remainingTarget = target > 0 ? Math.max(0, target - dailySales) : 0;
+    const remainingTarget = target > 0 ? Math.max(0, target - rangeSales) : 0;
 
     return res.status(200).json({
       success: true,
       data: {
-        totalOrdersToday: totalToday,
+        totalOrdersRange: totalToday,
         websiteOrdersPending: websitePending,
-        repeatCustomersToday: repeatCustomers,
+        repeatCustomersRange: repeatCustomers,
         clearAccountsCount,
         statusCounts: {
           new: statuses.new || 0,
@@ -962,10 +992,9 @@ const getCsrDashboardStats = async (req, res) => {
           cancelled: statuses.cancelled || 0,
           approved: statuses.approved || 0,
         },
-        dailySales,
-        weeklySales,
-        monthlySales,
+        rangeSales,
         remainingTarget,
+        salesTrend
       },
     });
   } catch (error) {
@@ -1122,13 +1151,33 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
       },
     });
 
-    // Map orders to explicitly include timestamp fields
-    const formattedOrders = orders.map(order => ({
-      ...order,
-      verification_assigned_at: order.verification_assigned_at,
-      delivery_assigned_at: order.delivery_assigned_at,
-      recovery_assigned_at: order.recovery_assigned_at
-    }));
+    // Map orders to explicitly include timestamp fields and parse JSON in delivery
+    const formattedOrders = orders.map(order => {
+      // Parse selected_plan if it exists and is a string
+      let parsedDelivery = order.delivery;
+      if (order.delivery && order.delivery.selected_plan) {
+        // Check if selected_plan is a string (JSON) or already an object
+        if (typeof order.delivery.selected_plan === 'string') {
+          try {
+            parsedDelivery = {
+              ...order.delivery,
+              selected_plan: JSON.parse(order.delivery.selected_plan)
+            };
+          } catch (e) {
+            console.error('Error parsing selected_plan:', e);
+            parsedDelivery = order.delivery;
+          }
+        }
+      }
+
+      return {
+        ...order,
+        delivery: parsedDelivery,
+        verification_assigned_at: order.verification_assigned_at,
+        delivery_assigned_at: order.delivery_assigned_at,
+        recovery_assigned_at: order.recovery_assigned_at
+      };
+    });
 
     let nextLastId = null;
     if (orders.length > 0) {
@@ -1161,7 +1210,6 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
 
 const getOrderById = async (req, res) => {
   const { id } = req.params;
-  console.log('Fetching order with ID:', id);
 
   try {
 
@@ -1648,7 +1696,7 @@ const assignDelivery = async (req, res) => {
         where: { id: Number(id) },
         data: {
           delivery_officer_id: null,
-          outlet_id: null, // Also unassign from outlet
+          delivery_assigned_at: null,
           status: 'approved'
         },
         include: {
@@ -1667,7 +1715,6 @@ const assignDelivery = async (req, res) => {
       return res.status(400).json({ success: false, message: 'delivery_officer_id (user_id) required' });
     }
 
-    // Connect to specific Outlet based on delivery officer
     const officer = await prisma.user.findUnique({
       where: { id: Number(user_id) },
       select: { outlet_id: true }
@@ -1678,7 +1725,6 @@ const assignDelivery = async (req, res) => {
       data: {
         delivery_officer_id: Number(user_id),
         delivery_assigned_at: getPKTDate(new Date()),
-        outlet_id: officer?.outlet_id || null,
         status: 'picked'
       },
       include: {
@@ -1686,7 +1732,6 @@ const assignDelivery = async (req, res) => {
       }
     });
 
-    // Send notification
     const io = req.app.get('io');
     if (updatedOrder.delivery_officer) {
       await sendOrderAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, 'delivery', io);
@@ -1717,7 +1762,6 @@ const assignBulkDelivery = async (req, res) => {
         data: {
           delivery_officer_id: null,
           delivery_assigned_at: null,
-          outlet_id: null, // Also unassign from outlet
           status: 'approved'
         }
       });
@@ -1742,7 +1786,6 @@ const assignBulkDelivery = async (req, res) => {
       data: {
         delivery_officer_id: Number(user_id),
         delivery_assigned_at: getPKTDate(new Date()),
-        outlet_id: officer?.outlet_id || null, // Connects order to the outlet
         status: 'picked'
       }
     });
@@ -2204,6 +2247,111 @@ const getHandoverHistory = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Self Pickup Helpers (for Branch/Outlet Users)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /orders/self-pickup/inventory
+ * Returns In Stock inventory items for the user's outlet (for self-pickup dropdown)
+ */
+const getSelfPickupInventory = async (req, res) => {
+  const { search = '' } = req.query;
+  const outlet_id = req.user.outlet_id;
+
+  if (!outlet_id) {
+    return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+  }
+
+  try {
+    const where = {
+      outlet_id,
+      status: 'In Stock',
+      AND: [
+        { imei_serial: { not: null } },
+        { imei_serial: { not: '' } },
+        { color_variant: { not: null } },
+        { color_variant: { not: '' } }
+      ]
+    };
+
+    if (search.trim()) {
+      where.OR = [
+        { product_name: { contains: search.trim() } },
+        { imei_serial: { contains: search.trim() } },
+        { color_variant: { contains: search.trim() } },
+      ];
+    }
+
+    const inventory = await prisma.outletInventory.findMany({
+      where,
+      select: {
+        id: true,
+        product_name: true,
+        category: true,
+        imei_serial: true,
+        color_variant: true,
+        purchase_price: true,
+        installment_plans: true,
+        status: true,
+      },
+      orderBy: { product_name: 'asc' },
+    });
+
+    return res.status(200).json({ success: true, data: inventory });
+  } catch (error) {
+    console.error('getSelfPickupInventory error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /orders/self-pickup/send-otp
+ * Sends OTP to the customer's phone for self-pickup verification
+ */
+const sendSelfPickupOTP = async (req, res) => {
+  const { phone } = req.body;
+
+  if (!phone) {
+    return res.status(400).json({ success: false, message: 'phone is required' });
+  }
+
+  try {
+    const otp = await saveOTP(phone, 'self_pickup');
+    await sendOTP(phone, otp);
+
+    return res.status(200).json({ success: true, message: 'OTP sent successfully.' });
+  } catch (error) {
+    console.error('sendSelfPickupOTP error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+/**
+ * POST /orders/self-pickup/verify-otp
+ * Verifies OTP for self-pickup
+ */
+const verifySelfPickupOTP = async (req, res) => {
+  const { phone, otp } = req.body;
+
+  if (!phone || !otp) {
+    return res.status(400).json({ success: false, message: 'phone and otp are required' });
+  }
+
+  try {
+    const result = await verifyOTP(phone, otp, 'self_pickup');
+
+    if (!result.valid) {
+      return res.status(400).json({ success: false, message: result.message || 'Invalid OTP' });
+    }
+
+    return res.status(200).json({ success: true, message: 'OTP verified successfully.' });
+  } catch (error) {
+    console.error('verifySelfPickupOTP error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   createOrder,
   getOrders,
@@ -2235,5 +2383,8 @@ module.exports = {
   createOrderFromWebsitePickup,
   getWebsiteOrderFeed,
   transferOrder,
-  transferBulk
+  transferBulk,
+  getSelfPickupInventory,
+  sendSelfPickupOTP,
+  verifySelfPickupOTP,
 };

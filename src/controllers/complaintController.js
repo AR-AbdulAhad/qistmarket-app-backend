@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const { sendComplaintReceived, sendComplaintResolved } = require('../services/watiService');
 
 const createComplaint = async (req, res) => {
@@ -58,12 +57,22 @@ const createComplaint = async (req, res) => {
 
 const getComplaints = async (req, res) => {
   try {
-    const { status, page = 1, limit = 20, search = '', my_only } = req.query;
+    const { status, tab, page = 1, limit = 20, search = '', my_only } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
     const take = Number(limit);
 
     const where = {};
-    if (status) {
+
+    // Tab-based filtering
+    if (tab === 'unassigned') {
+      where.assigned_to_user_id = null;
+      where.status = { not: 'Solved' };
+    } else if (tab === 'picked') {
+      where.assigned_to_user_id = req.user?.id;
+      where.status = { not: 'Solved' };
+    } else if (tab === 'solved') {
+      where.status = 'Solved';
+    } else if (status) {
       const statusList = status.split(',').map((s) => s.trim());
       if (statusList.length > 1) {
         where.status = { in: statusList };
@@ -77,7 +86,8 @@ const getComplaints = async (req, res) => {
       where.OR = [
         { complaint_id: { contains: q } },
         { mobile_number: { contains: q } },
-        { customer_name: { contains: q } }
+        { customer_name: { contains: q } },
+        { customer_cnic: { contains: q } }
       ];
     }
     
@@ -135,10 +145,11 @@ const updateComplaint = async (req, res) => {
     // Restriction: Only CSR (or Super Admin) can mark as Solved
     if (status === 'Solved' && existing.status !== 'Solved') {
       const userRole = req.user?.role;
-      if (userRole !== 'Sales Officer' && userRole !== 'Super Admin' && userRole !== 'Admin') {
+      // Note: role name might vary, checking for CSR as well if needed
+      if (userRole !== 'Sales Officer' && userRole !== 'Super Admin' && userRole !== 'Admin' && userRole !== 'CSR') {
         return res.status(403).json({
           success: false,
-          error: { code: 403, message: 'Only Sales Officer or Admin can resolve complaints.' }
+          error: { code: 403, message: 'Only authorized staff can resolve complaints.' }
         });
       }
     }
@@ -175,8 +186,82 @@ const updateComplaint = async (req, res) => {
   }
 };
 
+const pickComplaint = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    const existing = await prisma.complaint.findUnique({ where: { id: Number(id) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Complaint not found.' } });
+    }
+
+    if (existing.assigned_to_user_id) {
+      return res.status(400).json({ success: false, error: { code: 400, message: 'Complaint already assigned.' } });
+    }
+
+    const complaint = await prisma.complaint.update({
+      where: { id: Number(id) },
+      data: {
+        assigned_to_user_id: userId,
+        status: 'Assigned'
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Complaint picked successfully.',
+      data: { complaint },
+    });
+  } catch (error) {
+    console.error('Pick complaint error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
+const searchPurchasers = async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 3) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+
+    const purchasers = await prisma.purchaserVerification.findMany({
+      where: {
+        OR: [
+          { cnic_number: { contains: q } },
+          { name: { contains: q } }
+        ]
+      },
+      take: 10,
+      select: {
+        id: true,
+        name: true,
+        cnic_number: true,
+        telephone_number: true,
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: purchasers
+    });
+  } catch (error) {
+    console.error('Search purchasers error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
 module.exports = {
   createComplaint,
   getComplaints,
   updateComplaint,
+  pickComplaint,
+  searchPurchasers,
 };

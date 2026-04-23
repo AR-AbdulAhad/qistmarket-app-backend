@@ -11,7 +11,8 @@ const {
     submitCollections,
     generateInstallmentOtp,
     submitInstallment,
-    logRecoveryVisit
+    logRecoveryVisit,
+    getOrderRecoveryVisits
 } = require('../controllers/recoveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -48,6 +49,9 @@ router.post(
   fixUploadPath,
   logRecoveryVisit
 );
+
+// recoveryRoutes.js - Add this route
+router.get('/order/:order_id/visits', authenticateJWT, getOrderRecoveryVisits);
 
 module.exports = router;
 

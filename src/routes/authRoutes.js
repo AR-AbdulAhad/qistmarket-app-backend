@@ -16,6 +16,7 @@ const {
   updateProfile,
   getVerificationOfficers,
   getDeliveryOfficers,
+  getRecoveryOfficers,
   sendWebLoginOTP,
   verifyWebLoginOTP
 } = require('../controllers/authController');
@@ -47,6 +48,7 @@ router.post(
 // Utility routes
 router.get('/users/verification-officers', authenticateJWT, getVerificationOfficers);
 router.get('/users/delivery-officers', authenticateJWT, getDeliveryOfficers);
+router.get('/users/recovery-officers', authenticateJWT, getRecoveryOfficers);
 
 // ==================== SUPER ADMIN ROUTES ====================
 

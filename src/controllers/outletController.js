@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
@@ -1143,7 +1142,7 @@ const verifyInstallmentPayment = async (req, res) => {
 };
 
 const getOutletOfficers = async (req, res) => {
-    const { role_id } = req.query; // 2 for DO, 3 for RO
+    const { role_id } = req.query; // 1 for VO, 2 for DO, 3 for RO
     const outletId = req.user.outlet_id;
 
     if (!role_id) return res.status(400).json({ success: false, message: 'role_id is required' });
@@ -1166,67 +1165,138 @@ const getOutletOfficers = async (req, res) => {
         });
 
         const officersWithStats = await Promise.all(officers.map(async (off) => {
-            // 1. Exact Cash Aggregation
-            // Paid: Sum of verified histories
-            const paidSum = await prisma.cashSubmissionHistory.aggregate({
-                where: {
-                    cash_in_hand: { officer_id: off.id },
-                    status: 'paid'
-                },
-                _sum: { amount_submitted: true }
-            });
-            const paidAmount = paidSum._sum.amount_submitted || 0;
+            const role = parseInt(role_id);
 
-            // Pending: sum of (amount - submitted_amount) for pending rows
-            const pendingItems = await prisma.cashInHand.findMany({
-                where: { officer_id: off.id, status: 'pending' }
-            });
-            const pendingAmount = pendingItems.reduce((acc, curr) => acc + (curr.amount - curr.submitted_amount), 0);
-
-            // 2. Orders stats (Units Delivered or Paid Submissions)
-            let deliveredCount = 0;
-            if (parseInt(role_id) === 3) {
-                // For RO: Count successful paid submissions
-                deliveredCount = await prisma.cashSubmissionHistory.count({
+            if (role === 1) {
+                // For Verification Officers - Get stats from Order table
+                const orders = await prisma.order.findMany({
                     where: {
-                        cash_in_hand: { officer_id: off.id },
-                        status: 'paid'
-                    }
-                });
-            } else {
-                // For DO: Count delivered orders
-                deliveredCount = await prisma.order.count({
-                    where: {
-                        delivery_officer_id: off.id,
+                        verification: {
+                            verification_officer_id: off.id
+                        }
+                    },
+                    select: {
+                        status: true,
                         is_delivered: true
                     }
                 });
-            }
 
-            // 3. Stock stats (for DO)
-            let stockCount = 0;
-            if (parseInt(role_id) === 2) {
-                stockCount = await prisma.stockTransfer.count({
-                    where: {
-                        to_id: off.id,
-                        to_type: 'Delivery Officer',
-                        inventory: {
-                            status: 'Out Of Stock'
-                        }
+                // Calculate stats based on Order status
+                const pendingCount = orders.filter(o => 
+                    o.status === 'Pending Verification' || 
+                    o.status === 'pending' || 
+                    o.status === 'new'
+                ).length;
+
+                const inProgressCount = orders.filter(o => 
+                    o.status === 'Verification In Progress' || 
+                    o.status === 'in_progress' ||
+                    o.status === 'In Progress'
+                ).length;
+
+                const completedCount = orders.filter(o => 
+                    o.status === 'Verified' || 
+                    o.status === 'verified' ||
+                    o.status === 'Approved' ||
+                    o.status === 'approved'
+                ).length;
+
+                const rejectedCount = orders.filter(o => 
+                    o.status === 'Rejected' || 
+                    o.status === 'rejected'
+                ).length;
+
+                const expiredCount = orders.filter(o => 
+                    o.status === 'Expired' || 
+                    o.status === 'expired'
+                ).length;
+
+                const deliveredCount = orders.filter(o => o.is_delivered === true).length;
+
+                const approvedCount = orders.filter(o => 
+                    o.status === 'Approved' || 
+                    o.status === 'approved' ||
+                    o.status === 'Ready for Delivery'
+                ).length;
+
+                return {
+                    ...off,
+                    verified_count: completedCount,
+                    orders: {
+                        total: orders.length,
+                        pending: pendingCount,
+                        in_progress: inProgressCount,
+                        completed: completedCount,
+                        rejected: rejectedCount,
+                        expired: expiredCount,
+                        delivered: deliveredCount,
+                        approved: approvedCount
                     }
+                };
+            } else {
+                // For Delivery and Recovery Officers (existing logic)
+                // 1. Exact Cash Aggregation
+                // Paid: Sum of verified histories
+                const paidSum = await prisma.cashSubmissionHistory.aggregate({
+                    where: {
+                        cash_in_hand: { officer_id: off.id },
+                        status: 'paid'
+                    },
+                    _sum: { amount_submitted: true }
                 });
-            }
+                const paidAmount = paidSum._sum.amount_submitted || 0;
 
-            return {
-                ...off,
-                paid_cash: paidAmount,
-                pending_cash: pendingAmount,
-                total_collection: paidAmount + pendingAmount,
-                stock_count: stockCount,
-                orders: {
-                    delivered: deliveredCount
+                // Pending: sum of (amount - submitted_amount) for pending rows
+                const pendingItems = await prisma.cashInHand.findMany({
+                    where: { officer_id: off.id, status: 'pending' }
+                });
+                const pendingAmount = pendingItems.reduce((acc, curr) => acc + (curr.amount - curr.submitted_amount), 0);
+
+                // 2. Orders stats (Units Delivered or Paid Submissions)
+                let deliveredCount = 0;
+                if (role === 3) {
+                    // For RO: Count successful paid submissions
+                    deliveredCount = await prisma.cashSubmissionHistory.count({
+                        where: {
+                            cash_in_hand: { officer_id: off.id },
+                            status: 'paid'
+                        }
+                    });
+                } else {
+                    // For DO: Count delivered orders
+                    deliveredCount = await prisma.order.count({
+                        where: {
+                            delivery_officer_id: off.id,
+                            is_delivered: true
+                        }
+                    });
                 }
-            };
+
+                // 3. Stock stats (for DO)
+                let stockCount = 0;
+                if (role === 2) {
+                    stockCount = await prisma.stockTransfer.count({
+                        where: {
+                            to_id: off.id,
+                            to_type: 'Delivery Officer',
+                            inventory: {
+                                status: 'Out Of Stock'
+                            }
+                        }
+                    });
+                }
+
+                return {
+                    ...off,
+                    paid_cash: paidAmount,
+                    pending_cash: pendingAmount,
+                    total_collection: paidAmount + pendingAmount,
+                    stock_count: stockCount,
+                    orders: {
+                        delivered: deliveredCount
+                    }
+                };
+            }
         }));
 
         res.json({ success: true, officers: officersWithStats });
@@ -1252,7 +1322,7 @@ const getOfficerDetails = async (req, res) => {
 
         const role = officer.role_id;
 
-        const [inventory, delivered_products, cash, paidSumRes, submissionHistory] = await Promise.all([
+        const [inventory, delivered_products, cash, paidSumRes, submissionHistory, ordersForVO, assignedOrders] = await Promise.all([
             // 1. Inventory in hand (Only for DO)
             role === 2 ? prisma.stockTransfer.findMany({
                 where: {
@@ -1285,7 +1355,7 @@ const getOfficerDetails = async (req, res) => {
             }),
 
             // 4. Paid Sum
-             prisma.cashSubmissionHistory.aggregate({
+            prisma.cashSubmissionHistory.aggregate({
                 where: {
                     cash_in_hand: { officer_id: officer.id },
                     status: 'paid'
@@ -1303,7 +1373,40 @@ const getOfficerDetails = async (req, res) => {
                 },
                 orderBy: { submission_date: 'desc' },
                 take: 100
-            })
+            }),
+
+            // 6. Orders for VO (role_id = 1) - Directly from Order table with verification relation
+            role === 1 ? prisma.order.findMany({
+                where: {
+                    verification: {
+                        verification_officer_id: officer.id
+                    }
+                },
+                include: {
+                    verification: true
+                },
+                orderBy: { created_at: 'desc' }
+            }) : Promise.resolve([]),
+
+            // 7. Assigned Orders for DO and RO
+            (role === 2 || role === 3) ? prisma.order.findMany({
+                where: role === 2 
+                    ? { delivery_officer_id: officer.id } 
+                    : { recovery_officer_id: officer.id },
+                select: {
+                    id: true,
+                    order_ref: true,
+                    customer_name: true,
+                    product_name: true,
+                    status: true,
+                    is_delivered: true,
+                    created_at: true,
+                    address: true,
+                    area: true
+                },
+                orderBy: { created_at: 'desc' },
+                take: 50
+            }) : Promise.resolve([])
         ]);
 
         const paidAmount = paidSumRes._sum.amount_submitted || 0;
@@ -1311,6 +1414,34 @@ const getOfficerDetails = async (req, res) => {
             if (curr.status === 'pending') acc += (curr.amount - curr.submitted_amount);
             return acc;
         }, 0);
+
+        // Count order statuses for VO (from Order table, not Verification table)
+        const verificationStats = {
+            pending: ordersForVO.filter(o => o.status === 'pending').length,
+            in_progress: ordersForVO.filter(o => o.status === 'in_progress').length,
+            completed: ordersForVO.filter(o => o.status === 'completed').length,
+            approved: ordersForVO.filter(o => o.status === 'approved').length,
+            delivered: ordersForVO.filter(o => o.status === 'delivered').length,
+            rejected: ordersForVO.filter(o => o.status === 'rejected').length,
+            expired: ordersForVO.filter(o => o.status === 'expired').length
+        };
+
+        // Format orders for VO response
+        const formattedOrdersForVO = role === 1 ? ordersForVO.map(order => ({
+            id: order.id,
+            order_ref: order.order_ref,
+            customer_name: order.customer_name,
+            product_name: order.product_name,
+            status: order.status,
+            is_delivered: order.is_delivered,
+            created_at: order.created_at,
+            cancelled_at: order.cancelled_at,
+            verification_status: order.verification?.status,
+            verification_start_time: order.verification?.start_time,
+            verification_end_time: order.verification?.end_time,
+            home_location_verified: order.verification?.home_location_verified,
+            verification_feedback: order.verification?.verification_feedback
+        })) : null;
 
         res.json({
             success: true,
@@ -1323,6 +1454,7 @@ const getOfficerDetails = async (req, res) => {
                 imei_serial: d.product_imei,
                 delivery_date: d.created_at
             })) : null,
+            verifications: formattedOrdersForVO,
             cash,
             submission_history: submissionHistory.map(h => ({
                 id: h.id,
@@ -1331,10 +1463,12 @@ const getOfficerDetails = async (req, res) => {
                 date: h.submission_date,
                 order_ref: h.cash_in_hand?.order?.order_ref
             })),
+            assigned_orders: assignedOrders,
             stats: {
                 paid_cash: paidAmount,
                 pending_cash: pendingAmount,
-                total_collection: paidAmount + pendingAmount
+                total_collection: paidAmount + pendingAmount,
+                verification_stats: verificationStats
             }
         });
     } catch (error) {

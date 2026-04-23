@@ -134,6 +134,7 @@ model Order {
   delivery_assigned_at     DateTime?
   recovery_assigned_at     DateTime?
   verification_assigned_at DateTime?
+  dummyCustomer            DummyCustomer?        @relation("OrderDummyCustomer")
   delivery                 Delivery?             @relation("OrderDelivery")
   assigned_to              User?                 @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
   created_by               User?                 @relation(fields: [created_by_user_id], references: [id])
@@ -155,6 +156,27 @@ model Order {
   @@index([recovery_officer_id])
   @@index([outlet_id])
   @@index([imei_serial])
+}
+
+model DummyCustomer {
+  id                 Int      @id @default(autoincrement())
+  order_id           Int      @unique
+  customer_name      String?
+  whatsapp_number    String?
+  address            String?
+  city               String?
+  area               String?
+  block              String?
+  house_no           String?
+  street             String?
+  zone               String?
+  alternate_contact  String?
+  moved_at           DateTime @default(now())
+  
+  order              Order    @relation("OrderDummyCustomer", fields: [order_id], references: [id], onDelete: Cascade)
+
+  @@index([order_id])
+  @@map("dummy_customers")
 }
 
 model Complaint {
@@ -592,11 +614,13 @@ model Delivery {
   status             String             @default("pending")
   start_time         DateTime?
   end_time           DateTime?
+  feedback           String?
   verified           Boolean            @default(false)
   created_at         DateTime           @default(now())
   updated_at         DateTime           @updatedAt
   product_imei       String?            @db.VarChar(100)
   selected_plan      Json?
+  self_pickup        Boolean            @default(false)
   delivery_agent     User               @relation("delivery_agent", fields: [delivery_agent_id], references: [id])
   order              Order              @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
   uploads            DeliveryUpload[]

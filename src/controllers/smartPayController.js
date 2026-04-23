@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const qrcode = require('qrcode');
 
 const SMARTPAY_TOKEN_URL = 'https://smartpay.com.pk/services/api/v1/token';

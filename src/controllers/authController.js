@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const { jwtSecret } = require('../config/jwtConfig');
 const sendEmail = require('../utils/sendEmail');
@@ -254,6 +253,7 @@ const verifyLoginOTP = async (req, res) => {
       phone: user.phone,
       role_id: user.role_id,
       role: user.role.name,
+      outlet_id: user.outlet_id,
       permissions: user.permissions_json ? user.permissions_json : null,
     };
 
@@ -310,6 +310,7 @@ const verifyWebLoginOTP = async (req, res) => {
       phone: user.phone,
       role_id: user.role_id,
       role: user.role.name,
+      outlet_id: user.outlet_id,
       permissions: user.permissions_json ? user.permissions_json : null,
     };
 
@@ -820,6 +821,7 @@ const updateProfile = async (req, res) => {
       phone: updatedUser.phone,
       role_id: updatedUser.role_id,
       role: updatedUser.role.name,
+      outlet_id: updatedUser.outlet_id,
       device_id: updatedUser.device_id,
       bio: updatedUser.bio,
       image: updatedUser.image,
@@ -846,13 +848,29 @@ const updateProfile = async (req, res) => {
 
 const getVerificationOfficers = async (req, res) => {
   try {
-    const officers = await prisma.user.findMany({
-      where: {
-        role: {
-          name: 'Verification Officer',
-        },
-        status: 'active',
+    let outlet_id = req.user.outlet_id;
+
+    if (outlet_id === undefined) {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { outlet_id: true }
+      });
+      outlet_id = user?.outlet_id;
+    }
+
+    const where = {
+      role: {
+        name: 'Verification Officer',
       },
+      status: 'active',
+    };
+
+    if (outlet_id) {
+      where.outlet_id = outlet_id;
+    }
+
+    const officers = await prisma.user.findMany({
+      where,
       select: {
         id: true,
         full_name: true,
@@ -880,14 +898,78 @@ const getVerificationOfficers = async (req, res) => {
 
 const getDeliveryOfficers = async (req, res) => {
   try {
-    const officers = await prisma.user.findMany({
-      where:
-      {
-        role: {
-          name: 'Delivery Agent'
-        },
-        status: 'active'
+    let outlet_id = req.user.outlet_id;
+
+    if (outlet_id === undefined) {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { outlet_id: true }
+      });
+      outlet_id = user?.outlet_id;
+    }
+
+    const where = {
+      role: {
+        name: 'Delivery Agent'
       },
+      status: 'active'
+    };
+
+    if (outlet_id) {
+      where.outlet_id = outlet_id;
+    }
+
+    const officers = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        full_name: true,
+        username: true,
+      },
+      orderBy: {
+        full_name: 'asc',
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: { officers },
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
+
+const getRecoveryOfficers = async (req, res) => {
+  try {
+    let outlet_id = req.user.outlet_id;
+
+    if (outlet_id === undefined) {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { outlet_id: true }
+      });
+      outlet_id = user?.outlet_id;
+    }
+
+    const where = {
+      role: {
+        name: 'Recovery Officer'
+      },
+      status: 'active'
+    };
+
+    if (outlet_id) {
+      where.outlet_id = outlet_id;
+    }
+
+    const officers = await prisma.user.findMany({
+      where,
       select: {
         id: true,
         full_name: true,
@@ -930,5 +1012,6 @@ module.exports = {
   getVerificationOfficers,
   getMe,
   updateProfile,
-  getDeliveryOfficers
+  getDeliveryOfficers,
+  getRecoveryOfficers
 };

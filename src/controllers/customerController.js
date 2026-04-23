@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 
 const getCustomers = async (req, res) => {
  const {
@@ -14,8 +13,35 @@ const getCustomers = async (req, res) => {
   const q        = search.trim();
  
   try {
+    // Fetch user with role and outlet
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      include: { role: true }
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 401, message: 'User not found' },
+      });
+    }
+
+    // Base where clause
+    const baseWhere = { is_delivered: true };
+
+    // Role-based filtering
+    console.log(user.role.name)
+    if (user.role.name === 'Sales Officer') {
+      // CSR (Sales Officer) sees only orders created by them
+      baseWhere.created_by_user_id = req.user.id;
+    } else if (user.outlet_id) {
+      // Brancher (Outlet user) sees only orders from their outlet
+      baseWhere.outlet_id = req.user.outlet_id;
+    }
+    // For other roles (e.g., Super Admin), no additional filter, see all
+
     const orderWhere = {
-      is_delivered: true,
+      ...baseWhere,
       ...(q && {
         OR: [
           // PurchaserVerification fields
@@ -310,8 +336,6 @@ const getBlacklistedCustomers = async (req, res) => {
     const ninetyDaysAgo = new Date();
     ninetyDaysAgo.setDate(today.getDate() - 90);
 
-    // Fetch delivered orders with ledgers
-    // Note: We fetch all delivered orders and then filter in memory for complex 90-day logic
     const orders = await prisma.order.findMany({
       where: {
         is_delivered: true,
@@ -519,11 +543,32 @@ const getBlacklistedCustomers = async (req, res) => {
 
 const getClearedCustomers = async (req, res) => {
   try {
+    // Fetch user with role and outlet
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      include: { role: true }
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 401, message: 'User not found' },
+      });
+    }
+
+    // Base where clause
+    const baseWhere = { is_delivered: true };
+
+    // Role-based filtering
+    if (user.role.name === 'Sales Officer') {
+      baseWhere.created_by_user_id = req.user.id;
+    } else if (user.outlet_id) {
+      baseWhere.outlet_id = req.user.outlet_id;
+    }
+
     // Fetch all delivered orders
     const orders = await prisma.order.findMany({
-      where: {
-        is_delivered: true,
-      },
+      where: baseWhere,
       include: {
         verification: {
           include: {

@@ -3,8 +3,7 @@
 // Query params: range=Day|Week|Month|Custom&start=YYYY-MM-DD&end=YYYY-MM-DD
 // Returns: sales, KM, working hours, inventory reports for the logged-in delivery officer
 
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 
 function getDateRange(range, start, end) {
   const now = new Date();

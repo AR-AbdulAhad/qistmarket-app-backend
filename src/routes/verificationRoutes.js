@@ -31,7 +31,9 @@ const {
   getEditHistory,
   sendToVOForLocation,
   sendToDOForLocation,
-  updateLocationVerified
+  updateLocationVerified,
+  getDeliveredProductDetails,
+  getDeliveredProductsList
 } = require('../controllers/verificationController');
 
 // Get all verifications
@@ -138,5 +140,10 @@ router.post(
   fixUploadPath,
   updateLocationVerified
 )
+
+router.get('/delivered-product/order/:order_id', authenticateJWT, getDeliveredProductDetails);
+
+// Get list of all delivered products (with pagination and search)
+router.get('/delivered-products', authenticateJWT, getDeliveredProductsList);
 
 module.exports = router;

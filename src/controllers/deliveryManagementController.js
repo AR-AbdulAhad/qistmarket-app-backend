@@ -1,5 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const axios = require('axios');
 
 const WATI_BASE_URL = process.env.WATI_BASE_URL;

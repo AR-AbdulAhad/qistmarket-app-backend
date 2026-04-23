@@ -29,9 +29,15 @@ const {
   createOrderFromWebsitePickup,
   getWebsiteOrderFeed,
   transferOrder,
-  transferBulk
+  transferBulk,
+  getSelfPickupInventory,
+  sendSelfPickupOTP,
+  verifySelfPickupOTP
 } = require('../controllers/ordersController');
+const { submitSelfPickupDelivery } = require('../controllers/deliveryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
+const upload = require('../middlewares/uploadMiddleware');
+const fixUploadPath = require('../middlewares/fixUploadPath');
 
 // Recovery Related Order Routes (Specific routes first)
 router.get('/orders/delivered-list', authenticateJWT, getDeliveredOrders);
@@ -60,6 +66,12 @@ router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
 router.patch('/orders/:id/take', authenticateJWT, takeOrder);
 router.patch('/orders/:id/transfer', authenticateJWT, transferOrder);
 router.post('/orders/transfer-bulk', authenticateJWT, transferBulk);
+
+// Self Pickup Routes
+router.get('/orders/self-pickup/inventory', authenticateJWT, getSelfPickupInventory);
+router.post('/orders/self-pickup/send-otp', authenticateJWT, sendSelfPickupOTP);
+router.post('/orders/self-pickup/verify-otp', authenticateJWT, verifySelfPickupOTP);
+router.post('/orders/self-pickup/submit', authenticateJWT, upload.fields([{ name: 'face_photo', maxCount: 1 }]), fixUploadPath, submitSelfPickupDelivery);
 
 // Handover Routes
 router.post('/orders/:id/initiate-handover', authenticateJWT, initiateHandover);

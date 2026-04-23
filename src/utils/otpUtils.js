@@ -1,6 +1,5 @@
 const crypto = require('crypto');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 
 // Generate 5-digit OTP
 const generateOTP = () => {

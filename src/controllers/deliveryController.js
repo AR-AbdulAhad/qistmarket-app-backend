@@ -1,11 +1,12 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('../services/watiService');
 const { notifyUser, notifyAdmins } = require('../utils/notificationUtils');
+const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
+const { getPKTDate } = require("../utils/dateUtils");
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -45,7 +46,7 @@ async function sendCashSubmissionOTPNotification(user, otp, io = null) {
 }
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
-const LEDGER_BASE_URL = (process.env.LEDGER_BASE_URL).replace(/\/$/, '')
+const LEDGER_BASE_URL = (process.env.LEDGER_BASE_URL || 'https://qistmarket.pk').replace(/\/$/, '');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ const addMonths = (date, n) => {
 
 // Submit Delivery (Batch Upload)
 const submitDelivery = async (req, res) => {
-  const { order_id, product_imei, selected_plan, phone } = req.body;
+  const { order_id, product_imei, selected_plan, phone, feedback } = req.body;
 
   if (!order_id) {
     return res.status(400).json({
@@ -135,11 +136,12 @@ const submitDelivery = async (req, res) => {
         order_id: parseInt(order_id),
         delivery_agent_id: req.user.id,
         status: 'completed',
-        start_time: new Date(),
-        end_time: new Date(),
+        start_time: getPKTDate(new Date()),
+        end_time: getPKTDate(new Date()),
         verified: true,
         product_imei: product_imei || null,
-        selected_plan: selected_plan || null
+        selected_plan: selected_plan || null,
+        feedback: feedback || null
       }
     });
 
@@ -194,7 +196,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'face_photo',
         file_url: file.url,
         tag: faceTags[index] || null,
-        uploaded_at: new Date()
+        uploaded_at: getPKTDate(new Date())
       });
     });
 
@@ -205,7 +207,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'location_photo',
         file_url: file.url,
         tag: locationTags[index] || null,
-        uploaded_at: new Date()
+        uploaded_at: getPKTDate(new Date())
       });
     });
 
@@ -216,7 +218,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'house_photo',
         file_url: file.url,
         tag: houseTags[index] || null,
-        uploaded_at: new Date()
+        uploaded_at: getPKTDate(new Date())
       });
     });
 
@@ -227,7 +229,7 @@ const submitDelivery = async (req, res) => {
         upload_type: 'location_link',
         link: link,
         tag: linkTags[index] || null,
-        uploaded_at: new Date()
+        uploaded_at: getPKTDate(new Date())
       });
     });
 
@@ -278,7 +280,8 @@ const submitDelivery = async (req, res) => {
           imei_serial: product_imei || null,
           color_variant: colorVariant || null,
           stock_transfer_id: stockTransferId,
-          payment_method: 'Cash'
+          payment_method: 'Cash',
+          created_at: getPKTDate(new Date())  
         }
       });
     }
@@ -375,7 +378,7 @@ const submitDelivery = async (req, res) => {
       // Template 2: Installment Ledger (only if ledger was created)
       if (installmentLedger && ledgerUrl) {
         const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
-        const firstRow = rows[0];
+        const firstRow = rows[1];
         const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
 
         sendInstallmentLedger(customerPhone, {
@@ -561,26 +564,37 @@ const getCashInHand = async (req, res) => {
       officer_id: deliveryBoyId,
     };
 
-    if (status) {
-      where.status = status;
+    // SPECIAL CASE: Agar sirf pending dekhna hai
+    if (status === 'pending') {
+      where.status = 'pending';
+    } 
+    // SPECIAL CASE: Jab koi bhi filter apply nahi hai
+    else if (!date && !date_from && !date_to && !status) {
+      // Sab kuch dikhao - koi date filter nahi
     }
-
-    if (date) {
-      const selectedDate = new Date(date);
-      const nextDay = new Date(date);
-      nextDay.setDate(nextDay.getDate() + 1);
-      where.created_at = {
-        gte: selectedDate,
-        lt: nextDay
-      };
-    } else if (date_from || date_to) {
-      where.created_at = {};
-      if (date_from) where.created_at.gte = new Date(date_from);
-      if (date_to) where.created_at.lte = new Date(date_to);
-    } else {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      where.created_at = { gte: today };
+    // Normal case: Filters apply hain
+    else {
+      if (status) {
+        where.status = status;
+      }
+      
+      if (date) {
+        const selectedDate = new Date(date);
+        const nextDay = new Date(date);
+        nextDay.setDate(nextDay.getDate() + 1);
+        where.created_at = {
+          gte: selectedDate,
+          lt: nextDay
+        };
+      } else if (date_from || date_to) {
+        where.created_at = {};
+        if (date_from) where.created_at.gte = new Date(date_from);
+        if (date_to) where.created_at.lte = new Date(date_to);
+      } else {
+        const today = getPKTDate(new Date());
+        today.setHours(0, 0, 0, 0);
+        where.created_at = { gte: today };
+      }
     }
 
     const cashEntries = await prisma.cashInHand.findMany({
@@ -613,36 +627,65 @@ const getCashInHand = async (req, res) => {
       orderBy: { created_at: 'desc' }
     });
 
-    const formattedEntries = cashEntries.map(entry => {
+    // === TRANSACTION HISTORY (Bank Statement Style) ===
+    let transactionHistory = [];
+
+    // 1. CREDIT ENTRIES (Cash In Hand - jab paise aaye)
+    cashEntries.forEach(entry => {
       const submittedAmt = entry.submitted_amount || 0;
-      return {
-        id: entry.id,
+      const pendingBalance = entry.amount - submittedAmt;
+      
+      // Credit entry - jab initially cash aaya
+      transactionHistory.push({
+        id: `credit_${entry.id}`,
+        type: 'credit',
         amount: entry.amount,
-        submitted_amount: submittedAmt,
-        balance: entry.amount - submittedAmt,
-        cash_type: entry.cash_type || 'Advance amount payment',
+        balance: entry.amount,
         status: entry.status,
-        created_at: entry.created_at,
-        payment_method: entry.payment_method,
-        order_id: entry.order_id,
-        order_ref: entry.order?.order_ref || 'N/A',
-        customer_name: entry.customer_name || entry.order?.customer_name || 'Unknown',
-        product_name: entry.product_name || entry.order?.product_name || 'Unknown',
-        imei: entry.imei_serial || entry.order?.imei_serial || entry.order?.delivery?.product_imei,
-        color_variant: entry.color_variant,
-        selected_plan: entry.order?.delivery?.selected_plan,
-        outlet: entry.outlet,
-        submission_history: entry.submission_history || []
-      };
+        description: `Cash received`,
+        transaction_date: entry.created_at,
+        payment_method: entry.payment_method
+      });
+      
+      // Agar kuch submit ho chuka hai toh debit entry banao
+      if (submittedAmt > 0) {
+        transactionHistory.push({
+          id: `debit_${entry.id}_${Date.now()}`,
+          type: 'debit',
+          amount: submittedAmt,
+          balance: entry.amount - submittedAmt,
+          status: 'submitted',
+          description: `Amount submitted`,
+          transaction_date: entry.submission_history[0]?.submission_date || entry.created_at,
+          payment_method: entry.payment_method
+        });
+      }
     });
 
-    const totalUnpaid = formattedEntries
+    // Sort by transaction date (latest first)
+    transactionHistory.sort((a, b) => new Date(b.transaction_date) - new Date(a.transaction_date));
+
+    // Calculate totals
+    const totalCredits = transactionHistory
+      .filter(t => t.type === 'credit')
+      .reduce((sum, t) => sum + t.amount, 0);
+    
+    const totalDebits = transactionHistory
+      .filter(t => t.type === 'debit')
+      .reduce((sum, t) => sum + t.amount, 0);
+    
+    const currentBalance = totalCredits - totalDebits;
+
+    const totalUnpaid = cashEntries
       .filter(e => e.status === 'pending')
-      .reduce((sum, e) => sum + e.balance, 0);
+      .reduce((sum, e) => sum + (e.amount - (e.submitted_amount || 0)), 0);
 
     return res.status(200).json({
       success: true,
-      data: formattedEntries,
+      transaction_history: transactionHistory,
+      current_balance: currentBalance,
+      total_credits: totalCredits,
+      total_debits: totalDebits,
       total_unpaid: totalUnpaid
     });
   } catch (error) {
@@ -672,8 +715,13 @@ const submitCashToOutlet = async (req, res) => {
       officer_id: deliveryBoyId,
       status: 'pending'
     };
-    if (ids.length > 0) {
-      queryArgs.id = { in: ids };
+
+   if (ids.length > 0) {
+      // Filter out any NaN or invalid IDs
+      const validIds = ids.filter(id => !isNaN(id) && id > 0);
+      if (validIds.length > 0) {
+        queryArgs.id = { in: validIds };
+      }
     }
 
     const availableEntries = await prisma.cashInHand.findMany({
@@ -921,7 +969,7 @@ const returnProduct = async (req, res) => {
       data: {
         status: 'returned',
         cancelled_reason: reason,
-        cancelled_at: new Date()
+        cancelled_at: getPKTDate(new Date())
       }
     });
 
@@ -1180,7 +1228,7 @@ const initiateReturnExchange = async (req, res) => {
 
     // 48-hour verification (Extended from 24h)
     const delivery_time = delivery.end_time || delivery.updated_at;
-    const now = new Date();
+    const now = getPKTDate(new Date());
     const hoursDifference = (now.getTime() - delivery_time.getTime()) / (1000 * 60 * 60);
 
     if (hoursDifference > 48) {
@@ -1318,6 +1366,285 @@ const getDeliveryOfficerOTPLogs = async (req, res) => {
   }
 };
 
+/**
+ * POST /orders/self-pickup/submit
+ * Handles Self Pickup delivery directly from the branch
+ */
+const submitSelfPickupDelivery = async (req, res) => {
+  const { order_id, product_imei, selected_plan, phone, feedback } = req.body;
+  const outlet_id = req.user.outlet_id;
+
+  if (!outlet_id) {
+    return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+  }
+
+  if (!order_id) {
+    return res.status(400).json({ success: false, message: 'order_id is required' });
+  }
+
+  try {
+    // 1. Fetch Order and Verify Outlet
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: {
+        delivery: true,
+        verification: { include: { purchaser: true } }
+      }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    if (order.outlet_id !== outlet_id) {
+      return res.status(403).json({ success: false, message: 'Order does not belong to your outlet' });
+    }
+
+    if (order.delivery) {
+      return res.status(400).json({ success: false, message: 'Delivery already submitted for this order' });
+    }
+
+    // 2. Update purchaser phone number if provided
+    if (phone && order.verification?.purchaser) {
+      await prisma.purchaserVerification.update({
+        where: { id: order.verification.purchaser.id },
+        data: { telephone_number: phone }
+      });
+      order.verification.purchaser.telephone_number = phone;
+    }
+
+    // 2.1 Process face photo
+    const facePhotos = req.files['face_photo'] || [];
+
+    // 3. Process Plan & Advance
+    let advanceAmount = 0.0;
+    let planObj = null;
+
+    if (selected_plan) {
+      try {
+        planObj = typeof selected_plan === 'string' ? JSON.parse(selected_plan) : selected_plan;
+        if (planObj && (planObj.advance !== undefined || planObj.advance_amount !== undefined)) {
+          advanceAmount = parseFloat(planObj.advance || planObj.advance_amount);
+        }
+      } catch (e) {
+        console.error('Error parsing selected_plan:', e);
+      }
+    }
+
+    const purchaser = order.verification?.purchaser;
+    const confirmedCustomerName = purchaser?.name || purchaser?.full_name || order.customer_name;
+    // 4. Start Transaction for Inventory, Delivery, Order and Financials
+    const result = await prisma.$transaction(async (tx) => {
+      let colorVariant = null;
+      let productNameSnapshot = order.product_name;
+
+      // Update Inventory if IMEI provided
+      if (product_imei) {
+        const inventory = await tx.outletInventory.findFirst({
+          where: { imei_serial: product_imei, outlet_id }
+        });
+
+        if (inventory) {
+          await tx.outletInventory.update({
+            where: { id: inventory.id },
+            data: { status: 'Sold' }
+          });
+          colorVariant = inventory.color_variant || null;
+          productNameSnapshot = inventory.product_name;
+
+          // Log Stock Transfer from Outlet to Customer
+          await tx.stockTransfer.create({
+            data: {
+              inventory_id: inventory.id,
+              from_type: 'Outlet',
+              from_id: outlet_id,
+              to_type: 'Customer',
+              to_id: order.id,
+              status: 'completed',
+              quantity_transferred: 1
+            }
+          });
+        }
+      }
+
+      // Create delivery record
+      const delivery = await tx.delivery.create({
+        data: {
+          order_id: parseInt(order_id),
+          delivery_agent_id: req.user.id, // The branch user who processed the self-pickup
+          status: 'completed',
+          start_time: getPKTDate(new Date()),
+          end_time: getPKTDate(new Date()),
+          verified: true,
+          product_imei: product_imei || null,
+          selected_plan: selected_plan || null,
+          self_pickup: true,
+          feedback: feedback || null
+        }
+      });
+
+      // Create uploads if any
+      if (facePhotos.length > 0) {
+        await tx.deliveryUpload.createMany({
+          data: facePhotos.map(file => ({
+            delivery_id: delivery.id,
+            upload_type: 'face_photo',
+            file_url: file.url || file.path, // handle both cases
+            uploaded_at: getPKTDate(new Date())
+          }))
+        });
+      }
+
+      // Update order status
+      await tx.order.update({
+        where: { id: parseInt(order_id) },
+        data: {
+          status: 'delivered',
+          is_delivered: true
+        }
+      });
+
+      // Create Cash In Hand entry for advance (marked as paid since it's collected at branch)
+      if (advanceAmount > 0) {
+        await tx.cashInHand.create({
+          data: {
+            officer_id: req.user.id,
+            outlet_id: outlet_id,
+            order_id: parseInt(order_id),
+            amount: advanceAmount,
+            submitted_amount: advanceAmount,
+            status: 'paid',
+            customer_name: confirmedCustomerName,
+            product_name: productNameSnapshot,
+            imei_serial: product_imei || null,
+            color_variant: colorVariant || null,
+            payment_method: 'Cash',
+            cash_type: 'Down payment (Self Pickup)',
+            created_at: getPKTDate(new Date())
+          }
+        });
+
+        // Update Cash Register - Down Payments
+        await updateCashRegister(tx, outlet_id, 'down_payments', advanceAmount, 'add');
+      }
+
+      return { delivery, productNameSnapshot, colorVariant };
+    }, {
+      maxWait: 5000,
+      timeout: 20000
+    });
+
+    const { delivery, productNameSnapshot, colorVariant } = result;
+
+    // 5. Build Installment Ledger
+    let installmentLedger = null;
+    let ledgerUrl = null;
+    try {
+      const monthlyAmt = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
+      const totalMonths = planObj?.months || planObj?.duration || order.months || 0;
+      const deliveryDate = new Date();
+
+      if (totalMonths > 0 && monthlyAmt > 0) {
+        const ledgerRows = [];
+        // Advance row
+        ledgerRows.push({
+          month: 0,
+          label: 'Advance Payment',
+          due_date: deliveryDate.toISOString(),
+          amount: parseFloat(advanceAmount || 0),
+          status: 'paid',
+          paid_at: deliveryDate.toISOString(),
+          payment_method: 'Cash',
+          feedback: 'Self Pickup at Branch'
+        });
+
+        // Installment rows
+        for (let i = 0; i < totalMonths; i++) {
+          ledgerRows.push({
+            month: i + 1,
+            label: `Month ${i + 1}`,
+            due_date: addMonths(deliveryDate, i + 1).toISOString(),
+            amount: parseFloat(monthlyAmt),
+            status: 'pending',
+            paid_at: null,
+          });
+        }
+
+        const ledgerToken = jwt.sign(
+          { order_id: parseInt(order_id), delivery_id: delivery.id },
+          LEDGER_TOKEN_SECRET,
+          { expiresIn: '730d' }
+        );
+        const shortId = crypto.randomBytes(5).toString('hex');
+        ledgerUrl = `${ledgerToken}`;
+
+        installmentLedger = await prisma.installmentLedger.create({
+          data: {
+            order_id: parseInt(order_id),
+            delivery_id: delivery.id,
+            token: ledgerToken,
+            short_id: shortId,
+            ledger_rows: ledgerRows,
+          }
+        });
+      }
+    } catch (ledgerErr) {
+      console.error('[submitSelfPickupDelivery] Ledger creation error:', ledgerErr);
+    }
+
+    // 6. WATI Messages
+    const customerPhone = purchaser?.telephone_number;
+    const deliveryDateStr = formatDatePK(new Date());
+    if (customerPhone) {
+      sendDeliveryConfirmation(customerPhone, {
+        customerName: confirmedCustomerName,
+        productName: productNameSnapshot,
+        imei: product_imei || 'N/A',
+        colorVariant: colorVariant || 'N/A',
+        advanceAmount,
+        deliveryDate: deliveryDateStr,
+        orderRef: order.order_ref,
+        orderStatus: 'Delivered (Self Pickup)',
+      }).catch(e => console.error('[WATI] Delivery confirmation error:', e));
+
+      if (installmentLedger && ledgerUrl) {
+        const rows = installmentLedger.ledger_rows;
+        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+        sendInstallmentLedger(customerPhone, {
+          customerName: confirmedCustomerName,
+          productName: productNameSnapshot,
+          orderRef: order.order_ref,
+          nextMonthLabel: 'Mahina 1',
+          monthlyAmount: rows[1]?.amount || 0,
+          dueDate: rows[1] ? formatDatePK(rows[1].due_date) : 'N/A',
+          totalRemaining: totalRemain,
+          ledgerUrl,
+        }).catch(e => console.error('[WATI] Ledger template error:', e));
+      }
+    }
+
+    // 7. Success Response
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Self Pickup Completed',
+      `Order #${order.order_ref} picked up at Branch (Outlet ID: ${outlet_id}) by ${req.user.full_name}`,
+      'delivery_complete',
+      delivery.id,
+      io
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Self Pickup processed successfully',
+      data: { delivery, ledger_url: ledgerUrl }
+    });
+
+  } catch (error) {
+    console.error('submitSelfPickupDelivery error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   submitDelivery,
   getDeliveryByOrderId,
@@ -1333,5 +1660,6 @@ module.exports = {
   unpickOrder,
   submitCashToOutlet,
   initiateReturnExchange,
-  getDeliveryOfficerOTPLogs
+  getDeliveryOfficerOTPLogs,
+  submitSelfPickupDelivery
 };
