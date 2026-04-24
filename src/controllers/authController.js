@@ -7,43 +7,7 @@ const { sendOTP } = require('../services/watiService');
 const { getOTPEmailTemplate } = require('../utils/emailTemplates');
 const { logAction } = require('../utils/auditLogger');
 
-const notifyAdmins = async (title, message, type, relatedId = null, io = null) => {
-  try {
-    const admins = await prisma.user.findMany({
-      where: {
-        role_id: { in: [4, 5, 6, 7, 8] },
-        status: 'active'
-      },
-      select: { id: true }
-    });
-
-    if (admins.length === 0) return;
-
-    const notificationData = admins.map(admin => ({
-      userId: admin.id,
-      title,
-      message,
-      type,
-      relatedId,
-      createdAt: new Date()
-    }));
-
-    await prisma.notification.createMany({ data: notificationData });
-
-    if (io) {
-      io.to('admins').emit('new_notification', {
-        title,
-        message,
-        type,
-        relatedId,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-  } catch (err) {
-    console.error('Failed to notify admins:', err);
-  }
-};
+const { notifyAdmins } = require('../utils/notificationUtils');
 
 const sendLoginOTP = async (req, res) => {
   const { identifier } = req.body;  // identifier can be phone or email

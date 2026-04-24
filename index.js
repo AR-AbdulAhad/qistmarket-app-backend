@@ -127,7 +127,7 @@ io.on('connection', (socket) => {
     if (!token) return;
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      if ([4, 5, 6, 7, 8].includes(decoded.role_id)) {
+      if ([4, 6, 7, 9].includes(decoded.role_id)) {
         socket.join('admins');
         socket.emit('joined_admin_room', { success: true, userId: decoded.id });
         console.log(`Admin ${decoded.id} joined admins room`);

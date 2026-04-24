@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const { syncBlacklistStatus } = require('../utils/blacklistUtils');
 
 const getCustomers = async (req, res) => {
  const {
@@ -13,6 +14,9 @@ const getCustomers = async (req, res) => {
   const q        = search.trim();
  
   try {
+    // Run automatic blacklist sync
+    await syncBlacklistStatus();
+
     // Fetch user with role and outlet
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
@@ -332,6 +336,9 @@ const getCustomers = async (req, res) => {
 
 const getBlacklistedCustomers = async (req, res) => {
   try {
+    // Run automatic blacklist sync
+    await syncBlacklistStatus();
+
     const today = new Date();
     const ninetyDaysAgo = new Date();
     ninetyDaysAgo.setDate(today.getDate() - 90);
@@ -378,37 +385,7 @@ const getBlacklistedCustomers = async (req, res) => {
     }
 
     // ── Filter Blacklisted Orders ──────────────────────────────
-    const blacklistedOrders = orders.filter(order => {
-      const ledgerModel = order.delivery?.installment_ledger;
-      if (!ledgerModel || !ledgerModel.ledger_rows) return false;
-
-      let rows = [];
-      try {
-        rows = Array.isArray(ledgerModel.ledger_rows) 
-          ? ledgerModel.ledger_rows 
-          : JSON.parse(ledgerModel.ledger_rows);
-      } catch (e) { return false; }
-
-      if (!Array.isArray(rows)) return false;
-
-      const installments = rows.filter(r => r.month > 0);
-      if (installments.length === 0) return false;
-
-      // Condition 1: No installments paid for 90 days since delivery
-      const paidCount = installments.filter(r => r.status === 'paid').length;
-      const deliveryDate = order.delivery?.end_time || order.updated_at;
-      if (paidCount === 0 && deliveryDate < ninetyDaysAgo) return true;
-
-      // Condition 2: Any installment overdue > 90 days
-      const anyVeryOverdue = installments.some(r => {
-        const dDate = r.due_date || r.dueDate;
-        if (!dDate) return false;
-        const dueDate = new Date(dDate);
-        return r.status !== 'paid' && dueDate < ninetyDaysAgo;
-      });
-
-      return anyVeryOverdue;
-    });
+    const blacklistedOrders = orders.filter(order => order.verification?.purchaser?.is_blacklisted);
 
     // ── Group by order (1 order = 1 row) (Shared logic with getCustomers) ────────────────────
     const customerMap = new Map();
@@ -543,28 +520,9 @@ const getBlacklistedCustomers = async (req, res) => {
 
 const getClearedCustomers = async (req, res) => {
   try {
-    // Fetch user with role and outlet
-    const user = await prisma.user.findUnique({
-      where: { id: req.user.id },
-      include: { role: true }
-    });
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: { code: 401, message: 'User not found' },
-      });
-    }
-
     // Base where clause
     const baseWhere = { is_delivered: true };
 
-    // Role-based filtering
-    if (user.role.name === 'Sales Officer') {
-      baseWhere.created_by_user_id = req.user.id;
-    } else if (user.outlet_id) {
-      baseWhere.outlet_id = req.user.outlet_id;
-    }
 
     // Fetch all delivered orders
     const orders = await prisma.order.findMany({
@@ -763,9 +721,130 @@ const getClearedCustomers = async (req, res) => {
   }
 };
 
+const getCustomerLedger = async (req, res) => {
+    const { orderRef } = req.params;
+
+    if (!orderRef) {
+        return res.status(400).json({ success: false, message: 'Order reference is required.' });
+    }
+
+    try {
+        const order = await prisma.order.findUnique({
+            where: { order_ref: orderRef },
+            include: {
+                verification: {
+                    include: {
+                        purchaser: true,
+                    },
+                },
+                delivery: {
+                    include: {
+                        installment_ledger: true,
+                    },
+                },
+                cash_in_hand: {
+                    take: 1,
+                    orderBy: { created_at: 'desc' },
+                },
+                outlet: {
+                    select: {
+                        name: true,
+                        code: true
+                    }
+                }
+            }
+        });
+
+        if (!order) {
+            return res.status(404).json({ success: false, message: 'Order not found.' });
+        }
+
+        // ── Pre-fetch Inventory details based on IMEI ──────────────────
+        const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+        
+        let invInfo = null;
+        if (imeiSerial) {
+            invInfo = await prisma.outletInventory.findFirst({
+                where: { imei_serial: imeiSerial },
+                select: { imei_serial: true, product_name: true }
+            });
+        }
+
+        const purchaser = order.verification?.purchaser || null;
+        const delivery = order.delivery;
+        const ledgerModel = delivery?.installment_ledger || null;
+        const cashRecord = order.cash_in_hand?.[0] || null;
+
+        let plan = delivery?.selected_plan || null;
+        if (typeof plan === 'string') {
+            try { plan = JSON.parse(plan); } catch (e) { plan = null; }
+        }
+
+        const allRows = Array.isArray(ledgerModel?.ledger_rows) ? ledgerModel.ledger_rows : [];
+        const advanceLedgerRow = allRows.find(r => r.month === 0);
+        const installmentOnlyRows = allRows.filter(r => r.month > 0);
+
+        const installmentLedger = installmentOnlyRows.map((row) => ({
+            monthNumber: row.month,
+            label: row.label || `Month ${row.month}`,
+            dueDate: row.due_date || row.dueDate || null,
+            dueAmount: Number(row.amount || row.dueAmount || 0),
+            status: row.status || 'pending',
+            paidAt: row.paid_at || row.paidAt || null,
+            paymentMethod: row.payment_method || row.paymentMethod || null,
+            arrears: row.arrears || 0,
+        }));
+
+        const advanceAmount = advanceLedgerRow?.amount || cashRecord?.amount || order.advance_amount || 0;
+        const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
+        const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
+
+        const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+        const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
+        const totalArrears = installmentLedger.reduce((sum, r) => sum + (r.arrears || 0), 0);
+
+        const formatted = {
+            order_id: order.id,
+            order_ref: order.order_ref,
+            customer_name: purchaser?.name || order.customer_name,
+            whatsapp_number: order.whatsapp_number,
+            product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
+            imei_serial: imeiSerial,
+            status: order.status,
+            created_at: order.created_at,
+            outlet_name: order.outlet?.name || 'N/A',
+            outlet_code: order.outlet?.code || 'N/A',
+            ledgerSummaries: {
+                advanceAmount,
+                monthlyAmount,
+                totalMonths,
+                totalInstallmentDue,
+                totalInstallmentPaid,
+                totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
+                totalArrears,
+                paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
+                totalInstallments: installmentLedger.length,
+            },
+            installmentLedger,
+            ledger_short_id: ledgerModel?.token || null
+        };
+
+        res.json({
+            success: true,
+            data: {
+                installments: [formatted]
+            }
+        });
+    } catch (error) {
+        console.error('getCustomerLedger error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
   getCustomers,
   getBlacklistedCustomers,
-  getClearedCustomers
+  getClearedCustomers,
+  getCustomerLedger
 };
 

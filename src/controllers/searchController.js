@@ -7,14 +7,10 @@ const globalSearch = async (req, res) => {
     }
 
     try {
-        const user = await prisma.user.findUnique({ where: { id: req.user.id } });
-        const outletId = user.outlet_id;
-
         // Base search in Orders (Phone, Ref, Token, IMEI, Name, Address)
         const orders = await prisma.order.findMany({
             where: {
                 AND: [
-                    outletId ? { outlet_id: outletId } : {},
                     { status: 'delivered' },
                     {
                         OR: [
@@ -95,14 +91,14 @@ const globalSearch = async (req, res) => {
         
         purchaserMatches.forEach(pm => {
             const order = pm.verification?.order;
-            if (order && order.status === 'delivered' && (!outletId || order.outlet_id === outletId)) {
+            if (order && order.status === 'delivered') {
                 orderResults.set(order.id, order);
             }
         });
 
         grantorMatches.forEach(gm => {
             const order = gm.verification?.order;
-            if (order && order.status === 'delivered' && (!outletId || order.outlet_id === outletId)) {
+            if (order && order.status === 'delivered') {
                 orderResults.set(order.id, order);
             }
         });

@@ -2,20 +2,25 @@ const prisma = require('../../lib/prisma');
 
 /**
  * Helper to get outlet filter based on user role and query
+ * Priority: If user has outlet_id in JWT → always scope to that outlet
+ * Only if user has NO outlet_id (pure admin/HO users) → check for query param
  */
 const getOutletFilter = (req) => {
     const { outlet_id: userOutletId, role, role_id } = req.user;
-    // Common admin role IDs: 4 (Admin), 5 (Super Admin)
-    const isAdmin = ['admin', 'super admin'].includes(role?.toLowerCase()) || [4, 5].includes(role_id);
-    
-    if (isAdmin) {
-        const queryOutletId = req.query.outletId || req.query.outlet_id;
-        if (queryOutletId && queryOutletId !== 'all') {
-            return { outlet_id: Number(queryOutletId) };
-        }
-        return {}; // All outlets
+
+    // If the logged-in user is assigned to a specific outlet, ALWAYS scope to it
+    if (userOutletId) {
+        return { outlet_id: Number(userOutletId) };
     }
-    return { outlet_id: userOutletId };
+
+    // Head Office / Super Admin: no outlet_id in token → can query any outlet
+    const queryOutletId = req.query.outletId || req.query.outlet_id;
+    if (queryOutletId && queryOutletId !== 'all') {
+        return { outlet_id: Number(queryOutletId) };
+    }
+
+    // No filter = see all outlets
+    return {};
 };
 
 /**
@@ -113,13 +118,32 @@ const getDaybook = async (req, res) => {
  */
 const getStockSummary = async (req, res) => {
     const outletFilter = getOutletFilter(req);
+    const { startDate, endDate } = req.query;
 
     try {
         const inventory = await prisma.outletInventory.findMany({
             where: outletFilter
         });
 
+        // Filter sold items by date if dates provided
+        // We'd typically need the sale date, but currently outletInventory status just says "Sold"
+        // Let's assume updated_at represents the sale date for "Sold" items
+        const dateFilter = {};
+        if (startDate) dateFilter.gte = new Date(startDate);
+        if (endDate) {
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+            dateFilter.lte = end;
+        }
+
         const summary = inventory.reduce((acc, item) => {
+            let includeSold = true;
+            if (item.status === 'Sold' && (dateFilter.gte || dateFilter.lte)) {
+                const updatedDate = new Date(item.updated_at);
+                if (dateFilter.gte && updatedDate < dateFilter.gte) includeSold = false;
+                if (dateFilter.lte && updatedDate > dateFilter.lte) includeSold = false;
+            }
+
             const key = item.product_name;
             if (!acc[key]) {
                 acc[key] = {
@@ -130,10 +154,18 @@ const getStockSummary = async (req, res) => {
                     valuation: 0
                 };
             }
-            acc[key].total++;
-            if (item.status === 'In Stock') acc[key].inStock++;
-            if (item.status === 'Sold') acc[key].sold++;
-            acc[key].valuation += item.purchase_price;
+            
+            // Only count if it's in stock or it's sold within the date range (or no date filter)
+            if (item.status === 'In Stock') {
+                acc[key].total++;
+                acc[key].inStock++;
+                acc[key].valuation += item.purchase_price;
+            } else if (item.status === 'Sold' && includeSold) {
+                acc[key].total++;
+                acc[key].sold++;
+                acc[key].valuation += item.purchase_price; // Value of what we had/sold
+            }
+            
             return acc;
         }, {});
 
@@ -150,27 +182,28 @@ const getStockSummary = async (req, res) => {
  */
 const getSalesReport = async (req, res) => {
     const outletFilter = getOutletFilter(req);
-    const { startDate, endDate, status } = req.query;
+    const { startDate, endDate } = req.query;
 
     try {
-        const where = { ...outletFilter };
+        // Sales Report only shows delivered orders
+        const where = { ...outletFilter, status: 'delivered' };
+
         if (startDate || endDate) {
-            where.created_at = {};
-            if (startDate) where.created_at.gte = new Date(startDate);
+            where.updated_at = {};
+            if (startDate) where.updated_at.gte = new Date(startDate);
             if (endDate) {
                 const end = new Date(endDate);
                 end.setHours(23, 59, 59, 999);
-                where.created_at.lte = end;
+                where.updated_at.lte = end;
             }
         }
-        if (status) where.status = status;
 
         const orders = await prisma.order.findMany({
             where,
             include: {
                 installment_ledger: true
             },
-            orderBy: { created_at: 'desc' }
+            orderBy: { updated_at: 'desc' }
         });
 
         const summary = {
@@ -352,6 +385,194 @@ const getAllOutlets = async (req, res) => {
     }
 };
 
+/**
+ * getFinancialReport
+ * Aggregates both Expense and VendorPayment models to show cash out-flow.
+ */
+const getFinancialReport = async (req, res) => {
+    const outletFilter = getOutletFilter(req);
+    const { startDate, endDate } = req.query;
+
+    try {
+        const dateFilter = {};
+        if (startDate) dateFilter.gte = new Date(startDate);
+        if (endDate) {
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+            dateFilter.lte = end;
+        }
+
+        const expenses = await prisma.expenseVoucher.findMany({
+            where: {
+                ...outletFilter,
+                ...(Object.keys(dateFilter).length > 0 && { date: dateFilter })
+            },
+            include: { items: true },
+            orderBy: { date: 'desc' }
+        });
+
+        const vendorPayments = await prisma.vendorPayment.findMany({
+            where: {
+                ...outletFilter,
+                ...(Object.keys(dateFilter).length > 0 && { created_at: dateFilter })
+            },
+            include: { vendor: true },
+            orderBy: { created_at: 'desc' }
+        });
+
+        res.json({ success: true, data: { expenses, vendorPayments } });
+    } catch (error) {
+        console.error('getFinancialReport error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+/**
+ * getInstallmentRecoveriesReport
+ * Filters installment_ledger rows where status = paid yielding pure cash inflows.
+ */
+const getInstallmentRecoveriesReport = async (req, res) => {
+    const outletFilter = getOutletFilter(req);
+    const { startDate, endDate } = req.query;
+
+    try {
+        const dateFilter = {};
+        if (startDate) dateFilter.gte = new Date(startDate);
+        if (endDate) {
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+            dateFilter.lte = end;
+        }
+
+        const ledgers = await prisma.installmentLedger.findMany({
+            where: {
+                order: { ...outletFilter, status: { notIn: ['Cancelled', 'Rejected'] } }
+            },
+            include: {
+                order: { select: { order_ref: true, customer_name: true, whatsapp_number: true, id: true } }
+            }
+        });
+
+        let recoveries = [];
+        let totalRecovered = 0;
+
+        for (const ledger of ledgers) {
+            const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            for (const row of rows) {
+                if (row.status === 'paid' && row.paid_at) {
+                    const paidDate = new Date(row.paid_at);
+                    let include = true;
+                    if (dateFilter.gte && paidDate < dateFilter.gte) include = false;
+                    if (dateFilter.lte && paidDate > dateFilter.lte) include = false;
+
+                    if (include) {
+                        const amount = parseFloat(row.amount || row.dueAmount || 0);
+                        totalRecovered += amount;
+                        recoveries.push({
+                            order_id: ledger.order.id,
+                            order_ref: ledger.order.order_ref,
+                            customer_name: ledger.order.customer_name,
+                            whatsapp_number: ledger.order.whatsapp_number,
+                            amount: amount,
+                            month: row.month,
+                            label: row.label || `Month ${row.month}`,
+                            paid_at: row.paid_at,
+                            payment_method: row.payment_method || 'Cash'
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Sort by paid_at descending
+        recoveries.sort((a, b) => new Date(b.paid_at) - new Date(a.paid_at));
+
+        res.json({ success: true, data: { recoveries, totalRecovered } });
+    } catch (error) {
+        console.error('getInstallmentRecoveriesReport error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+/**
+ * getOfficerRecoveryReport
+ * Performance of recovery officers assigned to the outlet.
+ */
+const getOfficerRecoveryReport = async (req, res) => {
+    const outletFilter = getOutletFilter(req);
+    const { startDate, endDate } = req.query;
+
+    try {
+        const dateFilter = {};
+        if (startDate) dateFilter.gte = new Date(startDate);
+        if (endDate) {
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+            dateFilter.lte = end;
+        }
+
+        // We fetch all orders that have a recovery_officer_id and are in this outlet
+        const orders = await prisma.order.findMany({
+            where: {
+                ...outletFilter,
+                recovery_officer_id: { not: null },
+                status: { notIn: ['Cancelled', 'Rejected'] }
+            },
+            include: {
+                recovery_officer: { select: { id: true, full_name: true, phone: true } },
+                installment_ledger: true
+            }
+        });
+
+        const officerMap = {};
+
+        for (const order of orders) {
+            const officerId = order.recovery_officer_id;
+            const officer = order.recovery_officer;
+            if (!officerId || !officer) continue;
+
+            if (!officerMap[officerId]) {
+                officerMap[officerId] = {
+                    officer_id: officerId,
+                    officer_name: officer.full_name,
+                    officer_phone: officer.phone,
+                    assigned_orders: 0,
+                    total_recovered: 0,
+                    recoveries: []
+                };
+            }
+
+            officerMap[officerId].assigned_orders += 1;
+
+            const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+            for (const row of rows) {
+                if (row.status === 'paid' && row.paid_at) {
+                    const paidDate = new Date(row.paid_at);
+                    let include = true;
+                    if (dateFilter.gte && paidDate < dateFilter.gte) include = false;
+                    if (dateFilter.lte && paidDate > dateFilter.lte) include = false;
+
+                    if (include) {
+                        const amount = parseFloat(row.amount || row.dueAmount || 0);
+                        officerMap[officerId].total_recovered += amount;
+                        officerMap[officerId].recoveries.push({
+                            order_id: order.id,
+                            order_ref: order.order_ref,
+                            amount: amount,
+                            paid_at: row.paid_at
+                        });
+                    }
+                }
+            }
+        }
+
+        res.json({ success: true, data: Object.values(officerMap) });
+    } catch (error) {
+        console.error('getOfficerRecoveryReport error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getDaybook,
     getStockSummary,
@@ -359,5 +580,8 @@ module.exports = {
     getProfitLoss,
     getCustomerLedger,
     getRecoveryReport,
-    getAllOutlets
+    getAllOutlets,
+    getFinancialReport,
+    getInstallmentRecoveriesReport,
+    getOfficerRecoveryReport
 };

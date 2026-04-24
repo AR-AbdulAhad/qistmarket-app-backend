@@ -1,7 +1,8 @@
 const prisma = require('../../lib/prisma');
-const { notifyAdmins } = require('../utils/notificationUtils');
+const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { sendOrderAssignmentNotification } = require('./ordersController');
 const { getPKTDate } = require("../utils/dateUtils");
+const { checkBlacklistStatus } = require('../utils/blacklistUtils');
 
 // Start Verification
 const startVerification = async (req, res) => {
@@ -154,6 +155,17 @@ const startVerification = async (req, res) => {
       io
     );
 
+    if (order.outlet_id) {
+      await notifyOutlet(
+        order.outlet_id,
+        'Verification Started',
+        `Verification visit has started for Order #${verification.order.order_ref}.`,
+        'verification_start',
+        verification.id,
+        io
+      );
+    }
+
     // Emit real-time update for officer's current verification assignment
     if (io) {
       // Find the officer's current verification (same as in officerController)
@@ -230,6 +242,15 @@ const savePurchaserVerification = async (req, res) => {
   } = req.body;
 
   try {
+    // Check if blacklisted
+    const blacklistCheck = await checkBlacklistStatus(name, cnic_number);
+    if (blacklistCheck.isBlacklisted) {
+      return res.status(400).json({
+        success: false,
+        message: `Yeh black list hay (${blacklistCheck.personType}). Aap is customer ke liye verification nahi kar sakte.`
+      });
+    }
+
     const orders = await prisma.order.findUnique({
       where: { id: parseInt(order_id) },
     });
@@ -433,6 +454,15 @@ const saveGrantorVerification = async (req, res) => {
   } = req.body;
 
   try {
+    // Check if blacklisted
+    const blacklistCheck = await checkBlacklistStatus(name, cnic_number);
+    if (blacklistCheck.isBlacklisted) {
+      return res.status(400).json({
+        success: false,
+        message: `Yeh black list hay (${blacklistCheck.personType}). Aap is shakhs ko grantor nahi bana sakte.`
+      });
+    }
+
     const verification = await prisma.verification.findUnique({
       where: { id: parseInt(verification_id) }
     });
@@ -1150,6 +1180,17 @@ const completeVerification = async (req, res) => {
       io
     );
 
+    if (updatedVerification.verification_officer?.outlet_id) {
+      await notifyOutlet(
+        updatedVerification.verification_officer.outlet_id,
+        'Verification Completed',
+        `Verification has been completed for Order #${updatedVerification.order.order_ref}.`,
+        'verification_complete',
+        updatedVerification.id,
+        io
+      );
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Verification completed successfully',
@@ -1372,6 +1413,17 @@ const submitVerificationReview = async (req, res) => {
       parseInt(verification_id),
       io
     );
+
+    if (verification.order.outlet_id) {
+      await notifyOutlet(
+        verification.order.outlet_id,
+        'Review Submitted',
+        `Order #${verification.order.order_ref} has been reviewed and is now ${orderStatusUpdate?.toUpperCase() || 'in process'}.`,
+        'review_submitted',
+        parseInt(verification_id),
+        io
+      );
+    }
 
     return res.status(200).json({
       success: true,

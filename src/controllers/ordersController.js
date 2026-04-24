@@ -1,7 +1,7 @@
 const prisma = require('../../lib/prisma');
 const crypto = require('crypto');
 const axios = require('axios');
-const { notifyUser } = require('../utils/notificationUtils');
+const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { getPKTDate } = require("../utils/dateUtils");
 const { logAction } = require('../utils/auditLogger');
 const { sendOTP } = require('../services/watiService');
@@ -356,11 +356,20 @@ const createOrder = async (req, res) => {
       }
     });
 
+    const io = req.app.get('io');
     if (assignedOfficerId) {
-      // Send notification
-      const io = req.app.get('io');
+      // Send notification to officer
       await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
     }
+
+    // Notify Admins about new order
+    await notifyAdmins(
+      'New Order Created',
+      `Order ${order.order_ref} was created by ${order.created_by.username} for ${order.customer_name}.`,
+      'order_creation',
+      order.id,
+      io
+    );
 
     await logAction(
       req,
@@ -1345,6 +1354,24 @@ const assignOrder = async (req, res) => {
     });
 
     const io = req.app.get('io');
+    await notifyAdmins(
+      'Order Assigned',
+      `Order ${updatedOrder.order_ref} assigned to ${user.full_name} for verification.`,
+      'order_assignment',
+      updatedOrder.id,
+      io
+    );
+
+    if (updatedOrder.outlet_id) {
+      await notifyOutlet(
+        updatedOrder.outlet_id,
+        'Order Assigned',
+        `Order ${updatedOrder.order_ref} has been assigned to ${user.full_name} for verification.`,
+        'order_assignment',
+        updatedOrder.id,
+        io
+      );
+    }
     await sendOrderAssignmentNotification(updatedOrder, updatedOrder.assigned_to, 'verification', io);
 
     return res.status(200).json({
@@ -1733,6 +1760,24 @@ const assignDelivery = async (req, res) => {
     });
 
     const io = req.app.get('io');
+    await notifyAdmins(
+      'Delivery Assigned',
+      `Order ${updatedOrder.order_ref} assigned to ${officer.full_name} for delivery.`,
+      'delivery_assignment',
+      updatedOrder.id,
+      io
+    );
+
+    if (updatedOrder.outlet_id) {
+      await notifyOutlet(
+        updatedOrder.outlet_id,
+        'Delivery Assigned',
+        `Order ${updatedOrder.order_ref} has been assigned to ${officer.full_name} for delivery.`,
+        'delivery_assignment',
+        updatedOrder.id,
+        io
+      );
+    }
     if (updatedOrder.delivery_officer) {
       await sendOrderAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, 'delivery', io);
     }
@@ -1835,6 +1880,26 @@ const cancelOrder = async (req, res) => {
       'Order'
     );
 
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Order Cancelled',
+      `Order ${updatedOrder.order_ref} has been cancelled. Reason: ${reason || 'Cancelled by admin'}`,
+      'order_cancellation',
+      updatedOrder.id,
+      io
+    );
+
+    if (updatedOrder.outlet_id) {
+      await notifyOutlet(
+        updatedOrder.outlet_id,
+        'Order Cancelled',
+        `Order ${updatedOrder.order_ref} has been cancelled. Reason: ${reason || 'N/A'}`,
+        'order_cancellation',
+        updatedOrder.id,
+        io
+      );
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Order cancelled successfully',
@@ -1931,8 +1996,25 @@ const getDeliveredOrders = async (req, res) => {
   const take = Number(limit);
 
   try {
+    const userFromDb = await prisma.user.findUnique({ where: { id: req.user.id } });
+    const userRole = (req.user?.role || '').toLowerCase();
+
+    const where = {
+      status: 'delivered',
+    };
+
+    if (userRole === 'branch user') {
+      where.AND = [
+        {
+          OR: [
+            { outlet_id: userFromDb?.outlet_id || -1 },
+            { created_by_user_id: req.user.id }
+          ]
+        }
+      ];
+    }
     const orders = await prisma.order.findMany({
-      where: { status: 'delivered' },
+      where,
       skip,
       take,
       orderBy: { updated_at: 'desc' },
@@ -2142,6 +2224,26 @@ const verifyHandover = async (req, res) => {
         }
       })
     ]);
+
+    const io = req.app.get('io');
+    await notifyAdmins(
+      'Stock Handed Over',
+      `Order #${order.order_ref} stock (${imei_serial}) has been handed over to ${order.delivery_officer.full_name}.`,
+      'stock_transfer',
+      order.id,
+      io
+    );
+
+    if (order.outlet_id) {
+      await notifyOutlet(
+        order.outlet_id,
+        'Stock Handed Over',
+        `Stock for Order #${order.order_ref} has been handed over to ${order.delivery_officer.full_name}.`,
+        'stock_transfer',
+        order.id,
+        io
+      );
+    }
 
     return res.status(200).json({
       success: true,

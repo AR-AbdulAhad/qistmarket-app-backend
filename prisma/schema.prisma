@@ -485,6 +485,7 @@ model PurchaserVerification {
   present_period_of_stay   String?
   present_street           String?
   present_zone             String?
+  is_blacklisted           Boolean         @default(false)
   verification             Verification    @relation(fields: [verification_id], references: [id], onDelete: Cascade)
 
   @@index([verification_id])
@@ -533,6 +534,7 @@ model GrantorVerification {
   present_period_of_stay   String?
   present_street           String?
   present_zone             String?
+  is_blacklisted           Boolean         @default(false)
   verification             Verification    @relation(fields: [verification_id], references: [id], onDelete: Cascade)
 
   @@unique([verification_id, grantor_number])

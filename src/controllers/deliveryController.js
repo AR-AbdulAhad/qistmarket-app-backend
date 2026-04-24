@@ -3,7 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP, sendDeliveryConfirmation, sendInstallmentLedger } = require('../services/watiService');
-const { notifyUser, notifyAdmins } = require('../utils/notificationUtils');
+const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const admin = require('firebase-admin');
 const { getPKTDate } = require("../utils/dateUtils");
@@ -418,6 +418,17 @@ const submitDelivery = async (req, res) => {
       io
     );
 
+    if (order.outlet_id) {
+      await notifyOutlet(
+        order.outlet_id,
+        'Delivery Completed',
+        `Delivery has been successfully completed for Order #${updatedDelivery.order.order_ref}.`,
+        'delivery_complete',
+        updatedDelivery.id,
+        io
+      );
+    }
+
     return res.status(201).json({
       success: true,
       message: 'Delivery submitted successfully',
@@ -831,6 +842,16 @@ const submitCashToOutlet = async (req, res) => {
         otp: otp,
         entries: entriesToReport
       });
+
+      // Save notification to DB for Outlet Users
+      await notifyOutlet(
+        outlet_id,
+        'Cash Submission Requested',
+        `${officerName} has requested to submit PKR ${amountToSubmit} to your outlet.`,
+        'cash_submission_otp',
+        null,
+        io
+      );
     }
 
     // Send through helper (App Push + Internal)
@@ -1182,6 +1203,18 @@ const unpickOrder = async (req, res) => {
       io
     );
 
+    const order = await prisma.order.findUnique({ where: { id: parseInt(order_id) } });
+    if (order?.outlet_id) {
+      await notifyOutlet(
+        order.outlet_id,
+        'Order Postponed',
+        `Order #${order.order_ref} has been postponed by the officer. Reason: ${feedback}`,
+        'order_unpicked',
+        order.id,
+        io
+      );
+    }
+
     return res.status(200).json({ success: true, message: 'Order has been postponed successfully', feedback });
   } catch (error) {
     console.error('unpickOrder error:', error);
@@ -1326,6 +1359,16 @@ const initiateReturnExchange = async (req, res) => {
         is_cash_refund: returnRecord.is_cash_refund,
         refund_amount: returnRecord.refund_amount
       });
+
+      // Save notification to DB for Outlet Users
+      await notifyOutlet(
+        outlet_id,
+        `${type} Requested`,
+        `${officerName} has requested a ${type} for Order #${delivery.order.order_ref}.`,
+        'return_exchange_requested',
+        returnRecord.id,
+        io
+      );
     }
 
     return res.json({
@@ -1628,6 +1671,15 @@ const submitSelfPickupDelivery = async (req, res) => {
     await notifyAdmins(
       'Self Pickup Completed',
       `Order #${order.order_ref} picked up at Branch (Outlet ID: ${outlet_id}) by ${req.user.full_name}`,
+      'delivery_complete',
+      delivery.id,
+      io
+    );
+
+    await notifyOutlet(
+      outlet_id,
+      'Self Pickup Completed',
+      `Order #${order.order_ref} has been picked up by the customer at your branch.`,
       'delivery_complete',
       delivery.id,
       io

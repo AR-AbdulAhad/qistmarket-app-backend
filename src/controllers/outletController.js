@@ -836,6 +836,9 @@ const getOutletInstallments = async (req, res) => {
         page = 1,
         limit = 10,
         search = '',
+        tab = 'fresh', // 'fresh' or 'overdue'
+        startDate,
+        endDate
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page));
@@ -857,13 +860,89 @@ const getOutletInstallments = async (req, res) => {
             }),
         };
 
-        const totalOrders = await prisma.order.count({ where: orderWhere });
-        const orders = await prisma.order.findMany({
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // Fetch all candidates first to filter by ledger rows (since they are JSON)
+        // If the dataset is huge, this might need optimization but for most cases it's fine
+        const allOrdersForTotalCount = await prisma.order.findMany({
             where: orderWhere,
+            include: {
+                delivery: {
+                    include: {
+                        installment_ledger: true
+                    }
+                }
+            }
+        });
+
+        // Categorize orders into fresh, overdue, and fully paid
+        const categorized = allOrdersForTotalCount.map(order => {
+            const ledger = order.delivery?.installment_ledger;
+            if (!ledger || !ledger.ledger_rows) return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null };
+
+            let rows = [];
+            try {
+                rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
+            } catch (e) { return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null }; }
+
+            const installments = rows.filter(r => r.month > 0);
+            
+            const isFullyPaid = installments.length > 0 && installments.every(r => r.status === 'paid' || r.status === 'Paid');
+            
+            const isOverdue = !isFullyPaid && installments.some(r => {
+                const dueDate = new Date(r.due_date || r.dueDate);
+                return (r.status !== 'paid' && r.status !== 'Paid') && dueDate < today;
+            });
+
+            // Find next pending due date for filtering
+            const nextPending = installments.find(r => r.status !== 'paid' && r.status !== 'Paid');
+            const nextDueDate = nextPending ? new Date(nextPending.due_date || nextPending.dueDate) : null;
+
+            return { orderId: order.id, isOverdue, isFullyPaid, nextDueDate };
+        });
+
+        const overdueIds = categorized.filter(c => c.isOverdue).map(c => c.orderId);
+        const completedIds = categorized.filter(c => c.isFullyPaid).map(c => c.orderId);
+        const freshIds = categorized.filter(c => !c.isOverdue && !c.isFullyPaid).map(c => c.orderId);
+
+        // Apply Tab Filter
+        let filteredIds = [];
+        if (tab === 'overdue') filteredIds = overdueIds;
+        else if (tab === 'completed') filteredIds = completedIds;
+        else filteredIds = freshIds; // default to fresh
+
+        // Apply Date Filter (based on next pending installment's due date)
+        if (startDate || endDate) {
+            const start = startDate ? new Date(startDate) : null;
+            const end = endDate ? new Date(endDate) : null;
+
+            filteredIds = categorized
+                .filter(c => filteredIds.includes(c.orderId))
+                .filter(c => {
+                    if (!c.nextDueDate) return false;
+                    if (start && c.nextDueDate < start) return false;
+                    if (end && c.nextDueDate > end) return false;
+                    return true;
+                })
+                .map(c => c.orderId);
+        }
+        
+        // Ensure no undefined IDs slip through
+        filteredIds = filteredIds.filter(id => id !== undefined && id !== null);
+
+        const totalOrders = filteredIds.length;
+        const orders = await prisma.order.findMany({
+            where: { id: { in: filteredIds } },
             include: {
                 verification: {
                     include: {
                         purchaser: true,
+                        grantors: true,
+                        documents: {
+                            where: { label: { in: ['Purchaser Profile', 'Grantor 1 Profile', 'Grantor 2 Profile', 'Purchaser Face Photo'] } },
+                            orderBy: { uploaded_at: 'desc' }
+                        }
                     },
                 },
                 delivery: {
@@ -887,6 +966,20 @@ const getOutletInstallments = async (req, res) => {
             take: limitNum,
         });
 
+        // Calculate Total Recovery for the current filtered view
+        let totalRecovery = 0;
+        allOrdersForTotalCount.filter(o => filteredIds.includes(o.id)).forEach(order => {
+            const ledger = order.delivery?.installment_ledger;
+            if (!ledger || !ledger.ledger_rows) return;
+            try {
+                const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
+                rows.filter(r => r.month > 0 && (r.status === 'paid' || r.status === 'Paid')).forEach(r => {
+                    totalRecovery += Number(r.amount || r.dueAmount || 0);
+                });
+            } catch (e) {}
+        });
+
+
         // ── Pre-fetch Inventory details based on IMEI ──────────────────
         const allImeis = orders
             .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
@@ -906,6 +999,8 @@ const getOutletInstallments = async (req, res) => {
 
         const formatted = orders.map(order => {
             const purchaser = order.verification?.purchaser || null;
+            const grantors = order.verification?.grantors || [];
+            const documents = order.verification?.documents || [];
             const delivery = order.delivery;
             const ledgerModel = delivery?.installment_ledger || null;
             const cashRecord = order.cash_in_hand?.[0] || null;
@@ -955,6 +1050,14 @@ const getOutletInstallments = async (req, res) => {
                 created_at: order.created_at,
                 outlet_name: order.outlet?.name || 'N/A',
                 outlet_code: order.outlet?.code || 'N/A',
+                purchaser: {
+                    ...purchaser,
+                    profile_photo: documents.find(d => d.label === 'Purchaser Profile' || d.label === 'Purchaser Face Photo')?.file_url || null
+                },
+                grantors: grantors.map(g => ({
+                    ...g,
+                    profile_photo: documents.find(d => d.label === `Grantor ${g.grantor_number} Profile`)?.file_url || null
+                })),
                 ledgerSummaries: {
                     advanceAmount,
                     monthlyAmount,
@@ -975,6 +1078,8 @@ const getOutletInstallments = async (req, res) => {
             success: true,
             data: {
                 installments: formatted,
+                totalRecovery,
+                overdueCount: overdueIds.length,
                 pagination: {
                     total: totalOrders,
                     page: pageNum,

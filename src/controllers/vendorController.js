@@ -130,19 +130,47 @@ const createPurchase = async (req, res) => {
                     total_price: totalPrice
                 });
 
-                // Add to inventory
-                inventoryData.push({
-                    outlet_id,
-                    product_name: item.product_name,
-                    category: item.category,
-                    color_variant: item.color_variant,
-                    imei_serial: item.imei_serial,
-                    quantity: qty,
-                    purchase_price: unitPrice,
-                    installment_price: 0, 
-                    installment_plans: generateInstallments(item.category || '', unitPrice),
-                    status: 'In Stock'
+                // Add or update inventory
+                // We check for an existing record with the same product_name and imei_serial (exact match)
+                const existingItem = await tx.outletInventory.findFirst({
+                    where: {
+                        outlet_id,
+                        product_name: item.product_name,
+                        imei_serial: item.imei_serial || null,
+                        color_variant: item.color_variant || null
+                    }
                 });
+
+                if (existingItem) {
+                    // Update existing record
+                    await tx.outletInventory.update({
+                        where: { id: existingItem.id },
+                        data: {
+                            quantity: existingItem.quantity + qty,
+                            purchase_price: unitPrice, // Update to latest purchase price
+                            status: 'In Stock',
+                            category: item.category || existingItem.category,
+                            color_variant: item.color_variant || existingItem.color_variant,
+                            installment_plans: generateInstallments(item.category || existingItem.category || '', unitPrice)
+                        }
+                    });
+                } else {
+                    // Create new record
+                    await tx.outletInventory.create({
+                        data: {
+                            outlet_id,
+                            product_name: item.product_name,
+                            category: item.category,
+                            color_variant: item.color_variant,
+                            imei_serial: item.imei_serial || null,
+                            quantity: qty,
+                            purchase_price: unitPrice,
+                            installment_price: 0,
+                            installment_plans: generateInstallments(item.category || '', unitPrice),
+                            status: 'In Stock'
+                        }
+                    });
+                }
             }
 
             const purchase = await tx.vendorPurchase.create({
@@ -171,12 +199,6 @@ const createPurchase = async (req, res) => {
                     data: { balance: { increment: totalAmount } }
                 });
             }
-
-            // Create inventory records
-            // Note: createMany might need adjustment if schema is complex, but here it works.
-            await tx.outletInventory.createMany({
-                data: inventoryData
-            });
 
             return purchase;
         }, {

@@ -1,5 +1,5 @@
 const prisma = require('../../lib/prisma');
-const { notifyUser, notifyAdmins } = require('../utils/notificationUtils');
+const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { sendOTP } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
 const axios = require('axios');
@@ -108,64 +108,85 @@ function generateInstallments(categoryName, price) {
 
 const getInventory = async (req, res) => {
     const { outlet_id } = req.user;
+    const { page = 1, limit = 20, search = "" } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const take = parseInt(limit);
 
     if (!outlet_id) {
         return res.status(403).json({ success: false, message: 'Not an outlet user.' });
     }
 
     try {
-        // 1. Fetch Master Products from the external API
-        let masterProducts = [];
-        try {
-            const externalRes = await axios.get('https://api.qistmarket.pk/api/product');
-            masterProducts = externalRes.data || [];
-        } catch (err) {
-            console.warn('Sync warning: Could not fetch master products.', err.message);
-        }
+        // 1. Get unique product names that match search criteria
+        const productSearchWhere = {
+            outlet_id,
+            OR: search ? [
+                { product_name: { contains: search } },
+                { imei_serial: { contains: search } },
+                { category: { contains: search } }
+            ] : undefined
+        };
 
-        // 2. Fetch current inventory for the outlet
-        const currentInventory = await prisma.outletInventory.findMany({
-            where: { outlet_id }
+        // Get distinct product names for pagination
+        const distinctProducts = await prisma.outletInventory.findMany({
+            where: productSearchWhere,
+            distinct: ['product_name'],
+            select: { product_name: true },
+            orderBy: { product_name: 'asc' },
+            skip,
+            take
         });
 
-        // 3. Sync: Ensure every unique master product has at least one record in the outlet's table.
-        if (masterProducts.length > 0) {
-            const activeProductNames = new Set(currentInventory.map(i => i.product_name.toLowerCase().trim()));
-            
-            const toCreate = masterProducts.filter(mp => 
-                mp.name && !activeProductNames.has(mp.name.toLowerCase().trim())
-            );
+        const totalProductsCount = await prisma.outletInventory.groupBy({
+            by: ['product_name'],
+            where: productSearchWhere,
+            _count: true
+        });
+        const total = totalProductsCount.length;
 
-            if (toCreate.length > 0) {
-                const batchData = toCreate.map(mp => {
-                    const price = parseFloat(mp.price) || 0;
-                    return {
-                        outlet_id,
-                        product_name: mp.name,
-                        category: mp.category_name || 'General',
-                        imei_serial: null,
-                        color_variant: null,
-                        quantity: 1, 
-                        purchase_price: price,
-                        installment_price: 0,
-                        installment_plans: generateInstallments(mp.category_name || 'General', price),
-                        status: 'In Stock'
-                    };
-                });
+        const productNames = distinctProducts.map(p => p.product_name);
 
-                await prisma.outletInventory.createMany({
-                    data: batchData,
-                    skipDuplicates: true
-                });
+        // 2. Fetch all records for these product names
+        const inventory = await prisma.outletInventory.findMany({
+            where: {
+                outlet_id,
+                product_name: { in: productNames }
+            },
+            orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
+        });
 
-                const updatedInventory = await prisma.outletInventory.findMany({
-                    where: { outlet_id }
-                });
-                return res.json({ success: true, inventory: updatedInventory });
+        // 3. Calculate Global Stats
+        const statsData = await prisma.outletInventory.aggregate({
+            where: { outlet_id },
+            _sum: { quantity: true }
+        });
+
+        const [inStockCount, soldCount] = await Promise.all([
+            prisma.outletInventory.aggregate({
+                where: { outlet_id, status: 'In Stock' },
+                _sum: { quantity: true }
+            }),
+            prisma.outletInventory.aggregate({
+                where: { outlet_id, status: 'Sold' },
+                _sum: { quantity: true }
+            })
+        ]);
+
+        res.json({ 
+            success: true, 
+            inventory, // Frontend will group these by product_name
+            stats: {
+                totalStock: statsData._sum.quantity || 0,
+                inStock: inStockCount._sum.quantity || 0,
+                sold: soldCount._sum.quantity || 0
+            },
+            pagination: {
+                total, // total unique products
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit))
             }
-        }
-
-        res.json({ success: true, inventory: currentInventory });
+        });
     } catch (error) {
         console.error('getInventory error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -412,21 +433,41 @@ const verifyStockTransfer = async (req, res) => {
                         data: { quantity: item.quantity - actualTransferQty }
                     });
 
-                    // Create cloned Row for the Target Outlet / DO
-                    const cloned = await tx.outletInventory.create({
-                        data: {
-                            outlet_id: (to_type === 'Outlet') ? targetId : outlet_id,
+                    // Merge or create for the Target Outlet
+                    const targetOutletId = (to_type === 'Outlet') ? targetId : outlet_id;
+                    const existingAtTarget = await tx.outletInventory.findFirst({
+                        where: {
+                            outlet_id: targetOutletId,
                             product_name: item.product_name,
-                            category: item.category,
-                            imei_serial: item.imei_serial || payloadItem.imei_serial || null,
-                            color_variant: item.color_variant || payloadItem.color_variant || null,
-                            quantity: actualTransferQty,
-                            purchase_price: item.purchase_price,
-                            installment_price: item.installment_price,
                             status: 'In Stock'
                         }
                     });
-                    finalInventoryId = cloned.id;
+
+                    if (existingAtTarget) {
+                        const updated = await tx.outletInventory.update({
+                            where: { id: existingAtTarget.id },
+                            data: {
+                                quantity: existingAtTarget.quantity + actualTransferQty,
+                                status: 'In Stock'
+                            }
+                        });
+                        finalInventoryId = updated.id;
+                    } else {
+                        const cloned = await tx.outletInventory.create({
+                            data: {
+                                outlet_id: targetOutletId,
+                                product_name: item.product_name,
+                                category: item.category,
+                                imei_serial: item.imei_serial || payloadItem.imei_serial || null,
+                                color_variant: item.color_variant || payloadItem.color_variant || null,
+                                quantity: actualTransferQty,
+                                purchase_price: item.purchase_price,
+                                installment_price: item.installment_price,
+                                status: 'In Stock'
+                            }
+                        });
+                        finalInventoryId = cloned.id;
+                    }
                 }
 
                 transferData.push({
@@ -461,12 +502,7 @@ const verifyStockTransfer = async (req, res) => {
         if (to_type === 'Delivery Officer') {
             await notifyUser(targetId, messageTitle, messageBody, 'stock_transfer', null, io);
         } else if (to_type === 'Outlet') {
-            const targetUsers = await prisma.user.findMany({
-                where: { outlet_id: targetId, role: { name: 'Branch User' }, status: 'active' }
-            });
-            for (const usr of targetUsers) {
-                await notifyUser(usr.id, messageTitle, messageBody, 'stock_transfer', null, io);
-            }
+            await notifyOutlet(targetId, messageTitle, messageBody, 'stock_transfer', null, io);
         }
 
         // Notify Admins mapping (dashboard global alerts)
@@ -481,30 +517,47 @@ const verifyStockTransfer = async (req, res) => {
 
 const getTransferHistory = async (req, res) => {
     const { outlet_id } = req.user;
+    const { page = 1, limit = 20, search = "" } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const take = parseInt(limit);
 
     if (!outlet_id) {
         return res.status(403).json({ success: false, message: 'Not an outlet user.' });
     }
 
     try {
-        const transfers = await prisma.stockTransfer.findMany({
-            where: { from_type: 'Outlet', from_id: outlet_id },
-            include: {
-                inventory: {
-                    select: {
-                        id: true,
-                        product_name: true,
-                        category: true,
-                        color_variant: true,
-                        imei_serial: true,
-                        quantity: true,
-                        purchase_price: true,
-                        status: true
+        const where = { 
+            from_type: 'Outlet', 
+            from_id: outlet_id,
+            OR: search ? [
+                { inventory: { product_name: { contains: search } } },
+                { inventory: { imei_serial: { contains: search } } }
+            ] : undefined
+        };
+
+        const [transfers, total] = await Promise.all([
+            prisma.stockTransfer.findMany({
+                where,
+                include: {
+                    inventory: {
+                        select: {
+                            id: true,
+                            product_name: true,
+                            category: true,
+                            color_variant: true,
+                            imei_serial: true,
+                            quantity: true,
+                            purchase_price: true,
+                            status: true
+                        }
                     }
-                }
-            },
-            orderBy: { created_at: 'desc' }
-        });
+                },
+                orderBy: { created_at: 'desc' },
+                skip,
+                take
+            }),
+            prisma.stockTransfer.count({ where })
+        ]);
 
         // Map to_id to human readable names
         const deliveryToIds = [...new Set(transfers.filter(t => t.to_type === 'Delivery Officer').map(t => t.to_id))];
@@ -537,7 +590,17 @@ const getTransferHistory = async (req, res) => {
             };
         });
 
-        res.json({ success: true, count: mappedTransfers.length, transfers: mappedTransfers });
+        res.json({ 
+            success: true, 
+            count: mappedTransfers.length, 
+            transfers: mappedTransfers,
+            pagination: {
+                total,
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit))
+            }
+        });
     } catch (error) {
         console.error('getTransferHistory error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });

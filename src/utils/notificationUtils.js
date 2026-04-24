@@ -7,7 +7,7 @@ const notifyAdmins = async (title, message, type, relatedId = null, io = null) =
     try {
         const admins = await prisma.user.findMany({
             where: {
-                role_id: { in: [4, 5, 6, 7, 8] },
+                role_id: { in: [4, 6, 7, 9] },
                 status: 'active'
             },
             select: { id: true }
@@ -28,11 +28,13 @@ const notifyAdmins = async (title, message, type, relatedId = null, io = null) =
 
         if (io) {
             io.to('admins').emit('new_notification', {
+                id: Date.now(), // Unique key for UI
                 title,
                 message,
                 type,
                 relatedId,
-                timestamp: new Date().toISOString(),
+                isRead: false,
+                createdAt: new Date().toISOString(),
             });
         }
     } catch (err) {
@@ -45,7 +47,7 @@ const notifyAdmins = async (title, message, type, relatedId = null, io = null) =
  */
 const notifyUser = async (userId, title, message, type, relatedId = null, io = null) => {
     try {
-        await prisma.notification.create({
+        const notification = await prisma.notification.create({
             data: {
                 userId: parseInt(userId),
                 title,
@@ -58,11 +60,13 @@ const notifyUser = async (userId, title, message, type, relatedId = null, io = n
 
         if (io) {
             io.to(`user_${userId}`).emit('new_notification', {
+                id: notification.id,
                 title,
                 message,
                 type,
                 relatedId,
-                timestamp: new Date().toISOString(),
+                isRead: false,
+                createdAt: notification.createdAt
             });
         }
     } catch (err) {
@@ -70,7 +74,51 @@ const notifyUser = async (userId, title, message, type, relatedId = null, io = n
     }
 };
 
+/**
+ * Notify all users in a specific outlet
+ */
+const notifyOutlet = async (outletId, title, message, type, relatedId = null, io = null) => {
+    try {
+        const users = await prisma.user.findMany({
+            where: {
+                outlet_id: parseInt(outletId),
+                status: 'active',
+                role_id: { in: [5, 8] } // Branch User and Sales Officer
+            },
+            select: { id: true }
+        });
+
+        if (users.length === 0) return;
+
+        const notificationData = users.map(user => ({
+            userId: user.id,
+            title,
+            message,
+            type,
+            relatedId: relatedId ? parseInt(relatedId) : null,
+            createdAt: new Date()
+        }));
+
+        await prisma.notification.createMany({ data: notificationData });
+
+        if (io) {
+            io.to(`outlet_${outletId}`).emit('new_notification', {
+                id: Date.now(), // Unique key for UI
+                title,
+                message,
+                type,
+                relatedId,
+                isRead: false,
+                createdAt: new Date().toISOString(),
+            });
+        }
+    } catch (err) {
+        console.error(`Failed to notify outlet ${outletId}:`, err);
+    }
+};
+
 module.exports = {
     notifyAdmins,
-    notifyUser
+    notifyUser,
+    notifyOutlet
 };

@@ -7,7 +7,10 @@ const {
     getSalesReport,
     getProfitLoss,
     getCustomerLedger,
-    getRecoveryReport
+    getRecoveryReport,
+    getFinancialReport,
+    getInstallmentRecoveriesReport,
+    getOfficerRecoveryReport
 } = require('../controllers/outletReportController');
 
 // All routes require authentication
@@ -48,5 +51,23 @@ router.get('/outlet-reports/customer-ledger/:phone', getCustomerLedger);
  * @desc    Get recovery/pending payments report
  */
 router.get('/outlet-reports/recovery', getRecoveryReport);
+
+/**
+ * @route   GET /api/outlet-reports/financials
+ * @desc    Get comprehensive financials (Expenses + Vendor Payments)
+ */
+router.get('/outlet-reports/financials', getFinancialReport);
+
+/**
+ * @route   GET /api/outlet-reports/installment-recoveries
+ * @desc    Get strictly the cash collected from installments
+ */
+router.get('/outlet-reports/installment-recoveries', getInstallmentRecoveriesReport);
+
+/**
+ * @route   GET /api/outlet-reports/officer-recoveries
+ * @desc    Get performance and collections of recovery officers
+ */
+router.get('/outlet-reports/officer-recoveries', getOfficerRecoveryReport);
 
 module.exports = router;
