@@ -304,16 +304,40 @@ const createOrder = async (req, res) => {
 
     // Auto-assignment logic
     let assignedOfficerId = null;
-    if (zone && area) {
-      const assignment = await prisma.officerAreaAssignment.findFirst({
-        where: {
-          zone: zone.trim(),
-          area: area.trim()
-        },
-        select: { user_id: true }
-      });
-      if (assignment) {
-        assignedOfficerId = assignment.user_id;
+    let deliveryOfficerId = null;
+    let recoveryOfficerId = null;
+
+    const userRole = (req.user?.role || '').toLowerCase();
+    const isSalesOfficer = userRole === 'sales officer';
+
+    if (!isSalesOfficer && zone && area && currentUser?.outlet_id) {
+      const { getOutletSettings } = require('../utils/settingsUtils');
+      const settings = await getOutletSettings(currentUser.outlet_id);
+
+      // Helper to find officer by role and area within same outlet
+      const findOfficer = async (roleName) => {
+        const assignment = await prisma.officerAreaAssignment.findFirst({
+          where: {
+            zone: zone.trim(),
+            area: area.trim(),
+            user: {
+              outlet_id: currentUser.outlet_id,
+              role: { name: roleName }
+            }
+          },
+          select: { user_id: true }
+        });
+        return assignment?.user_id || null;
+      };
+
+      if (settings.verification) {
+        assignedOfficerId = await findOfficer('Verification Officer');
+      }
+      if (settings.delivery) {
+        deliveryOfficerId = await findOfficer('Delivery Agent');
+      }
+      if (settings.recovery) {
+        recoveryOfficerId = await findOfficer('Recovery Officer');
       }
     }
 
@@ -348,18 +372,29 @@ const createOrder = async (req, res) => {
         created_by_user_id: req.user.id,
         outlet_id: currentUser?.outlet_id || null,
         assigned_to_user_id: assignedOfficerId,
-        verification_assigned_at: assignedOfficerId ? new Date() : null
+        delivery_officer_id: deliveryOfficerId,
+        recovery_officer_id: recoveryOfficerId,
+        verification_assigned_at: assignedOfficerId ? new Date() : null,
+        delivery_assigned_at: deliveryOfficerId ? new Date() : null,
+        recovery_assigned_at: recoveryOfficerId ? new Date() : null
       },
       include: {
         created_by: { select: { username: true } },
-        assigned_to: { select: { id: true, username: true, fcm_token: true } }
+        assigned_to: { select: { id: true, username: true, fcm_token: true } },
+        delivery_officer: { select: { id: true, username: true, fcm_token: true } },
+        recovery_officer: { select: { id: true, username: true, fcm_token: true } }
       }
     });
 
     const io = req.app.get('io');
     if (assignedOfficerId) {
-      // Send notification to officer
       await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
+    }
+    if (deliveryOfficerId) {
+      await sendOrderAssignmentNotification(order, order.delivery_officer, 'delivery', io);
+    }
+    if (recoveryOfficerId) {
+      await sendOrderAssignmentNotification(order, order.recovery_officer, 'recovery', io);
     }
 
     // Notify Admins about new order
@@ -1240,6 +1275,17 @@ const getOrderById = async (req, res) => {
             status: true,
             home_location_verified: true,
             home_location_required: true,
+            reviews: {
+              include: {
+                reviewer: {
+                  select: {
+                    full_name: true,
+                    username: true
+                  }
+                }
+              },
+              orderBy: { created_at: 'desc' }
+            },
             purchaser: {
               select: {
                 id: true,

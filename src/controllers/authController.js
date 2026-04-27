@@ -151,10 +151,10 @@ const sendWebLoginOTP = async (req, res) => {
     if (isPhone) {
       await sendOTP(identifier, otp);
     } else {
-      await sendEmail({ 
-        to: identifier, 
-        subject: 'Dashboard Login OTP', 
-        html: getOTPEmailTemplate(otp, 'web_login', user.full_name) 
+      await sendEmail({
+        to: identifier,
+        subject: 'Dashboard Login OTP',
+        html: getOTPEmailTemplate(otp, 'web_login', user.full_name)
       });
     }
 
@@ -484,7 +484,7 @@ const getUsers = async (req, res) => {
 
     const users = await prisma.user.findMany({
       where,
-      include: { 
+      include: {
         role: true,
         outlet: true
       },

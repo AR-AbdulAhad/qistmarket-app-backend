@@ -2,17 +2,17 @@ const prisma = require('../../lib/prisma');
 const { syncBlacklistStatus } = require('../utils/blacklistUtils');
 
 const getCustomers = async (req, res) => {
- const {
-    page    = 1,
-    limit   = 10,
-    search  = '',
+  const {
+    page = 1,
+    limit = 10,
+    search = '',
   } = req.query;
- 
-  const pageNum  = Math.max(1, parseInt(page));
+
+  const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
-  const skip     = (pageNum - 1) * limitNum;
-  const q        = search.trim();
- 
+  const skip = (pageNum - 1) * limitNum;
+  const q = search.trim();
+
   try {
     // Run automatic blacklist sync
     await syncBlacklistStatus();
@@ -49,8 +49,8 @@ const getCustomers = async (req, res) => {
       ...(q && {
         OR: [
           // PurchaserVerification fields
-          { verification: { purchaser: { name:             { contains: q } } } },
-          { verification: { purchaser: { cnic_number:      { contains: q } } } },
+          { verification: { purchaser: { name: { contains: q } } } },
+          { verification: { purchaser: { cnic_number: { contains: q } } } },
           { verification: { purchaser: { telephone_number: { contains: q } } } },
           // Order whatsapp fallback
           { whatsapp_number: { contains: q } },
@@ -58,11 +58,11 @@ const getCustomers = async (req, res) => {
           { delivery: { product_imei: { contains: q } } },
           // CashInHand product_name, imei_serial
           { cash_in_hand: { some: { product_name: { contains: q } } } },
-          { cash_in_hand: { some: { imei_serial:  { contains: q } } } },
+          { cash_in_hand: { some: { imei_serial: { contains: q } } } },
         ],
       }),
     };
- 
+
     // Fetch all matching delivered orders (no skip/take here — we group by customer first)
     const orders = await prisma.order.findMany({
       where: orderWhere,
@@ -106,70 +106,70 @@ const getCustomers = async (req, res) => {
         inventoryMap.set(inv.imei_serial, inv);
       }
     }
- 
+
     // ── Group by order (1 order = 1 customer row) ────────────────────
     const customerMap = new Map();
- 
+
     for (const order of orders) {
       const key = `order-${order.id}`;
- 
-      const purchaser              = order.verification?.purchaser || null;
-      const cashInHand             = order.cash_in_hand?.[0]       || null;
-      const delivery               = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger   || null;
-      const profilePhoto           = order.verification?.documents?.[0]?.file_url || null;
- 
+
+      const purchaser = order.verification?.purchaser || null;
+      const cashInHand = order.cash_in_hand?.[0] || null;
+      const delivery = order.delivery;
+      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
+
       // ── Customer details: purchaser se, fallback Order ────────
-      const customerName      = purchaser?.name                || order.customer_name;
+      const customerName = purchaser?.name || order.customer_name;
       const fatherHusbandName = purchaser?.father_husband_name || null;
-      const cnicNumber        = purchaser?.cnic_number         || null;
-      const presentAddress    = purchaser?.present_address     || order.address || null;
-      const permanentAddress  = purchaser?.permanent_address   || null;
-      const telephoneNumber   = purchaser?.telephone_number    || order.whatsapp_number;
-      const nearestLocation   = purchaser?.nearest_location    || null;
- 
+      const cnicNumber = purchaser?.cnic_number || null;
+      const presentAddress = purchaser?.present_address || order.address || null;
+      const permanentAddress = purchaser?.permanent_address || null;
+      const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
+      const nearestLocation = purchaser?.nearest_location || null;
+
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
-            name:                customerName,
+            name: customerName,
             father_husband_name: fatherHusbandName,
-            cnic_number:         cnicNumber,
-            whatsapp_number:     order.whatsapp_number,
-            telephone_number:    telephoneNumber,
-            present_address:     presentAddress,
-            permanent_address:   permanentAddress,
-            nearest_location:    nearestLocation,
-            city:                order.city,
-            area:                order.area,
-            profile_photo:       profilePhoto,
+            cnic_number: cnicNumber,
+            whatsapp_number: order.whatsapp_number,
+            telephone_number: telephoneNumber,
+            present_address: presentAddress,
+            permanent_address: permanentAddress,
+            nearest_location: nearestLocation,
+            city: order.city,
+            area: order.area,
+            profile_photo: profilePhoto,
           },
           orders: [],
           ledgerSummary: {
-            totalOrders:          0,
+            totalOrders: 0,
             totalAdvanceReceived: 0,
-            totalPaid:            0,
-            totalRemaining:       0,
+            totalPaid: 0,
+            totalRemaining: 0,
           },
         });
       }
- 
+
       const group = customerMap.get(key);
- 
+
       // ── Delivery date ──────────────────────────────────────────
       const deliveryDate = delivery?.end_time || order.updated_at;
- 
+
       // ── Product info: Fetch from Inventory via IMEI first ───────────────────────────
-      const imeiSerial   = cashInHand?.imei_serial   || delivery?.product_imei || order.imei_serial || null;
-      const invInfo      = imeiSerial ? inventoryMap.get(imeiSerial) : null;
-      
-      const productName  = invInfo?.product_name  || cashInHand?.product_name  || order.product_name;
+      const imeiSerial = cashInHand?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+
+      const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
- 
+
       // ── Advance: CashInHand.amount ─────────────────────────────
       // Default from cashInHand (fallback if no ledger row 0 exists)
-      let advanceAmount  = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
+      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
       let hasPaidAdvance = !!cashInHand;
-      let advancePaidAt        = cashInHand?.created_at     || null;
+      let advancePaidAt = cashInHand?.created_at || null;
       let advancePaymentMethod = cashInHand?.payment_method || null;
 
       // ── Plan info: Delivery.selected_plan se ──────────────────
@@ -191,9 +191,9 @@ const getCustomers = async (req, res) => {
         // Extract advance from month 0 row
         const advanceLedgerRow = allLedgerRows.find(r => r.month === 0);
         if (advanceLedgerRow) {
-          advanceAmount        = Number(advanceLedgerRow.amount || 0);
-          hasPaidAdvance       = advanceLedgerRow.status === 'paid';
-          advancePaidAt        = advanceLedgerRow.paid_at  || advanceLedgerRow.paidAt  || null;
+          advanceAmount = Number(advanceLedgerRow.amount || 0);
+          hasPaidAdvance = advanceLedgerRow.status === 'paid';
+          advancePaidAt = advanceLedgerRow.paid_at || advanceLedgerRow.paidAt || null;
           advancePaymentMethod = advanceLedgerRow.payment_method || advanceLedgerRow.paymentMethod || 'Cash';
         }
 
@@ -202,29 +202,29 @@ const getCustomers = async (req, res) => {
           .filter(r => r.month > 0)
           .map((row) => {
             const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
-            const rowStatus    = row.status || 'pending';
-            const isPaid       = rowStatus === 'paid';
+            const rowStatus = row.status || 'pending';
+            const isPaid = rowStatus === 'paid';
             return {
-              monthNumber:     row.month,
-              label:           row.label || `Month ${row.month}`,
-              dueDate:         row.due_date  || row.dueDate  || null,
-              dueAmount:       rowDueAmount,
-              paidAmount:      isPaid ? rowDueAmount : 0,
+              monthNumber: row.month,
+              label: row.label || `Month ${row.month}`,
+              dueDate: row.due_date || row.dueDate || null,
+              dueAmount: rowDueAmount,
+              paidAmount: isPaid ? rowDueAmount : 0,
               remainingAmount: isPaid ? 0 : rowDueAmount,
-              status:          rowStatus,
-              paidAt:          row.paid_at   || row.paidAt   || null,
-              paymentMethod:   row.payment_method || row.paymentMethod || null,
-              arrears:         row.arrears || 0,
+              status: rowStatus,
+              paidAt: row.paid_at || row.paidAt || null,
+              paymentMethod: row.payment_method || row.paymentMethod || null,
+              arrears: row.arrears || 0,
             };
           });
       }
 
       const advancePayment = {
-        amount:        advanceAmount,
-        paid:          hasPaidAdvance,
-        paidAt:        advancePaidAt,
+        amount: advanceAmount,
+        paid: hasPaidAdvance,
+        paidAt: advancePaidAt,
         paymentMethod: advancePaymentMethod,
-        status:        hasPaidAdvance ? 'paid' : 'pending',
+        status: hasPaidAdvance ? 'paid' : 'pending',
       };
 
       // Use actual row amounts (not plan formula) for accurate totals
@@ -233,49 +233,49 @@ const getCustomers = async (req, res) => {
       const totalMonths = installmentLedger.length
         || Number(selectedPlan?.months || selectedPlan?.totalMonths || 0);
 
-      const paidInstallments    = installmentLedger.filter((r) => r.status === 'paid').length;
+      const paidInstallments = installmentLedger.filter((r) => r.status === 'paid').length;
       const pendingInstallments = installmentLedger.filter((r) => r.status !== 'paid').length;
 
       // ── Financial Summary ──────────────────────────────────────
-      const totalInstallmentDue       = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-      const totalInstallmentPaid      = installmentLedger
+      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+      const totalInstallmentPaid = installmentLedger
         .filter((r) => r.status === 'paid')
         .reduce((sum, r) => sum + r.dueAmount, 0);
       const totalInstallmentRemaining = Math.max(0, totalInstallmentDue - totalInstallmentPaid);
 
-      const grandTotalDue       = advanceAmount + totalInstallmentDue;
-      const grandTotalPaid      = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
+      const grandTotalDue = advanceAmount + totalInstallmentDue;
+      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
       const grandTotalRemaining = Math.max(0, grandTotalDue - grandTotalPaid);
 
- 
+
       group.orders.push({
-        order_id:            order.id,
-        order_ref:           order.order_ref,
-        token_number:        order.token_number,
-        status:              order.status,
-        is_delivered:        true,
-        delivery_date:       deliveryDate ? deliveryDate.toISOString() : null,
-        created_at:          order.created_at.toISOString(),
+        order_id: order.id,
+        order_ref: order.order_ref,
+        token_number: order.token_number,
+        status: order.status,
+        is_delivered: true,
+        delivery_date: deliveryDate ? deliveryDate.toISOString() : null,
+        created_at: order.created_at.toISOString(),
         verification_status: order.verification?.status || null,
- 
+
         product_details: {
-          product_name:  productName,
-          imei_serial:   imeiSerial,
+          product_name: productName,
+          imei_serial: imeiSerial,
           color_variant: colorVariant,
         },
- 
+
         plan: {
-          selected_plan:    selectedPlan,
-          advance_amount:   advanceAmount,
-          monthly_amount:   monthlyAmount,
-          months:           totalMonths,
+          selected_plan: selectedPlan,
+          advance_amount: advanceAmount,
+          monthly_amount: monthlyAmount,
+          months: totalMonths,
           total_plan_value: grandTotalDue,
         },
- 
+
         ledger: {
-          advance_payment:    advancePayment,
+          advance_payment: advancePayment,
           installment_ledger: installmentLedger,
-          ledger_token:       installmentLedgerModel?.short_id || null,
+          ledger_token: installmentLedgerModel?.short_id || null,
           summary: {
             totalInstallmentDue,
             totalInstallmentPaid,
@@ -285,42 +285,42 @@ const getCustomers = async (req, res) => {
             grandTotalRemaining,
             paidInstallments,
             pendingInstallments,
-            installmentsStarted:  totalMonths > 0,
+            installmentsStarted: totalMonths > 0,
             firstInstallmentDate: installmentLedger[0]?.dueDate ?? null,
           },
         },
       });
- 
+
       // ── Customer ledger summary update ─────────────────────────
-      group.ledgerSummary.totalOrders          += 1;
+      group.ledgerSummary.totalOrders += 1;
       group.ledgerSummary.totalAdvanceReceived += advanceAmount;
-      group.ledgerSummary.totalPaid            += grandTotalPaid;
-      group.ledgerSummary.totalRemaining       += grandTotalRemaining;
+      group.ledgerSummary.totalPaid += grandTotalPaid;
+      group.ledgerSummary.totalRemaining += grandTotalRemaining;
     }
- 
+
     // ── Sort customers alphabetically ──────────────────────────
     let allCustomers = Array.from(customerMap.values()).sort((a, b) =>
       a.customer.name.localeCompare(b.customer.name)
     );
- 
+
     // DB filter already handles all search cases — no post-group filter needed
- 
+
     // ── Pagination on grouped customers ───────────────────────
     const totalCustomers = allCustomers.length;
-    const totalPages     = Math.ceil(totalCustomers / limitNum);
+    const totalPages = Math.ceil(totalCustomers / limitNum);
     const paginatedCustomers = allCustomers.slice(skip, skip + limitNum);
- 
+
     return res.status(200).json({
       success: true,
       data: {
         customers: paginatedCustomers,
         pagination: {
-          page:       pageNum,
-          limit:      limitNum,
-          total:      totalCustomers,
+          page: pageNum,
+          limit: limitNum,
+          total: totalCustomers,
           totalPages,
-          hasNext:    pageNum < totalPages,
-          hasPrev:    pageNum > 1,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1,
         },
         totalOrders: orders.length,
       },
@@ -393,50 +393,50 @@ const getBlacklistedCustomers = async (req, res) => {
     for (const order of blacklistedOrders) {
       const key = `order-${order.id}`;
 
-      const purchaser              = order.verification?.purchaser || null;
-      const cashInHand             = order.cash_in_hand?.[0]       || null;
-      const delivery               = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger   || null;
-      const profilePhoto           = order.verification?.documents?.[0]?.file_url || null;
+      const purchaser = order.verification?.purchaser || null;
+      const cashInHand = order.cash_in_hand?.[0] || null;
+      const delivery = order.delivery;
+      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
-      const customerName      = purchaser?.name                || order.customer_name;
-      const telephoneNumber   = purchaser?.telephone_number    || order.whatsapp_number;
+      const customerName = purchaser?.name || order.customer_name;
+      const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
 
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
-            name:                customerName,
+            name: customerName,
             father_husband_name: purchaser?.father_husband_name || null,
-            cnic_number:         purchaser?.cnic_number         || null,
-            whatsapp_number:     order.whatsapp_number,
-            telephone_number:    telephoneNumber,
-            present_address:     purchaser?.present_address     || order.address || null,
-            permanent_address:   purchaser?.permanent_address   || null,
-            nearest_location:    purchaser?.nearest_location    || null,
-            city:                order.city,
-            area:                order.area,
-            profile_photo:       profilePhoto,
-            is_blacklisted:      true, // Marker for UI
+            cnic_number: purchaser?.cnic_number || null,
+            whatsapp_number: order.whatsapp_number,
+            telephone_number: telephoneNumber,
+            present_address: purchaser?.present_address || order.address || null,
+            permanent_address: purchaser?.permanent_address || null,
+            nearest_location: purchaser?.nearest_location || null,
+            city: order.city,
+            area: order.area,
+            profile_photo: profilePhoto,
+            is_blacklisted: true, // Marker for UI
           },
           orders: [],
           ledgerSummary: {
-            totalOrders:          0,
+            totalOrders: 0,
             totalAdvanceReceived: 0,
-            totalPaid:            0,
-            totalRemaining:       0,
+            totalPaid: 0,
+            totalRemaining: 0,
           },
         });
       }
 
       const group = customerMap.get(key);
 
-      const imeiSerial   = cashInHand?.imei_serial   || delivery?.product_imei || order.imei_serial || null;
-      const invInfo      = imeiSerial ? inventoryMap.get(imeiSerial) : null;
-      
-      const productName  = invInfo?.product_name  || cashInHand?.product_name  || order.product_name;
+      const imeiSerial = cashInHand?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+
+      const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      let advanceAmount  = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
+      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
       let hasPaidAdvance = !!cashInHand;
       let installmentLedger = [];
 
@@ -447,7 +447,7 @@ const getBlacklistedCustomers = async (req, res) => {
 
         const advanceRow = allLedgerRows.find(r => r.month === 0);
         if (advanceRow) {
-          advanceAmount  = Number(advanceRow.amount || 0);
+          advanceAmount = Number(advanceRow.amount || 0);
           hasPaidAdvance = advanceRow.status === 'paid';
         }
 
@@ -455,50 +455,50 @@ const getBlacklistedCustomers = async (req, res) => {
           .filter(r => r.month > 0)
           .map((row) => {
             const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
-            const isPaid       = row.status === 'paid';
+            const isPaid = row.status === 'paid';
             return {
-              monthNumber:     row.month,
-              label:           row.label || `Month ${row.month}`,
-              dueDate:         row.due_date || row.dueDate || null,
-              dueAmount:       rowDueAmount,
-              paidAmount:      isPaid ? rowDueAmount : 0,
-              status:          row.status,
+              monthNumber: row.month,
+              label: row.label || `Month ${row.month}`,
+              dueDate: row.due_date || row.dueDate || null,
+              dueAmount: rowDueAmount,
+              paidAmount: isPaid ? rowDueAmount : 0,
+              status: row.status,
             };
           });
       }
 
-      const totalInstallmentDue  = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
       const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
-      const grandTotalPaid       = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
-      const grandTotalRemaining  = Math.max(0, (advanceAmount + totalInstallmentDue) - grandTotalPaid);
+      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
+      const grandTotalRemaining = Math.max(0, (advanceAmount + totalInstallmentDue) - grandTotalPaid);
 
       group.orders.push({
-        order_id:            order.id,
-        order_ref:           order.order_ref,
-        status:              order.status,
-        customer_name:       order.customer_name, // Added for modal fallback
-        verification:        order.verification,   // CRITICAL: Added for the CustomerProfileModal
+        order_id: order.id,
+        order_ref: order.order_ref,
+        status: order.status,
+        customer_name: order.customer_name, // Added for modal fallback
+        verification: order.verification,   // CRITICAL: Added for the CustomerProfileModal
         product_details: {
           product_name: productName,
-          imei_serial:  imeiSerial,
+          imei_serial: imeiSerial,
           color_variant: colorVariant,
         },
         ledger: {
           summary: {
-            grandTotalDue:      advanceAmount + totalInstallmentDue,
+            grandTotalDue: advanceAmount + totalInstallmentDue,
             grandTotalPaid,
             grandTotalRemaining,
-            paidInstallments:    installmentLedger.filter(r => r.status === 'paid').length,
-            totalInstallments:   installmentLedger.length,
+            paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
+            totalInstallments: installmentLedger.length,
           },
           installment_ledger: installmentLedger,
         },
       });
 
-      group.ledgerSummary.totalOrders          += 1;
+      group.ledgerSummary.totalOrders += 1;
       group.ledgerSummary.totalAdvanceReceived += advanceAmount;
-      group.ledgerSummary.totalPaid            += grandTotalPaid;
-      group.ledgerSummary.totalRemaining       += grandTotalRemaining;
+      group.ledgerSummary.totalPaid += grandTotalPaid;
+      group.ledgerSummary.totalRemaining += grandTotalRemaining;
     }
 
     const allBlacklisted = Array.from(customerMap.values()).sort((a, b) =>
@@ -570,8 +570,8 @@ const getClearedCustomers = async (req, res) => {
 
       let rows = [];
       try {
-        rows = Array.isArray(ledgerModel.ledger_rows) 
-          ? ledgerModel.ledger_rows 
+        rows = Array.isArray(ledgerModel.ledger_rows)
+          ? ledgerModel.ledger_rows
           : JSON.parse(ledgerModel.ledger_rows);
       } catch (e) { return false; }
 
@@ -582,7 +582,7 @@ const getClearedCustomers = async (req, res) => {
 
       // Condition: ALL installments must be 'paid'
       const pendingCount = installments.filter(r => (r.status !== 'paid' && r.status !== 'Paid')).length;
-      
+
       // Also check if Month 0 (Advance) was paid
       const advanceRow = rows.find(r => r.month === 0);
       const isAdvancePaid = advanceRow ? (advanceRow.status === 'paid' || advanceRow.status === 'Paid') : true;
@@ -596,50 +596,50 @@ const getClearedCustomers = async (req, res) => {
     for (const order of clearedOrders) {
       const key = `order-${order.id}`;
 
-      const purchaser              = order.verification?.purchaser || null;
-      const cashInHand             = order.cash_in_hand?.[0]       || null;
-      const delivery               = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger   || null;
-      const profilePhoto           = order.verification?.documents?.[0]?.file_url || null;
+      const purchaser = order.verification?.purchaser || null;
+      const cashInHand = order.cash_in_hand?.[0] || null;
+      const delivery = order.delivery;
+      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
-      const customerName      = purchaser?.name                || order.customer_name;
-      const telephoneNumber   = purchaser?.telephone_number    || order.whatsapp_number;
+      const customerName = purchaser?.name || order.customer_name;
+      const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
 
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
-            name:                customerName,
+            name: customerName,
             father_husband_name: purchaser?.father_husband_name || null,
-            cnic_number:         purchaser?.cnic_number         || null,
-            whatsapp_number:     order.whatsapp_number,
-            telephone_number:    telephoneNumber,
-            present_address:     purchaser?.present_address     || order.address || null,
-            permanent_address:   purchaser?.permanent_address   || null,
-            nearest_location:    purchaser?.nearest_location    || null,
-            city:                order.city,
-            area:                order.area,
-            profile_photo:       profilePhoto,
-            is_cleared:          true, 
+            cnic_number: purchaser?.cnic_number || null,
+            whatsapp_number: order.whatsapp_number,
+            telephone_number: telephoneNumber,
+            present_address: purchaser?.present_address || order.address || null,
+            permanent_address: purchaser?.permanent_address || null,
+            nearest_location: purchaser?.nearest_location || null,
+            city: order.city,
+            area: order.area,
+            profile_photo: profilePhoto,
+            is_cleared: true,
           },
           orders: [],
           ledgerSummary: {
-            totalOrders:          0,
+            totalOrders: 0,
             totalAdvanceReceived: 0,
-            totalPaid:            0,
-            totalRemaining:       0,
+            totalPaid: 0,
+            totalRemaining: 0,
           },
         });
       }
 
       const group = customerMap.get(key);
 
-      const imeiSerial   = cashInHand?.imei_serial   || delivery?.product_imei || order.imei_serial || null;
-      const invInfo      = imeiSerial ? inventoryMap.get(imeiSerial) : null;
-      
-      const productName  = invInfo?.product_name  || cashInHand?.product_name  || order.product_name;
+      const imeiSerial = cashInHand?.imei_serial || delivery?.product_imei || order.imei_serial || null;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+
+      const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      let advanceAmount  = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
+      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
       let hasPaidAdvance = !!cashInHand;
       let installmentLedger = [];
 
@@ -650,7 +650,7 @@ const getClearedCustomers = async (req, res) => {
 
         const advanceRow = allLedgerRows.find(r => r.month === 0);
         if (advanceRow) {
-          advanceAmount  = Number(advanceRow.amount || 0);
+          advanceAmount = Number(advanceRow.amount || 0);
           hasPaidAdvance = advanceRow.status === 'paid';
         }
 
@@ -658,50 +658,50 @@ const getClearedCustomers = async (req, res) => {
           .filter(r => r.month > 0)
           .map((row) => {
             const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
-            const isPaid       = row.status === 'paid' || row.status === 'Paid';
+            const isPaid = row.status === 'paid' || row.status === 'Paid';
             return {
-              monthNumber:     row.month,
-              label:           row.label || `Month ${row.month}`,
-              dueDate:         row.due_date || row.dueDate || null,
-              dueAmount:       rowDueAmount,
-              paidAmount:      isPaid ? rowDueAmount : 0,
-              status:          row.status,
+              monthNumber: row.month,
+              label: row.label || `Month ${row.month}`,
+              dueDate: row.due_date || row.dueDate || null,
+              dueAmount: rowDueAmount,
+              paidAmount: isPaid ? rowDueAmount : 0,
+              status: row.status,
             };
           });
       }
 
-      const totalInstallmentDue  = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
       const totalInstallmentPaid = installmentLedger.filter(r => (r.status === 'paid' || r.status === 'Paid')).reduce((sum, r) => sum + r.dueAmount, 0);
-      const grandTotalPaid       = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
-      const grandTotalRemaining  = Math.max(0, (advanceAmount + totalInstallmentDue) - grandTotalPaid);
+      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
+      const grandTotalRemaining = Math.max(0, (advanceAmount + totalInstallmentDue) - grandTotalPaid);
 
       group.orders.push({
-        order_id:            order.id,
-        order_ref:           order.order_ref,
-        status:              order.status,
-        customer_name:       order.customer_name,
-        verification:        order.verification,   
+        order_id: order.id,
+        order_ref: order.order_ref,
+        status: order.status,
+        customer_name: order.customer_name,
+        verification: order.verification,
         product_details: {
           product_name: productName,
-          imei_serial:  imeiSerial,
+          imei_serial: imeiSerial,
           color_variant: colorVariant,
         },
         ledger: {
           summary: {
-            grandTotalDue:      advanceAmount + totalInstallmentDue,
+            grandTotalDue: advanceAmount + totalInstallmentDue,
             grandTotalPaid,
             grandTotalRemaining,
-            paidInstallments:    installmentLedger.filter(r => (r.status === 'paid' || r.status === 'Paid')).length,
-            totalInstallments:   installmentLedger.length,
+            paidInstallments: installmentLedger.filter(r => (r.status === 'paid' || r.status === 'Paid')).length,
+            totalInstallments: installmentLedger.length,
           },
           installment_ledger: installmentLedger,
         },
       });
 
-      group.ledgerSummary.totalOrders          += 1;
+      group.ledgerSummary.totalOrders += 1;
       group.ledgerSummary.totalAdvanceReceived += advanceAmount;
-      group.ledgerSummary.totalPaid            += grandTotalPaid;
-      group.ledgerSummary.totalRemaining       += grandTotalRemaining;
+      group.ledgerSummary.totalPaid += grandTotalPaid;
+      group.ledgerSummary.totalRemaining += grandTotalRemaining;
     }
 
     const allCleared = Array.from(customerMap.values()).sort((a, b) =>
@@ -722,123 +722,123 @@ const getClearedCustomers = async (req, res) => {
 };
 
 const getCustomerLedger = async (req, res) => {
-    const { orderRef } = req.params;
+  const { orderRef } = req.params;
 
-    if (!orderRef) {
-        return res.status(400).json({ success: false, message: 'Order reference is required.' });
+  if (!orderRef) {
+    return res.status(400).json({ success: false, message: 'Order reference is required.' });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { order_ref: orderRef },
+      include: {
+        verification: {
+          include: {
+            purchaser: true,
+          },
+        },
+        delivery: {
+          include: {
+            installment_ledger: true,
+          },
+        },
+        cash_in_hand: {
+          take: 1,
+          orderBy: { created_at: 'desc' },
+        },
+        outlet: {
+          select: {
+            name: true,
+            code: true
+          }
+        }
+      }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
     }
 
-    try {
-        const order = await prisma.order.findUnique({
-            where: { order_ref: orderRef },
-            include: {
-                verification: {
-                    include: {
-                        purchaser: true,
-                    },
-                },
-                delivery: {
-                    include: {
-                        installment_ledger: true,
-                    },
-                },
-                cash_in_hand: {
-                    take: 1,
-                    orderBy: { created_at: 'desc' },
-                },
-                outlet: {
-                    select: {
-                        name: true,
-                        code: true
-                    }
-                }
-            }
-        });
+    // ── Pre-fetch Inventory details based on IMEI ──────────────────
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
 
-        if (!order) {
-            return res.status(404).json({ success: false, message: 'Order not found.' });
-        }
-
-        // ── Pre-fetch Inventory details based on IMEI ──────────────────
-        const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
-        
-        let invInfo = null;
-        if (imeiSerial) {
-            invInfo = await prisma.outletInventory.findFirst({
-                where: { imei_serial: imeiSerial },
-                select: { imei_serial: true, product_name: true }
-            });
-        }
-
-        const purchaser = order.verification?.purchaser || null;
-        const delivery = order.delivery;
-        const ledgerModel = delivery?.installment_ledger || null;
-        const cashRecord = order.cash_in_hand?.[0] || null;
-
-        let plan = delivery?.selected_plan || null;
-        if (typeof plan === 'string') {
-            try { plan = JSON.parse(plan); } catch (e) { plan = null; }
-        }
-
-        const allRows = Array.isArray(ledgerModel?.ledger_rows) ? ledgerModel.ledger_rows : [];
-        const advanceLedgerRow = allRows.find(r => r.month === 0);
-        const installmentOnlyRows = allRows.filter(r => r.month > 0);
-
-        const installmentLedger = installmentOnlyRows.map((row) => ({
-            monthNumber: row.month,
-            label: row.label || `Month ${row.month}`,
-            dueDate: row.due_date || row.dueDate || null,
-            dueAmount: Number(row.amount || row.dueAmount || 0),
-            status: row.status || 'pending',
-            paidAt: row.paid_at || row.paidAt || null,
-            paymentMethod: row.payment_method || row.paymentMethod || null,
-            arrears: row.arrears || 0,
-        }));
-
-        const advanceAmount = advanceLedgerRow?.amount || cashRecord?.amount || order.advance_amount || 0;
-        const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
-        const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
-
-        const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-        const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
-        const totalArrears = installmentLedger.reduce((sum, r) => sum + (r.arrears || 0), 0);
-
-        const formatted = {
-            order_id: order.id,
-            order_ref: order.order_ref,
-            customer_name: purchaser?.name || order.customer_name,
-            whatsapp_number: order.whatsapp_number,
-            product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
-            imei_serial: imeiSerial,
-            status: order.status,
-            created_at: order.created_at,
-            outlet_name: order.outlet?.name || 'N/A',
-            outlet_code: order.outlet?.code || 'N/A',
-            ledgerSummaries: {
-                advanceAmount,
-                monthlyAmount,
-                totalMonths,
-                totalInstallmentDue,
-                totalInstallmentPaid,
-                totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
-                totalArrears,
-                paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
-                totalInstallments: installmentLedger.length,
-            },
-            installmentLedger,
-            ledger_short_id: ledgerModel?.token || null
-        };
-
-        res.json({
-            success: true,
-            data: {
-                installments: [formatted]
-            }
-        });
-    } catch (error) {
-        console.error('getCustomerLedger error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+    let invInfo = null;
+    if (imeiSerial) {
+      invInfo = await prisma.outletInventory.findFirst({
+        where: { imei_serial: imeiSerial },
+        select: { imei_serial: true, product_name: true }
+      });
     }
+
+    const purchaser = order.verification?.purchaser || null;
+    const delivery = order.delivery;
+    const ledgerModel = delivery?.installment_ledger || null;
+    const cashRecord = order.cash_in_hand?.[0] || null;
+
+    let plan = delivery?.selected_plan || null;
+    if (typeof plan === 'string') {
+      try { plan = JSON.parse(plan); } catch (e) { plan = null; }
+    }
+
+    const allRows = Array.isArray(ledgerModel?.ledger_rows) ? ledgerModel.ledger_rows : [];
+    const advanceLedgerRow = allRows.find(r => r.month === 0);
+    const installmentOnlyRows = allRows.filter(r => r.month > 0);
+
+    const installmentLedger = installmentOnlyRows.map((row) => ({
+      monthNumber: row.month,
+      label: row.label || `Month ${row.month}`,
+      dueDate: row.due_date || row.dueDate || null,
+      dueAmount: Number(row.amount || row.dueAmount || 0),
+      status: row.status || 'pending',
+      paidAt: row.paid_at || row.paidAt || null,
+      paymentMethod: row.payment_method || row.paymentMethod || null,
+      arrears: row.arrears || 0,
+    }));
+
+    const advanceAmount = advanceLedgerRow?.amount || cashRecord?.amount || order.advance_amount || 0;
+    const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
+    const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
+
+    const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
+    const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
+    const totalArrears = installmentLedger.reduce((sum, r) => sum + (r.arrears || 0), 0);
+
+    const formatted = {
+      order_id: order.id,
+      order_ref: order.order_ref,
+      customer_name: purchaser?.name || order.customer_name,
+      whatsapp_number: order.whatsapp_number,
+      product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
+      imei_serial: imeiSerial,
+      status: order.status,
+      created_at: order.created_at,
+      outlet_name: order.outlet?.name || 'N/A',
+      outlet_code: order.outlet?.code || 'N/A',
+      ledgerSummaries: {
+        advanceAmount,
+        monthlyAmount,
+        totalMonths,
+        totalInstallmentDue,
+        totalInstallmentPaid,
+        totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
+        totalArrears,
+        paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
+        totalInstallments: installmentLedger.length,
+      },
+      installmentLedger,
+      ledger_short_id: ledgerModel?.token || null
+    };
+
+    res.json({
+      success: true,
+      data: {
+        installments: [formatted]
+      }
+    });
+  } catch (error) {
+    console.error('getCustomerLedger error:', error);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
 };
 
 module.exports = {

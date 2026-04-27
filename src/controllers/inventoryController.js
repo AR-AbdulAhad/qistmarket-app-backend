@@ -264,26 +264,109 @@ const initiateStockTransfer = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Missing fields.' });
     }
 
+    const targetId = parseInt(to_id);
+
     try {
+        if (to_type === 'Outlet') {
+            const targetOutlet = await prisma.outlet.findUnique({ where: { id: targetId } });
+            if (!targetOutlet) return res.status(404).json({ success: false, message: 'Target outlet not found.' });
+            if (targetOutlet.id === outlet_id) return res.status(400).json({ success: false, message: 'Cannot transfer to same outlet.' });
+
+            // Perform immediate transfer for Outlets (No OTP)
+            const rawIds = inventory_ids.map(i => typeof i === 'object' ? parseInt(i.id) : parseInt(i));
+            const items = await prisma.outletInventory.findMany({
+                where: { id: { in: rawIds }, outlet_id, status: 'In Stock' }
+            });
+
+            if (items.length !== rawIds.length) {
+                return res.status(400).json({ success: false, message: 'Some items not found or not in stock.' });
+            }
+
+            const transfers = await prisma.$transaction(async (tx) => {
+                const transferData = [];
+                for (const payloadItem of inventory_ids) {
+                    const recordId = typeof payloadItem === 'object' ? payloadItem.id : payloadItem;
+                    const transferQty = typeof payloadItem === 'object' ? (parseInt(payloadItem.quantity) || 1) : 1;
+                    const item = items.find(i => i.id === recordId);
+                    if (!item) continue;
+
+                    let isFullTransfer = (item.quantity <= transferQty);
+                    let actualTransferQty = isFullTransfer ? item.quantity : transferQty;
+                    let finalInventoryId = item.id;
+
+                    if (isFullTransfer) {
+                        await tx.outletInventory.update({
+                            where: { id: item.id },
+                            data: { outlet_id: targetId, status: 'In Stock' }
+                        });
+                    } else {
+                        await tx.outletInventory.update({
+                            where: { id: item.id },
+                            data: { quantity: item.quantity - actualTransferQty }
+                        });
+
+                        const existingAtTarget = await tx.outletInventory.findFirst({
+                            where: { outlet_id: targetId, product_name: item.product_name, status: 'In Stock' }
+                        });
+
+                        if (existingAtTarget) {
+                            const updated = await tx.outletInventory.update({
+                                where: { id: existingAtTarget.id },
+                                data: { quantity: existingAtTarget.quantity + actualTransferQty }
+                            });
+                            finalInventoryId = updated.id;
+                        } else {
+                            const duplicate = await tx.outletInventory.findFirst({ where: { outlet_id: targetId, imei_serial: item.imei_serial } });
+                            if (duplicate) {
+                                return res.status(400).json({ success: false, message: `IMEI/Serial ${item.imei_serial} already exists in stock.` });
+                            }
+                            const cloned = await tx.outletInventory.create({
+                                data: {
+                                    outlet_id: targetId,
+                                    product_name: item.product_name,
+                                    category: item.category,
+                                    imei_serial: item.imei_serial || null,
+                                    color_variant: item.color_variant || null,
+                                    quantity: actualTransferQty,
+                                    purchase_price: item.purchase_price,
+                                    installment_price: item.installment_price,
+                                    status: 'In Stock'
+                                }
+                            });
+                            finalInventoryId = cloned.id;
+                        }
+                    }
+
+                    transferData.push({
+                        from_type: 'Outlet', from_id: outlet_id,
+                        to_type: 'Outlet', to_id: targetId,
+                        inventory_id: finalInventoryId,
+                        quantity_transferred: actualTransferQty
+                    });
+                }
+                await tx.stockTransfer.createMany({ data: transferData });
+                return transferData;
+            }, { timeout: 15000 });
+
+            const io = req.app.get('io');
+            await notifyOutlet(targetId, 'Stock Received', `Received ${transfers.length} item batches from Outlet ${outlet_id}`, 'stock_transfer', null, io);
+            await notifyAdmins('Outlet Stock Transferred', `${transfers.length} item batches transferred between outlets.`, 'stock_transfer', null, io);
+
+            return res.json({ success: true, message: 'Stock transferred successfully.', transfers });
+        }
+
+        // --- Standard OTP Flow for Delivery Officers ---
         let recipientIdentifier = '';
         let recipientPhone = '';
         let doUser = null;
 
         if (to_type === 'Delivery Officer') {
             doUser = await prisma.user.findFirst({
-                where: { id: parseInt(to_id), role_id: 2 }
+                where: { id: targetId, role_id: 2 }
             });
             if (!doUser) return res.status(404).json({ success: false, message: 'Delivery officer not found.' });
             recipientIdentifier = `do_${doUser.id}`;
             recipientPhone = doUser.phone || doUser.whatsapp_number;
-        } else if (to_type === 'Outlet') {
-            const outlet = await prisma.outlet.findUnique({
-                where: { id: parseInt(to_id) }
-            });
-            if (!outlet) return res.status(404).json({ success: false, message: 'Outlet not found.' });
-            if (outlet.id === outlet_id) return res.status(400).json({ success: false, message: 'Cannot transfer stock to the same outlet.' });
-            recipientIdentifier = `outlet_${outlet.id}`;
-            recipientPhone = outlet.contact_number; // Assuming outlet has contact or we send it to an associated user's app
         } else {
             return res.status(400).json({ success: false, message: 'Invalid transfer type.' });
         }
@@ -354,8 +437,14 @@ const initiateStockTransfer = async (req, res) => {
 
         res.json({ success: true, message: `OTP sent successfully to ${to_type}.` });
     } catch (error) {
-        console.error('initiateStockTransfer error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        const isValidationError = error.message.includes('exists in stock') || error.message.includes('not found') || error.message.includes('not in stock');
+        if (!isValidationError) {
+            console.error('initiateStockTransfer error:', error);
+        }
+        res.status(isValidationError ? 400 : 500).json({ 
+            success: false, 
+            message: error.message || 'Internal server error' 
+        });
     }
 };
 
@@ -517,7 +606,7 @@ const verifyStockTransfer = async (req, res) => {
 
 const getTransferHistory = async (req, res) => {
     const { outlet_id } = req.user;
-    const { page = 1, limit = 20, search = "" } = req.query;
+    const { page = 1, limit = 20, search = "", to_type, startDate, endDate } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const take = parseInt(limit);
 
@@ -529,6 +618,11 @@ const getTransferHistory = async (req, res) => {
         const where = { 
             from_type: 'Outlet', 
             from_id: outlet_id,
+            to_type: to_type || undefined,
+            created_at: (startDate || endDate) ? {
+                gte: startDate ? new Date(startDate) : undefined,
+                lte: endDate ? new Date(endDate) : undefined
+            } : undefined,
             OR: search ? [
                 { inventory: { product_name: { contains: search } } },
                 { inventory: { imei_serial: { contains: search } } }

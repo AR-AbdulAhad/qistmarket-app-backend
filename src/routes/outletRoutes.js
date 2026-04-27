@@ -52,4 +52,9 @@ router.get('/outlet/installment/check-smartpay-qr', authenticateJWT, checkSmartP
 router.get('/outlet/team/list', authenticateJWT, getOutletOfficers);
 router.get('/outlet/team/details/:id', authenticateJWT, getOfficerDetails);
 
+// Auto-Assignment Settings
+const { getAutoAssignmentSettings, updateAutoAssignmentSettings } = require('../controllers/settingsController');
+router.get('/outlet/auto-assignment-settings', authenticateJWT, getAutoAssignmentSettings);
+router.post('/outlet/auto-assignment-settings', authenticateJWT, updateAutoAssignmentSettings);
+
 module.exports = router;

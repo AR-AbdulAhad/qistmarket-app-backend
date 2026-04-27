@@ -95,7 +95,8 @@ const getReportSummary = async (req, res) => {
       orderStatusAgg,
       ordersByChannel,
       ordersByCity,
-      ordersByDay,
+      ordersByDayRaw,
+      salesByDayRaw,
       totalOrders,
       customerCount,
       collectionAgg,
@@ -118,8 +119,12 @@ const getReportSummary = async (req, res) => {
       prisma.order.groupBy({
         by: ['created_at'],
         _count: { _all: true },
-        _sum: { total_amount: true, advance_amount: true },
         where: baseWhere,
+      }),
+      prisma.order.groupBy({
+        by: ['created_at'],
+        _sum: { total_amount: true, advance_amount: true },
+        where: { ...baseWhere, is_delivered: true },
       }),
       prisma.order.count({ where: baseWhere }),
       prisma.order.groupBy({
@@ -136,6 +141,9 @@ const getReportSummary = async (req, res) => {
         }
       }),
     ]);
+
+    const ordersByDay = ordersByDayRaw;
+    const salesByDay = salesByDayRaw || [];
 
     // Manually aggregate collections from ledger rows in JS (since it's a JSON field)
     let totalInstallments = 0;
@@ -172,6 +180,18 @@ const getReportSummary = async (req, res) => {
         };
       }
       dailyMap[dayKey].count += row._count._all;
+    }
+
+    for (const row of salesByDay) {
+      const dayKey = row.created_at.toISOString().slice(0, 10);
+      if (!dailyMap[dayKey]) {
+        dailyMap[dayKey] = {
+          date: dayKey,
+          count: 0,
+          totalAmount: 0,
+          advanceAmount: 0,
+        };
+      }
       dailyMap[dayKey].totalAmount += row._sum.total_amount || 0;
       dailyMap[dayKey].advanceAmount += row._sum.advance_amount || 0;
     }

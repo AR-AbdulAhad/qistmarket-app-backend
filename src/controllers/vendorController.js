@@ -120,34 +120,46 @@ const createPurchase = async (req, res) => {
                 const totalPrice = qty * unitPrice;
                 totalAmount += totalPrice;
 
+                // Check for unique IMEI/Serial if provided
+                if (item.imei_serial && item.imei_serial.trim() !== '') {
+                    const duplicate = await tx.outletInventory.findFirst({
+                        where: {
+                            outlet_id,
+                            imei_serial: item.imei_serial.trim(),
+                            status: { not: 'Sold' } // Allow if previously sold? No, user said unique.
+                        }
+                    });
+                    if (duplicate) {
+                        throw new Error(`IMEI/Serial ${item.imei_serial} already exists in stock.`);
+                    }
+                }
+
                 purchaseItemsData.push({
                     product_name: item.product_name,
                     category: item.category,
                     color_variant: item.color_variant,
-                    imei_serial: item.imei_serial,
+                    imei_serial: item.imei_serial ? item.imei_serial.trim() : null,
                     quantity: qty,
                     unit_price: unitPrice,
                     total_price: totalPrice
                 });
 
                 // Add or update inventory
-                // We check for an existing record with the same product_name and imei_serial (exact match)
                 const existingItem = await tx.outletInventory.findFirst({
                     where: {
                         outlet_id,
                         product_name: item.product_name,
-                        imei_serial: item.imei_serial || null,
+                        imei_serial: item.imei_serial ? item.imei_serial.trim() : null,
                         color_variant: item.color_variant || null
                     }
                 });
 
                 if (existingItem) {
-                    // Update existing record
                     await tx.outletInventory.update({
                         where: { id: existingItem.id },
                         data: {
                             quantity: existingItem.quantity + qty,
-                            purchase_price: unitPrice, // Update to latest purchase price
+                            purchase_price: unitPrice,
                             status: 'In Stock',
                             category: item.category || existingItem.category,
                             color_variant: item.color_variant || existingItem.color_variant,
@@ -155,14 +167,13 @@ const createPurchase = async (req, res) => {
                         }
                     });
                 } else {
-                    // Create new record
                     await tx.outletInventory.create({
                         data: {
                             outlet_id,
                             product_name: item.product_name,
                             category: item.category,
                             color_variant: item.color_variant,
-                            imei_serial: item.imei_serial || null,
+                            imei_serial: item.imei_serial ? item.imei_serial.trim() : null,
                             quantity: qty,
                             purchase_price: unitPrice,
                             installment_price: 0,
@@ -216,8 +227,14 @@ const createPurchase = async (req, res) => {
 
         res.status(201).json({ success: true, purchase: result });
     } catch (error) {
-        console.error('createPurchase error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        const isValidationError = error.message.includes('exists in stock') || error.message.includes('required');
+        if (!isValidationError) {
+            console.error('createPurchase error:', error);
+        }
+        res.status(isValidationError ? 400 : 500).json({ 
+            success: false, 
+            message: error.message || 'Internal server error' 
+        });
     }
 };
 
@@ -457,11 +474,38 @@ const deletePurchase = async (req, res) => {
     try {
         await prisma.$transaction(async (tx) => {
             const purchase = await tx.vendorPurchase.findUnique({
-                where: { id: parseInt(id) }
+                where: { id: parseInt(id) },
+                include: { items: true }
             });
             if (!purchase || purchase.outlet_id !== outlet_id) throw new Error('Not found');
 
-            // Revert Vendor balance if linked
+            // 1. Revert Inventory
+            for (const item of purchase.items) {
+                const inventoryItem = await tx.outletInventory.findFirst({
+                    where: {
+                        outlet_id,
+                        product_name: item.product_name,
+                        imei_serial: item.imei_serial || null,
+                        color_variant: item.color_variant || null
+                    }
+                });
+
+                if (inventoryItem) {
+                    const newQty = inventoryItem.quantity - item.quantity;
+                    if (newQty <= 0) {
+                        // Delete if quantity becomes 0 or less
+                        await tx.outletInventory.delete({ where: { id: inventoryItem.id } });
+                    } else {
+                        // Reduce quantity
+                        await tx.outletInventory.update({
+                            where: { id: inventoryItem.id },
+                            data: { quantity: newQty }
+                        });
+                    }
+                }
+            }
+
+            // 2. Revert Vendor balance if linked
             if (purchase.vendor_id) {
                 await tx.vendor.update({
                     where: { id: purchase.vendor_id },
@@ -477,7 +521,7 @@ const deletePurchase = async (req, res) => {
         res.json({ success: true, message: 'Purchase deleted successfully.' });
     } catch (error) {
         console.error('deletePurchase error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        res.status(500).json({ success: false, message: error.message || 'Internal server error' });
     }
 };
 

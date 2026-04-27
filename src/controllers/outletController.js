@@ -151,18 +151,31 @@ const getDashboardStats = async (req, res) => {
 
         // Filter orders by this outlet
         const outletOrders = await prisma.order.findMany({
-            where: { outlet_id }
+            where: { outlet_id },
+            include: { delivery: true }
         });
 
-        const pendingVerification = outletOrders.filter(o => o.status === 'Pending Verification').length;
-        const approvedOrders = outletOrders.filter(o => o.status === 'Approved').length;
-        const rejectedOrders = outletOrders.filter(o => o.status === 'Rejected').length;
-        const deliveryPending = outletOrders.filter(o => o.status === 'Ready for Delivery').length;
+        const pendingVerification = outletOrders.filter(o => o.status === 'in_progress').length;
+        const approvedOrders = outletOrders.filter(o => o.status === 'approved').length;
+        const deliveryPending = outletOrders.filter(o => o.status === 'picked').length;
+        const delivered = outletOrders.filter(o => o.status === 'delivered').length;
+        const cancelledOrders = outletOrders.filter(o => o.status === 'cancelled').length;
+        const expiredOrders = outletOrders.filter(o => o.status === 'cancelled').length;
 
-        // Performance:
-        const dailySales = outletOrders.filter(o => o.created_at >= today).reduce((acc, o) => acc + o.total_amount, 0);
-        const weeklySales = outletOrders.filter(o => o.created_at >= firstDayOfWeek).reduce((acc, o) => acc + o.total_amount, 0);
-        const monthlySales = outletOrders.filter(o => o.created_at >= firstDayOfMonth).reduce((acc, o) => acc + o.total_amount, 0);
+        // Performance: Only include DELIVERED orders for actual Sales stats
+        const deliveredOrdersForStats = outletOrders.filter(o => o.is_delivered === true);
+
+        const calculateSales = (orders, startDate) => {
+            return orders.filter(o => {
+                // Use delivery end_time if available, otherwise fallback to order updated_at
+                const salesDate = o.delivery?.end_time ? new Date(o.delivery.end_time) : new Date(o.updated_at);
+                return salesDate >= startDate;
+            }).reduce((acc, o) => acc + o.total_amount, 0);
+        };
+
+        const dailySales = calculateSales(deliveredOrdersForStats, today);
+        const weeklySales = calculateSales(deliveredOrdersForStats, firstDayOfWeek);
+        const monthlySales = calculateSales(deliveredOrdersForStats, firstDayOfMonth);
 
         // Financial Overview (using CashRegister table for latest snapshot)
         const latestRegister = await prisma.cashRegister.findFirst({
@@ -226,8 +239,10 @@ const getDashboardStats = async (req, res) => {
                     todayOrders: outletOrders.filter(o => o.created_at >= today).length,
                     pendingVerification,
                     approvedOrders,
-                    rejectedOrders,
-                    deliveryPending
+                    deliveryPending,
+                    delivered,
+                    cancelledOrders,
+                    expiredOrders
                 },
                 performance: {
                     dailySales,
@@ -410,8 +425,8 @@ const getOutletCashHistory = async (req, res) => {
         ]);
 
         const formattedEntries = histories.map(h => ({
-            id: h.id, 
-            amount: h.amount_submitted, 
+            id: h.id,
+            amount: h.amount_submitted,
             status: h.status,
             created_at: h.submission_date,
             cash_type: h.cash_in_hand.cash_type || 'Advance amount payment',
@@ -887,9 +902,9 @@ const getOutletInstallments = async (req, res) => {
             } catch (e) { return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null }; }
 
             const installments = rows.filter(r => r.month > 0);
-            
+
             const isFullyPaid = installments.length > 0 && installments.every(r => r.status === 'paid' || r.status === 'Paid');
-            
+
             const isOverdue = !isFullyPaid && installments.some(r => {
                 const dueDate = new Date(r.due_date || r.dueDate);
                 return (r.status !== 'paid' && r.status !== 'Paid') && dueDate < today;
@@ -927,7 +942,7 @@ const getOutletInstallments = async (req, res) => {
                 })
                 .map(c => c.orderId);
         }
-        
+
         // Ensure no undefined IDs slip through
         filteredIds = filteredIds.filter(id => id !== undefined && id !== null);
 
@@ -976,7 +991,7 @@ const getOutletInstallments = async (req, res) => {
                 rows.filter(r => r.month > 0 && (r.status === 'paid' || r.status === 'Paid')).forEach(r => {
                     totalRecovery += Number(r.amount || r.dueAmount || 0);
                 });
-            } catch (e) {}
+            } catch (e) { }
         });
 
 
@@ -1180,7 +1195,7 @@ const verifyInstallmentPayment = async (req, res) => {
                 // If this was the last month, append a new row for the balance
                 const nextMonthDate = new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate || new Date());
                 nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
-                
+
                 rows.push({
                     month: parseInt(month_number) + 1,
                     due_date: nextMonthDate.toISOString().split('T')[0],
@@ -1287,39 +1302,39 @@ const getOutletOfficers = async (req, res) => {
                 });
 
                 // Calculate stats based on Order status
-                const pendingCount = orders.filter(o => 
-                    o.status === 'Pending Verification' || 
-                    o.status === 'pending' || 
+                const pendingCount = orders.filter(o =>
+                    o.status === 'Pending Verification' ||
+                    o.status === 'pending' ||
                     o.status === 'new'
                 ).length;
 
-                const inProgressCount = orders.filter(o => 
-                    o.status === 'Verification In Progress' || 
+                const inProgressCount = orders.filter(o =>
+                    o.status === 'Verification In Progress' ||
                     o.status === 'in_progress' ||
                     o.status === 'In Progress'
                 ).length;
 
-                const completedCount = orders.filter(o => 
-                    o.status === 'Verified' || 
+                const completedCount = orders.filter(o =>
+                    o.status === 'Verified' ||
                     o.status === 'verified' ||
                     o.status === 'Approved' ||
                     o.status === 'approved'
                 ).length;
 
-                const rejectedCount = orders.filter(o => 
-                    o.status === 'Rejected' || 
+                const rejectedCount = orders.filter(o =>
+                    o.status === 'Rejected' ||
                     o.status === 'rejected'
                 ).length;
 
-                const expiredCount = orders.filter(o => 
-                    o.status === 'Expired' || 
+                const expiredCount = orders.filter(o =>
+                    o.status === 'Expired' ||
                     o.status === 'expired'
                 ).length;
 
                 const deliveredCount = orders.filter(o => o.is_delivered === true).length;
 
-                const approvedCount = orders.filter(o => 
-                    o.status === 'Approved' || 
+                const approvedCount = orders.filter(o =>
+                    o.status === 'Approved' ||
                     o.status === 'approved' ||
                     o.status === 'Ready for Delivery'
                 ).length;
@@ -1442,7 +1457,7 @@ const getOfficerDetails = async (req, res) => {
             // 2. Delivered Products (Only for DO)
             role === 2 ? prisma.delivery.findMany({
                 where: { delivery_agent_id: officer.id },
-                include: { 
+                include: {
                     order: {
                         select: { order_ref: true, customer_name: true, product_name: true, created_at: true }
                     }
@@ -1471,10 +1486,10 @@ const getOfficerDetails = async (req, res) => {
             // 5. Submission History (Live Ledger)
             prisma.cashSubmissionHistory.findMany({
                 where: { cash_in_hand: { officer_id: officer.id } },
-                include: { 
-                    cash_in_hand: { 
+                include: {
+                    cash_in_hand: {
                         include: { order: { select: { order_ref: true } } }
-                    } 
+                    }
                 },
                 orderBy: { submission_date: 'desc' },
                 take: 100
@@ -1495,8 +1510,8 @@ const getOfficerDetails = async (req, res) => {
 
             // 7. Assigned Orders for DO and RO
             (role === 2 || role === 3) ? prisma.order.findMany({
-                where: role === 2 
-                    ? { delivery_officer_id: officer.id } 
+                where: role === 2
+                    ? { delivery_officer_id: officer.id }
                     : { recovery_officer_id: officer.id },
                 select: {
                     id: true,

@@ -1338,16 +1338,15 @@ const submitVerificationReview = async (req, res) => {
     // Normalize approved value
     approved = approved === 'true' || approved === true;
 
-    let finalRemarks = null;
+    let finalRemarks = remarks?.trim() || null;
 
     if (!approved) {  // Reject case
-      if (!remarks || !remarks.trim()) {
+      if (!finalRemarks) {
         return res.status(400).json({
           success: false,
           error: 'Remarks are required when rejecting'
         });
       }
-      finalRemarks = remarks.trim();
     }
 
     // Create the review
@@ -2271,7 +2270,8 @@ const getDeliveredProductDetails = async (req, res) => {
       include: {
         delivery: {
           include: {
-            installment_ledger: true
+            installment_ledger: true,
+            uploads: true
           }
         },
         cash_in_hand: {
@@ -2348,7 +2348,8 @@ const getDeliveredProductDetails = async (req, res) => {
           selected_plan: order.delivery.selected_plan,
           self_pickup: order.delivery.self_pickup,
           delivery_agent_id: order.delivery.delivery_agent_id,
-          delivery_agent_name: deliveryAgentName // Add agent name here
+          delivery_agent_name: deliveryAgentName, // Add agent name here
+          uploads: order.delivery.uploads
         };
       }
 

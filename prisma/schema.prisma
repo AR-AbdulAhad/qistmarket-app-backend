@@ -222,6 +222,7 @@ model Outlet {
   vendorPayments   VendorPayment[]
   vendorPurchases  VendorPurchase[]
   vendors          Vendor[]
+  auto_assignment_config Json?
 
   @@map("outlets")
 }

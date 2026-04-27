@@ -238,12 +238,12 @@ const getProfitLoss = async (req, res) => {
             dateFilter.lte = end;
         }
 
-        // 1. Find Orders in the range
+        // 1. Find Orders in the range (Only DELIVERED orders are counted as sales)
         const orders = await prisma.order.findMany({
             where: {
                 ...outletFilter,
                 created_at: dateFilter,
-                status: { notIn: ['Cancelled', 'Rejected'] }
+                is_delivered: true
             },
             select: {
                 total_amount: true,

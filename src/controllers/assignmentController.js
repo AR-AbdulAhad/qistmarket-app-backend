@@ -11,8 +11,19 @@ const getOfficerAssignments = async (req, res) => {
         } else {
             roleName = 'Verification Officer';
         }
+        const userRole = (req.user?.role || '').toLowerCase();
+        const where = { role: { name: roleName } };
+
+        // If it's a branch user, only show officers from their outlet
+        if (userRole === 'branch user' && req.user.outlet_id) {
+            where.outlet_id = req.user.outlet_id;
+        } else if (req.query.outlet_id) {
+            // Support explicit filtering if provided (for admins)
+            where.outlet_id = parseInt(req.query.outlet_id);
+        }
+
         const officers = await prisma.user.findMany({
-            where: { role: { name: roleName } },
+            where,
             select: {
                 id: true,
                 full_name: true,
