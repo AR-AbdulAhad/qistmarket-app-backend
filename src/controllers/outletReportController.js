@@ -238,20 +238,37 @@ const getProfitLoss = async (req, res) => {
             dateFilter.lte = end;
         }
 
-        // 1. Find Orders in the range (Only DELIVERED orders are counted as sales)
+        // 1. Fetch Ledgers in the range (Actual cash inflow)
+        const ledgers = await prisma.installmentLedger.findMany({
+            where: {
+                order: outletFilter,
+            },
+        });
+
+        let totalRevenue = 0;
+        for (const ledger of ledgers) {
+            const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            for (const row of rows) {
+                if (row.status === 'paid' && row.paid_at) {
+                    const paidDate = new Date(row.paid_at);
+                    if (paidDate >= dateFilter.gte && paidDate <= (dateFilter.lte || new Date())) {
+                        totalRevenue += parseFloat(row.amount || row.dueAmount || 0);
+                    }
+                }
+            }
+        }
+
+        // 2. Find Orders in the range for COGS (Only DELIVERED orders)
         const orders = await prisma.order.findMany({
             where: {
                 ...outletFilter,
-                created_at: dateFilter,
+                updated_at: dateFilter, // Use updated_at for delivery date approximation
                 is_delivered: true
             },
             select: {
-                total_amount: true,
                 imei_serial: true
             }
         });
-
-        const totalRevenue = orders.reduce((acc, o) => acc + o.total_amount, 0);
         
         // 2. Find purchase prices for these items
         const imeiSerials = orders.map(o => o.imei_serial).filter(Boolean);

@@ -162,20 +162,30 @@ const getDashboardStats = async (req, res) => {
         const cancelledOrders = outletOrders.filter(o => o.status === 'cancelled').length;
         const expiredOrders = outletOrders.filter(o => o.status === 'cancelled').length;
 
-        // Performance: Only include DELIVERED orders for actual Sales stats
-        const deliveredOrdersForStats = outletOrders.filter(o => o.is_delivered === true);
+        // Performance: Calculate sales from Installment Ledger payments (Advance + Installment collections)
+        const outletLedgers = await prisma.installmentLedger.findMany({
+            where: { order: { outlet_id } }
+        });
 
-        const calculateSales = (orders, startDate) => {
-            return orders.filter(o => {
-                // Use delivery end_time if available, otherwise fallback to order updated_at
-                const salesDate = o.delivery?.end_time ? new Date(o.delivery.end_time) : new Date(o.updated_at);
-                return salesDate >= startDate;
-            }).reduce((acc, o) => acc + o.total_amount, 0);
+        const calculateLedgerSales = (startDate) => {
+            let total = 0;
+            outletLedgers.forEach(ledger => {
+                const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+                rows.forEach(row => {
+                    if (row.status === 'paid' && row.paid_at) {
+                        const paidDate = new Date(row.paid_at);
+                        if (paidDate >= startDate) {
+                            total += Number(row.amount || 0);
+                        }
+                    }
+                });
+            });
+            return total;
         };
 
-        const dailySales = calculateSales(deliveredOrdersForStats, today);
-        const weeklySales = calculateSales(deliveredOrdersForStats, firstDayOfWeek);
-        const monthlySales = calculateSales(deliveredOrdersForStats, firstDayOfMonth);
+        const dailySales = calculateLedgerSales(today);
+        const weeklySales = calculateLedgerSales(firstDayOfWeek);
+        const monthlySales = calculateLedgerSales(firstDayOfMonth);
 
         // Financial Overview (using CashRegister table for latest snapshot)
         const latestRegister = await prisma.cashRegister.findFirst({
