@@ -2418,8 +2418,6 @@ const getSelfPickupInventory = async (req, res) => {
       AND: [
         { imei_serial: { not: null } },
         { imei_serial: { not: '' } },
-        { color_variant: { not: null } },
-        { color_variant: { not: '' } }
       ]
     };
 
