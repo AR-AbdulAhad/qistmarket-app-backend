@@ -479,27 +479,60 @@ const deletePurchase = async (req, res) => {
 
             // 1. Revert Inventory
             for (const item of purchase.items) {
+                // If the item has an IMEI/Serial, check if it's already sold or connected to an order
+                if (item.imei_serial) {
+                    // Check if connected to a delivery
+                    const connectedDelivery = await tx.delivery.findFirst({
+                        where: { product_imei: item.imei_serial },
+                        include: { order: { select: { order_ref: true } } }
+                    });
+                    if (connectedDelivery) {
+                        throw new Error(`Cannot delete purchase. Item with IMEI ${item.imei_serial} is connected to Order ${connectedDelivery.order?.order_ref || 'N/A'} via Delivery.`);
+                    }
+
+                    // Check if marked as Sold in inventory
+                    const soldItem = await tx.outletInventory.findFirst({
+                        where: { 
+                            imei_serial: item.imei_serial,
+                            status: 'Sold'
+                        }
+                    });
+                    if (soldItem) {
+                        throw new Error(`Cannot delete purchase. Item with IMEI ${item.imei_serial} has already been sold.`);
+                    }
+                }
+
                 const inventoryItem = await tx.outletInventory.findFirst({
                     where: {
-                        outlet_id,
+                        outlet_id: purchase.outlet_id,
                         product_name: item.product_name,
-                        imei_serial: item.imei_serial || null,
-                        color_variant: item.color_variant || null
+                        imei_serial: item.imei_serial ? item.imei_serial.trim() : null,
+                        // Match exactly what might be in the DB (null or empty string)
+                        OR: [
+                            { color_variant: item.color_variant || null },
+                            { color_variant: item.color_variant || "" }
+                        ]
                     }
                 });
 
-                if (inventoryItem) {
-                    const newQty = inventoryItem.quantity - item.quantity;
-                    if (newQty <= 0) {
-                        // Delete if quantity becomes 0 or less
-                        await tx.outletInventory.delete({ where: { id: inventoryItem.id } });
-                    } else {
-                        // Reduce quantity
-                        await tx.outletInventory.update({
-                            where: { id: inventoryItem.id },
-                            data: { quantity: newQty }
-                        });
-                    }
+                if (!inventoryItem) {
+                    throw new Error(`Inventory record for ${item.product_name} (IMEI: ${item.imei_serial || 'N/A'}) not found in your outlet.`);
+                }
+
+                if (inventoryItem.quantity < item.quantity) {
+                    throw new Error(`Cannot delete purchase. Some units of ${item.product_name} have already been processed or sold.`);
+                }
+
+                const newQty = inventoryItem.quantity - item.quantity;
+                if (newQty <= 0) {
+                    // Delete if quantity becomes 0 or less
+                    await tx.outletInventory.delete({ where: { id: inventoryItem.id } });
+                } else {
+                    // Reduce quantity
+                    await tx.outletInventory.update({
+                        where: { id: inventoryItem.id },
+                        data: { quantity: newQty }
+                    });
                 }
             }
 
@@ -518,8 +551,13 @@ const deletePurchase = async (req, res) => {
         });
         res.json({ success: true, message: 'Purchase deleted successfully.' });
     } catch (error) {
+        // If it's a validation error we threw, send it as 400 without logging stack trace
+        if (error.message.includes('Cannot delete purchase') || error.message.includes('Inventory record')) {
+            return res.status(400).json({ success: false, message: error.message });
+        }
+        
         console.error('deletePurchase error:', error);
-        res.status(500).json({ success: false, message: error.message || 'Internal server error' });
+        res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
