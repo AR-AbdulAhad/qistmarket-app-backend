@@ -120,17 +120,15 @@ const createPurchase = async (req, res) => {
                 const totalPrice = qty * unitPrice;
                 totalAmount += totalPrice;
 
-                // Check for unique IMEI/Serial if provided
+                // Check for unique IMEI/Serial if provided (System-wide check)
                 if (item.imei_serial && item.imei_serial.trim() !== '') {
                     const duplicate = await tx.outletInventory.findFirst({
                         where: {
-                            outlet_id,
-                            imei_serial: item.imei_serial.trim(),
-                            status: { not: 'Sold' } // Allow if previously sold? No, user said unique.
+                            imei_serial: item.imei_serial.trim()
                         }
                     });
                     if (duplicate) {
-                        throw new Error(`IMEI/Serial ${item.imei_serial} already exists in stock.`);
+                        throw new Error(`IMEI/Serial ${item.imei_serial} already exists.`);
                     }
                 }
 

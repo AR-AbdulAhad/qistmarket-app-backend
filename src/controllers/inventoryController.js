@@ -216,6 +216,19 @@ const addInventory = async (req, res) => {
 
             const purchasePriceNum = parseFloat(purchase_price);
             
+            // Check for duplicate IMEI system-wide
+            if (imei_serial && imei_serial.trim() !== '') {
+                const duplicate = await prisma.outletInventory.findFirst({
+                    where: { imei_serial: imei_serial.trim() }
+                });
+                if (duplicate) {
+                    return res.status(400).json({ 
+                        success: false, 
+                        message: `IMEI/Serial ${imei_serial} already exists.` 
+                    });
+                }
+            }
+
             // If installment_plans are provided in the request (from external API), use them.
             // Otherwise, generate new ones.
             const instPlans = (installment_plans && Array.isArray(installment_plans)) 
