@@ -721,6 +721,7 @@ const initiateDirectReturn = async (req, res) => {
         const io = req.app.get('io');
         if (io) {
             io.to(`outlet_${outlet_id}`).emit('return_exchange_requested', {
+                target_outlet_id: parseInt(outlet_id),
                 record_id: returnRecord.id,
                 officer_name: "Outlet",
                 type,

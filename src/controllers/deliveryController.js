@@ -296,31 +296,51 @@ const submitDelivery = async (req, res) => {
       const deliveryDate = new Date();
 
       if (totalMonths > 0 && monthlyAmt > 0) {
-        // Build ledger rows
-        const ledgerRows = [];
+        let ledgerRows = [];
 
-        // 1. Add Advance Payment as Month 0 (Already paid during booking/delivery)
+        // Use custom ledger from frontend if provided (user edited dates/amounts)
+        let customLedger = null;
+        try {
+          const raw = req.body.custom_ledger;
+          if (raw) customLedger = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch(e) { /* ignore parse errors */ }
+
+        // 1. Advance Payment row (always month 0, always auto)
         ledgerRows.push({
           month: 0,
           label: 'Advance Payment',
           due_date: deliveryDate.toISOString(),
           amount: parseFloat(advanceAmount || 0),
-          status: 'paid', // Mark as paid since it was collected before/during delivery
+          status: 'paid',
           paid_at: deliveryDate.toISOString(),
           payment_method: 'Cash',
           feedback: 'Collected at Delivery'
         });
 
-        // 2. Add Installment Months (Month 1 to N)
-        for (let i = 0; i < totalMonths; i++) {
-          ledgerRows.push({
-            month: i + 1,
-            label: `Month ${i + 1}`,
-            due_date: addMonths(deliveryDate, i + 1).toISOString(),
-            amount: parseFloat(monthlyAmt),
-            status: 'pending',
-            paid_at: null,
+        if (customLedger && Array.isArray(customLedger) && customLedger.length === totalMonths) {
+          // 2a. Use edited installment rows from the UI
+          customLedger.forEach((row, i) => {
+            ledgerRows.push({
+              month: i + 1,
+              label: `Month ${i + 1}`,
+              due_date: row.date ? new Date(row.date).toISOString() : addMonths(deliveryDate, i + 1).toISOString(),
+              amount: parseFloat(row.amount) || parseFloat(monthlyAmt),
+              status: 'pending',
+              paid_at: null,
+            });
           });
+        } else {
+          // 2b. Auto-generate installment rows
+          for (let i = 0; i < totalMonths; i++) {
+            ledgerRows.push({
+              month: i + 1,
+              label: `Month ${i + 1}`,
+              due_date: addMonths(deliveryDate, i + 1).toISOString(),
+              amount: parseFloat(monthlyAmt),
+              status: 'pending',
+              paid_at: null,
+            });
+          }
         }
 
         // Sign a long-lived token (2 years) — kept for backward compat
@@ -355,6 +375,7 @@ const submitDelivery = async (req, res) => {
       // Non-fatal — log and continue
       console.error('[submitDelivery] Ledger creation error:', ledgerErr);
     }
+
 
     // ─── WATI Messages ───────────────────────────────────────────────────────
     const customerPhone = purchaser?.telephone_number;
@@ -836,6 +857,7 @@ const submitCashToOutlet = async (req, res) => {
 
       // Real-time: Notify Outlet
       io.to(`outlet_${outlet_id}`).emit('cash_submission_otp', {
+        target_outlet_id: parseInt(outlet_id),
         officer_name: officerName,
         amount: amountToSubmit,
         payment_method: payment_method || 'Cash',
@@ -928,7 +950,7 @@ const generateDeliveryOtp = async (req, res) => {
 };
 
 const verifyDeliveryOtp = async (req, res) => {
-  const { order_id, phone, otp } = req.body;
+  const { order_id, phone, otp, custom_ledger } = req.body;
 
   try {
     const order = await prisma.order.findUnique({
@@ -960,6 +982,87 @@ const verifyDeliveryOtp = async (req, res) => {
     }
 
     const io = req.app.get('io');
+
+    // If custom_ledger is provided, it means we are also submitting the delivery (Admin Manual Flow)
+    if (custom_ledger) {
+      try {
+        const parsedLedger = typeof custom_ledger === 'string' ? JSON.parse(custom_ledger) : custom_ledger;
+        
+        await prisma.$transaction(async (tx) => {
+          // 1. Update Order Status
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              status: 'delivered',
+              is_delivered: true,
+              delivered_at: getPKTDate(new Date())
+            }
+          });
+
+          // 2. Create Ledger
+          await tx.installmentLedger.upsert({
+            where: { order_id: order.id },
+            update: {
+              ledger_rows: parsedLedger,
+              updated_at: getPKTDate(new Date())
+            },
+            create: {
+              order_id: order.id,
+              ledger_rows: parsedLedger,
+              created_at: getPKTDate(new Date())
+            }
+          });
+
+          // 3. Mark delivery as completed if exists
+          const existingDelivery = await tx.delivery.findUnique({
+            where: { order_id: order.id }
+          });
+
+          if (existingDelivery) {
+            await tx.delivery.update({
+              where: { id: existingDelivery.id },
+              data: {
+                status: 'completed',
+                end_time: getPKTDate(new Date()),
+                verified: true
+              }
+            });
+          } else {
+            // Create a basic delivery record if none exists (manual admin delivery)
+            await tx.delivery.create({
+              data: {
+                order_id: order.id,
+                delivery_agent_id: req.user.id,
+                status: 'completed',
+                start_time: getPKTDate(new Date()),
+                end_time: getPKTDate(new Date()),
+                verified: true,
+                self_pickup: false
+              }
+            });
+          }
+        });
+
+        await notifyAdmins(
+          'Delivery Completed (Manual)',
+          `Order #${order.order_ref} marked as delivered by ${req.user.full_name}`,
+          'delivery_complete',
+          order.id,
+          io
+        );
+
+        return res.status(200).json({ 
+          success: true, 
+          valid: true, 
+          message: 'OTP verified and delivery completed successfully' 
+        });
+
+      } catch (e) {
+        console.error('[verifyDeliveryOtp] Finalization error:', e);
+        return res.status(500).json({ success: false, error: { message: 'Failed to finalize delivery' } });
+      }
+    }
+
     await notifyAdmins(
       'Delivery OTP Verified',
       `OTP verified for Order #${order_id}`,
@@ -1588,8 +1691,16 @@ const submitSelfPickupDelivery = async (req, res) => {
       const deliveryDate = new Date();
 
       if (totalMonths > 0 && monthlyAmt > 0) {
-        const ledgerRows = [];
-        // Advance row
+        let ledgerRows = [];
+
+        // Use custom ledger from frontend if provided (user edited dates/amounts)
+        let customLedger = null;
+        try {
+          const raw = req.body.custom_ledger;
+          if (raw) customLedger = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch(e) { /* ignore parse errors */ }
+
+        // Advance row always first
         ledgerRows.push({
           month: 0,
           label: 'Advance Payment',
@@ -1601,16 +1712,30 @@ const submitSelfPickupDelivery = async (req, res) => {
           feedback: 'Self Pickup at Branch'
         });
 
-        // Installment rows
-        for (let i = 0; i < totalMonths; i++) {
-          ledgerRows.push({
-            month: i + 1,
-            label: `Month ${i + 1}`,
-            due_date: addMonths(deliveryDate, i + 1).toISOString(),
-            amount: parseFloat(monthlyAmt),
-            status: 'pending',
-            paid_at: null,
+        if (customLedger && Array.isArray(customLedger) && customLedger.length === totalMonths) {
+          // Use edited installment rows from the UI
+          customLedger.forEach((row, i) => {
+            ledgerRows.push({
+              month: i + 1,
+              label: `Month ${i + 1}`,
+              due_date: row.date ? new Date(row.date).toISOString() : addMonths(deliveryDate, i + 1).toISOString(),
+              amount: parseFloat(row.amount) || parseFloat(monthlyAmt),
+              status: 'pending',
+              paid_at: null,
+            });
           });
+        } else {
+          // Auto-generate installment rows
+          for (let i = 0; i < totalMonths; i++) {
+            ledgerRows.push({
+              month: i + 1,
+              label: `Month ${i + 1}`,
+              due_date: addMonths(deliveryDate, i + 1).toISOString(),
+              amount: parseFloat(monthlyAmt),
+              status: 'pending',
+              paid_at: null,
+            });
+          }
         }
 
         const ledgerToken = jwt.sign(

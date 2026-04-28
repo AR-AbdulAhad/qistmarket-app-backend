@@ -25,6 +25,27 @@ const generateInvoiceNumber = async (tx) => {
     return `${prefix}${nextNumber.toString().padStart(4, '0')}`;
 };
 
+const generateReturnNumber = async (tx) => {
+    const year = new Date().getFullYear();
+    const prefix = `RET-${year}-`;
+    
+    const lastReturn = await tx.vendorPurchaseReturn.findFirst({
+        where: { return_number: { startsWith: prefix } },
+        orderBy: { return_number: 'desc' },
+        select: { return_number: true }
+    });
+
+    let nextNumber = 1;
+    if (lastReturn) {
+        const parts = lastReturn.return_number.split('-');
+        if (parts.length >= 3) {
+            nextNumber = parseInt(parts[2]) + 1;
+        }
+    }
+
+    return `${prefix}${nextNumber.toString().padStart(4, '0')}`;
+};
+
 // --- Vendor CRUD ---
 
 const getVendors = async (req, res) => {
@@ -236,6 +257,345 @@ const createPurchase = async (req, res) => {
     }
 };
 
+const updatePurchase = async (req, res) => {
+    const { id } = req.params;
+    const { outlet_id } = req.user;
+    const { vendor_id, vendor_name, purchase_date, due_date, notes, items } = req.body;
+
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    if (!items || !items.length) {
+        return res.status(400).json({ success: false, message: 'Items are required.' });
+    }
+
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const purchase = await tx.vendorPurchase.findUnique({
+                where: { id: parseInt(id) },
+                include: { items: true }
+            });
+
+            if (!purchase || purchase.outlet_id !== outlet_id) {
+                throw new Error('Purchase not found.');
+            }
+
+            // Save previous state for history
+            const previousData = { ...purchase };
+
+            // 1. Resolve Vendor
+            let finalVendorId = vendor_id ? parseInt(vendor_id) : purchase.vendor_id;
+            let finalVendorName = vendor_name || purchase.vendor_name;
+
+            if (!finalVendorId && vendor_name && vendor_name !== purchase.vendor_name) {
+                let existingVendor = await tx.vendor.findFirst({
+                    where: { outlet_id, name: vendor_name }
+                });
+                if (!existingVendor) {
+                    existingVendor = await tx.vendor.create({
+                        data: { outlet_id, name: vendor_name }
+                    });
+                }
+                finalVendorId = existingVendor.id;
+                finalVendorName = existingVendor.name;
+            }
+
+            // 2. Handle Items Diff
+            const oldItems = purchase.items;
+            let newTotalAmount = 0;
+            const changeLogs = [];
+
+            const incomingIds = items.filter(i => i.id).map(i => parseInt(i.id));
+
+            // Find deleted items
+            const deletedItems = oldItems.filter(oldItem => !incomingIds.includes(oldItem.id));
+            
+            for (const item of deletedItems) {
+                if (item.imei_serial) {
+                    const connectedDelivery = await tx.delivery.findFirst({
+                        where: { product_imei: item.imei_serial }
+                    });
+                    if (connectedDelivery) throw new Error(`Cannot delete item. IMEI ${item.imei_serial} is connected to a delivery.`);
+
+                    const soldItem = await tx.outletInventory.findFirst({
+                        where: { imei_serial: item.imei_serial, status: 'Sold' }
+                    });
+                    if (soldItem) throw new Error(`Cannot delete item. IMEI ${item.imei_serial} has already been sold.`);
+                }
+
+                const inventoryItem = await tx.outletInventory.findFirst({
+                    where: {
+                        outlet_id: purchase.outlet_id,
+                        product_name: item.product_name,
+                        imei_serial: item.imei_serial ? item.imei_serial.trim() : null,
+                        OR: [
+                            { color_variant: item.color_variant || null },
+                            { color_variant: item.color_variant || "" }
+                        ]
+                    }
+                });
+
+                if (inventoryItem) {
+                    if (inventoryItem.quantity < item.quantity) {
+                        throw new Error(`Cannot delete item. Some units of ${item.product_name} have already been processed.`);
+                    }
+                    const newQty = inventoryItem.quantity - item.quantity;
+                    if (newQty <= 0) {
+                        await tx.outletInventory.delete({ where: { id: inventoryItem.id } });
+                    } else {
+                        await tx.outletInventory.update({
+                            where: { id: inventoryItem.id },
+                            data: { quantity: newQty }
+                        });
+                    }
+                }
+                await tx.vendorPurchaseItem.delete({ where: { id: item.id } });
+                changeLogs.push(`Removed item: ${item.product_name} (Qty: ${item.quantity})`);
+            }
+
+            // Process incoming items
+            for (const item of items) {
+                const qty = parseInt(item.quantity) || 1;
+                const unitPrice = parseFloat(item.unit_price) || 0;
+                const totalPrice = qty * unitPrice;
+                newTotalAmount += totalPrice;
+
+                const currentImei = item.imei_serial ? item.imei_serial.trim() : null;
+
+                if (item.id) {
+                    // Update existing item
+                    const oldItem = oldItems.find(o => o.id === parseInt(item.id));
+                    if (!oldItem) throw new Error(`Item ${item.id} not found in this purchase.`);
+                    
+                    const oldImei = oldItem.imei_serial ? oldItem.imei_serial.trim() : null;
+
+                    if (oldImei !== currentImei) {
+                        if (oldImei) {
+                            const soldItem = await tx.outletInventory.findFirst({
+                                where: { imei_serial: oldImei, status: 'Sold' }
+                            });
+                            if (soldItem) throw new Error(`Cannot edit item. Old IMEI ${oldImei} has already been sold.`);
+                        }
+                        
+                        if (currentImei) {
+                            const duplicate = await tx.outletInventory.findFirst({
+                                where: { imei_serial: currentImei }
+                            });
+                            if (duplicate) {
+                                const oldInv = await tx.outletInventory.findFirst({
+                                    where: { outlet_id, imei_serial: oldImei }
+                                });
+                                if (!oldInv || duplicate.id !== oldInv.id) {
+                                    throw new Error(`IMEI/Serial ${currentImei} already exists.`);
+                                }
+                            }
+                        }
+                    }
+
+                    const qtyDiff = qty - oldItem.quantity;
+                    if (oldImei !== currentImei) {
+                        changeLogs.push(`Changed IMEI for ${item.product_name} from ${oldImei || 'None'} to ${currentImei || 'None'}`);
+                    }
+                    if (qtyDiff !== 0) {
+                        changeLogs.push(`Changed Quantity for ${item.product_name} from ${oldItem.quantity} to ${qty}`);
+                    }
+                    if (oldItem.unit_price !== unitPrice) {
+                        changeLogs.push(`Changed Price for ${item.product_name} from ${oldItem.unit_price} to ${unitPrice}`);
+                    }
+                    
+                    let oldInvItem = await tx.outletInventory.findFirst({
+                        where: {
+                            outlet_id,
+                            product_name: oldItem.product_name,
+                            imei_serial: oldImei,
+                            OR: [
+                                { color_variant: oldItem.color_variant || null },
+                                { color_variant: oldItem.color_variant || "" }
+                            ]
+                        }
+                    });
+
+                    if (oldInvItem) {
+                        if (qtyDiff < 0 && oldInvItem.quantity + qtyDiff < 0) {
+                            throw new Error(`Cannot reduce quantity. Not enough units of ${oldItem.product_name} in stock.`);
+                        }
+
+                        await tx.outletInventory.update({
+                            where: { id: oldInvItem.id },
+                            data: {
+                                quantity: oldInvItem.quantity + qtyDiff,
+                                product_name: item.product_name,
+                                category: item.category || oldInvItem.category,
+                                color_variant: item.color_variant || oldInvItem.color_variant,
+                                imei_serial: currentImei,
+                                purchase_price: unitPrice,
+                                installment_plans: generateInstallments(item.category || oldInvItem.category || '', unitPrice)
+                            }
+                        });
+                    }
+
+                    await tx.vendorPurchaseItem.update({
+                        where: { id: oldItem.id },
+                        data: {
+                            product_name: item.product_name,
+                            category: item.category,
+                            color_variant: item.color_variant,
+                            imei_serial: currentImei,
+                            quantity: qty,
+                            unit_price: unitPrice,
+                            total_price: totalPrice
+                        }
+                    });
+
+                } else {
+                    if (currentImei) {
+                        const duplicate = await tx.outletInventory.findFirst({
+                            where: { imei_serial: currentImei }
+                        });
+                        if (duplicate) throw new Error(`IMEI/Serial ${currentImei} already exists.`);
+                    }
+
+                    const existingItem = await tx.outletInventory.findFirst({
+                        where: {
+                            outlet_id,
+                            product_name: item.product_name,
+                            imei_serial: currentImei,
+                            OR: [
+                                { color_variant: item.color_variant || null },
+                                { color_variant: item.color_variant || "" }
+                            ]
+                        }
+                    });
+
+                    if (existingItem) {
+                        await tx.outletInventory.update({
+                            where: { id: existingItem.id },
+                            data: {
+                                quantity: existingItem.quantity + qty,
+                                purchase_price: unitPrice,
+                                installment_plans: generateInstallments(item.category || existingItem.category || '', unitPrice)
+                            }
+                        });
+                    } else {
+                        await tx.outletInventory.create({
+                            data: {
+                                outlet_id,
+                                product_name: item.product_name,
+                                category: item.category,
+                                color_variant: item.color_variant,
+                                imei_serial: currentImei,
+                                quantity: qty,
+                                purchase_price: unitPrice,
+                                installment_price: 0,
+                                installment_plans: generateInstallments(item.category || '', unitPrice),
+                                status: 'In Stock'
+                            }
+                        });
+                    }
+
+                    await tx.vendorPurchaseItem.create({
+                        data: {
+                            purchase_id: purchase.id,
+                            product_name: item.product_name,
+                            category: item.category,
+                            color_variant: item.color_variant,
+                            imei_serial: currentImei,
+                            quantity: qty,
+                            unit_price: unitPrice,
+                            total_price: totalPrice
+                        }
+                    });
+                    changeLogs.push(`Added item: ${item.product_name} (Qty: ${qty})`);
+                }
+            }
+
+            // 3. Update Purchase amounts and details
+            const amountDiff = newTotalAmount - purchase.total_amount;
+            const newBalance = purchase.balance + amountDiff;
+            
+            let newStatus = purchase.status;
+            if (newBalance <= 0 && purchase.paid_amount > 0) newStatus = 'Paid';
+            else if (purchase.paid_amount > 0) newStatus = 'Partial';
+            else newStatus = 'Unpaid';
+
+            const updatedPurchase = await tx.vendorPurchase.update({
+                where: { id: purchase.id },
+                data: {
+                    vendor_id: finalVendorId,
+                    vendor_name: finalVendorName,
+                    total_amount: newTotalAmount,
+                    balance: newBalance,
+                    status: newStatus,
+                    purchase_date: purchase_date ? new Date(purchase_date) : purchase.purchase_date,
+                    due_date: due_date ? new Date(due_date) : purchase.due_date,
+                    notes: notes !== undefined ? notes : purchase.notes
+                },
+                include: { items: true }
+            });
+
+            // 4. Update Vendor Balance
+            if (purchase.vendor_id !== finalVendorId) {
+                if (purchase.vendor_id) {
+                    await tx.vendor.update({
+                        where: { id: purchase.vendor_id },
+                        data: { balance: { decrement: purchase.balance } }
+                    });
+                }
+                if (finalVendorId) {
+                    await tx.vendor.update({
+                        where: { id: finalVendorId },
+                        data: { balance: { increment: newBalance } }
+                    });
+                }
+            } else if (finalVendorId && amountDiff !== 0) {
+                await tx.vendor.update({
+                    where: { id: finalVendorId },
+                    data: { balance: { increment: amountDiff } }
+                });
+            }
+
+            if (amountDiff !== 0) {
+                changeLogs.push(`Total amount changed from ${purchase.total_amount} to ${newTotalAmount}`);
+            }
+
+            const finalSummary = changeLogs.length > 0 ? changeLogs.join('\n') : 'Purchase details updated.';
+
+            // 5. Log Edit History
+            await tx.vendorPurchaseEditHistory.create({
+                data: {
+                    purchase_id: purchase.id,
+                    edited_by_id: req.user.id,
+                    previous_data: previousData,
+                    new_data: updatedPurchase,
+                    changes_summary: finalSummary
+                }
+            });
+
+            return updatedPurchase;
+        }, {
+            maxWait: 5000,
+            timeout: 15000
+        });
+
+        await logAction(
+            req, 
+            'VENDOR_PURCHASE_EDIT', 
+            `Edited purchase ${result.invoice_number} from ${result.vendor_name}.`,
+            result.id,
+            'VendorPurchase'
+        );
+
+        res.json({ success: true, purchase: result, message: 'Purchase updated successfully.' });
+    } catch (error) {
+        const isValidationError = error.message.includes('Cannot delete') || error.message.includes('exists') || error.message.includes('required') || error.message.includes('Cannot reduce') || error.message.includes('Cannot edit');
+        if (!isValidationError) {
+            console.error('updatePurchase error:', error);
+        }
+        res.status(isValidationError ? 400 : 500).json({ 
+            success: false, 
+            message: error.message || 'Internal server error' 
+        });
+    }
+};
+
 const recordPayment = async (req, res) => {
     const { outlet_id } = req.user;
     const { purchase_id, amount, payment_method, notes } = req.body;
@@ -320,7 +680,8 @@ const getVendorLedger = async (req, res) => {
 
     try {
         const vendor = await prisma.vendor.findFirst({
-            where: { id: parseInt(id), outlet_id }
+            where: { id: parseInt(id), outlet_id },
+            include: { returns: true }
         });
 
         if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found' });
@@ -358,6 +719,16 @@ const getVendorLedger = async (req, res) => {
                 debit: 0,
                 credit: py.amount, // Balance Decrease
                 notes: py.notes
+            })),
+            ...(vendor.returns || []).map(r => ({
+                id: r.id,
+                type: 'Return',
+                reference: r.return_number,
+                date: r.return_date,
+                amount: r.total_amount,
+                debit: 0,
+                credit: r.total_amount, // Balance Decrease
+                notes: r.notes
             }))
         ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
@@ -388,7 +759,13 @@ const getPurchases = async (req, res) => {
     try {
         const purchases = await prisma.vendorPurchase.findMany({
             where: { outlet_id },
-            include: { items: true, vendor: true },
+            include: { 
+                items: true, 
+                vendor: true,
+                returns: {
+                    include: { items: true }
+                }
+            },
             orderBy: { created_at: 'desc' }
         });
         res.json({ success: true, purchases });
@@ -413,6 +790,32 @@ const getPurchaseById = async (req, res) => {
     } catch (error) {
         console.error('getPurchaseById error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getPurchaseHistory = async (req, res) => {
+    const { id } = req.params;
+    const { outlet_id } = req.user;
+
+    try {
+        const purchase = await prisma.vendorPurchase.findUnique({
+            where: { id: parseInt(id) }
+        });
+
+        if (!purchase || purchase.outlet_id !== outlet_id) {
+            return res.status(404).json({ success: false, message: 'Purchase not found.' });
+        }
+
+        const history = await prisma.vendorPurchaseEditHistory.findMany({
+            where: { purchase_id: parseInt(id) },
+            include: { user: { select: { full_name: true, username: true } } },
+            orderBy: { edited_at: 'desc' }
+        });
+
+        res.json({ success: true, history });
+    } catch (error) {
+        console.error('getPurchaseHistory error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
     }
 };
 
@@ -561,6 +964,167 @@ const deletePurchase = async (req, res) => {
     }
 };
 
+// --- Purchase Returns ---
+
+const createPurchaseReturn = async (req, res) => {
+    const { outlet_id } = req.user;
+    const { purchase_id, vendor_id, return_date, notes, items } = req.body;
+
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Unauthorized' });
+    if (!items || !items.length) return res.status(400).json({ success: false, message: 'Items are required.' });
+
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const return_number = await generateReturnNumber(tx);
+            
+            // 1. Resolve Vendor
+            let finalVendorId = parseInt(vendor_id);
+            const vendor = await tx.vendor.findUnique({ where: { id: finalVendorId } });
+            if (!vendor) throw new Error('Vendor not found.');
+
+            let totalReturnAmount = 0;
+            const returnItemsData = [];
+
+            for (const item of items) {
+                const qty = parseInt(item.quantity) || 1;
+                const unitPrice = parseFloat(item.unit_price) || 0;
+                const totalPrice = qty * unitPrice;
+                totalReturnAmount += totalPrice;
+
+                returnItemsData.push({
+                    purchase_item_id: item.purchase_item_id ? parseInt(item.purchase_item_id) : null,
+                    product_name: item.product_name,
+                    category: item.category,
+                    color_variant: item.color_variant,
+                    imei_serial: item.imei_serial ? item.imei_serial.trim() : null,
+                    quantity: qty,
+                    unit_price: unitPrice,
+                    total_price: totalPrice,
+                    reason: item.reason || 'Not specified'
+                });
+
+                // --- STOCK ADJUSTMENT ---
+                // Find item in inventory
+                const inventoryItem = await tx.outletInventory.findFirst({
+                    where: {
+                        outlet_id,
+                        product_name: item.product_name,
+                        imei_serial: item.imei_serial ? item.imei_serial.trim() : null,
+                        OR: [
+                            { color_variant: item.color_variant || null },
+                            { color_variant: item.color_variant || "" }
+                        ]
+                    }
+                });
+
+                if (!inventoryItem) {
+                    throw new Error(`Item ${item.product_name} not found in inventory.`);
+                }
+
+                if (inventoryItem.quantity < qty) {
+                    throw new Error(`Not enough stock for ${item.product_name}. Available: ${inventoryItem.quantity}`);
+                }
+
+                // Check if IMEI is sold/assigned
+                if (item.imei_serial) {
+                    if (inventoryItem.status !== 'In Stock') {
+                        throw new Error(`Item with IMEI ${item.imei_serial} is ${inventoryItem.status} and cannot be returned.`);
+                    }
+                }
+
+                // Update or Delete from Inventory
+                const newQty = inventoryItem.quantity - qty;
+                if (newQty <= 0) {
+                    await tx.outletInventory.delete({ where: { id: inventoryItem.id } });
+                } else {
+                    await tx.outletInventory.update({
+                        where: { id: inventoryItem.id },
+                        data: { quantity: newQty }
+                    });
+                }
+            }
+
+            // Create Return Record
+            const purchaseReturn = await tx.vendorPurchaseReturn.create({
+                data: {
+                    outlet_id,
+                    return_number,
+                    purchase_id: purchase_id ? parseInt(purchase_id) : null,
+                    vendor_id: finalVendorId,
+                    vendor_name: vendor.name,
+                    notes,
+                    total_amount: totalReturnAmount,
+                    return_date: return_date ? new Date(return_date) : new Date(),
+                    items: {
+                        create: returnItemsData
+                    }
+                },
+                include: { items: true }
+            });
+
+            // Update Vendor Balance (Return reduces what we owe)
+            await tx.vendor.update({
+                where: { id: finalVendorId },
+                data: { balance: { decrement: totalReturnAmount } }
+            });
+
+            // If linked to a purchase, adjust its balance too
+            if (purchase_id) {
+                const purchase = await tx.vendorPurchase.findUnique({ where: { id: parseInt(purchase_id) } });
+                if (purchase) {
+                    const newBalance = Math.max(0, purchase.balance - totalReturnAmount);
+                    let newStatus = purchase.status;
+                    if (newBalance <= 0 && purchase.paid_amount > 0) newStatus = 'Paid';
+                    else if (newBalance <= 0) newStatus = 'Unpaid'; // Technically should be closed but balanced
+
+                    await tx.vendorPurchase.update({
+                        where: { id: purchase.id },
+                        data: { 
+                            balance: newBalance,
+                            status: newStatus
+                        }
+                    });
+                }
+            }
+
+            return purchaseReturn;
+        });
+
+        await logAction(
+            req, 
+            'VENDOR_PURCHASE_RETURN', 
+            `Recorded return ${result.return_number} to ${result.vendor_name} for PKR ${result.total_amount}.`,
+            result.id,
+            'VendorPurchaseReturn'
+        );
+
+        res.status(201).json({ success: true, purchaseReturn: result });
+    } catch (error) {
+        console.error('createPurchaseReturn error:', error);
+        res.status(400).json({ success: false, message: error.message || 'Internal server error' });
+    }
+};
+
+const getPurchaseReturns = async (req, res) => {
+    const { outlet_id } = req.user;
+    const { vendor_id } = req.query;
+
+    try {
+        const where = { outlet_id };
+        if (vendor_id) where.vendor_id = parseInt(vendor_id);
+
+        const returns = await prisma.vendorPurchaseReturn.findMany({
+            where,
+            include: { items: true, vendor: true, purchase: true },
+            orderBy: { return_date: 'desc' }
+        });
+        res.json({ success: true, returns });
+    } catch (error) {
+        console.error('getPurchaseReturns error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getVendors,
     createVendor,
@@ -568,9 +1132,13 @@ module.exports = {
     createPurchase,
     getPurchases,
     getPurchaseById,
+    updatePurchase,
+    getPurchaseHistory,
     recordPayment,
     getVendorSummary,
     getPayments,
     deletePurchase,
-    getVendorLedger
+    getVendorLedger,
+    createPurchaseReturn,
+    getPurchaseReturns
 };

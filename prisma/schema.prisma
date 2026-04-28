@@ -75,6 +75,7 @@ model User {
   return_exchanges               ReturnExchange[]          @relation("OfficerReturnExchange")
   security_logs                  SecurityLog[]
   verification_edit_history      VerificationEditHistory[] @relation("user_edits")
+  vendor_purchase_edits          VendorPurchaseEditHistory[] @relation("vendor_purchase_edits")
   collected_payments             OrderPayment[]            @relation("PaymentCollector")
 
   @@index([role_id])
@@ -221,6 +222,7 @@ model Outlet {
   security_logs    SecurityLog[]
   vendorPayments   VendorPayment[]
   vendorPurchases  VendorPurchase[]
+  vendorPurchaseReturns VendorPurchaseReturn[]
   vendors          Vendor[]
   auto_assignment_config Json?
 
@@ -292,6 +294,7 @@ model Vendor {
   updated_at DateTime         @updatedAt
   payments   VendorPayment[]
   purchases  VendorPurchase[]
+  returns    VendorPurchaseReturn[]
   outlet     Outlet           @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
 
   @@index([outlet_id])
@@ -316,8 +319,10 @@ model VendorPurchase {
   vendor_id      Int?
   payments       VendorPayment[]
   items          VendorPurchaseItem[]
+  edit_histories VendorPurchaseEditHistory[]
   outlet         Outlet               @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   vendor         Vendor?              @relation(fields: [vendor_id], references: [id])
+  returns        VendorPurchaseReturn[]
 
   @@index([outlet_id])
   @@index([vendor_id])
@@ -325,6 +330,22 @@ model VendorPurchase {
   @@index([status])
   @@index([created_at])
   @@map("vendor_purchases")
+}
+
+model VendorPurchaseEditHistory {
+  id              Int            @id @default(autoincrement())
+  purchase_id     Int
+  edited_by_id    Int?
+  edited_at       DateTime       @default(now())
+  previous_data   Json
+  new_data        Json
+  changes_summary String?        @db.Text
+  purchase        VendorPurchase @relation(fields: [purchase_id], references: [id], onDelete: Cascade)
+  user            User?          @relation("vendor_purchase_edits", fields: [edited_by_id], references: [id])
+  
+  @@index([purchase_id])
+  @@index([edited_by_id])
+  @@map("vendor_purchase_edit_histories")
 }
 
 model VendorPurchaseItem {
@@ -341,6 +362,49 @@ model VendorPurchaseItem {
 
   @@index([purchase_id])
   @@map("vendor_purchase_items")
+}
+
+model VendorPurchaseReturn {
+  id              Int                      @id @default(autoincrement())
+  outlet_id       Int
+  return_number   String                   @unique
+  purchase_id     Int?
+  vendor_id       Int
+  vendor_name     String
+  return_date     DateTime                 @default(now())
+  total_amount    Float                    @default(0)
+  notes           String?                  @db.Text
+  created_at      DateTime                 @default(now())
+  updated_at      DateTime                 @updatedAt
+  
+  outlet          Outlet                   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  purchase        VendorPurchase?          @relation(fields: [purchase_id], references: [id])
+  vendor          Vendor                   @relation(fields: [vendor_id], references: [id], onDelete: Cascade)
+  items           VendorPurchaseReturnItem[]
+
+  @@index([outlet_id])
+  @@index([vendor_id])
+  @@index([purchase_id])
+  @@map("vendor_purchase_returns")
+}
+
+model VendorPurchaseReturnItem {
+  id                Int                  @id @default(autoincrement())
+  return_id         Int
+  purchase_item_id  Int?
+  product_name      String
+  category          String?
+  color_variant     String?
+  imei_serial       String?
+  quantity          Int
+  unit_price        Float
+  total_price       Float
+  reason            String?              @db.Text
+  
+  return            VendorPurchaseReturn @relation(fields: [return_id], references: [id], onDelete: Cascade)
+
+  @@index([return_id])
+  @@map("vendor_purchase_return_items")
 }
 
 model VendorPayment {
