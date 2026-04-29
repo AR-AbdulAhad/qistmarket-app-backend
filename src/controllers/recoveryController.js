@@ -4,10 +4,12 @@ const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const {
   sendOTP,
   sendInstallmentPaymentReceipt,
+  sendPartialInstallmentPaymentReceipt,
   sendNextInstallmentReminder
 } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
 const { getPKTDate } = require('../utils/dateUtils');
+const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
@@ -284,85 +286,19 @@ const getRecoveryCustomers = async (req, res) => {
       const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name || null;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      // ── Advance: from ledger row month=0, fallback to CashInHand ───────
-      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
-      let hasPaidAdvance = !!cashInHand;
-      let advancePaidAt = cashInHand?.created_at || null;
-      let advancePaymentMethod = cashInHand?.payment_method || null;
-
       // ── Plan info: Delivery.selected_plan se ──────────────────
       let selectedPlan = delivery?.selected_plan || null;
       if (typeof selectedPlan === 'string') {
         try { selectedPlan = JSON.parse(selectedPlan); } catch { selectedPlan = null; }
       }
 
-      // ── Installment Ledger: month=0 is Advance, month>0 are installments ──
-      let installmentLedger = [];
+      // ── Use normalized ledger for consistent financial calculations ──
+      const normalized = getNormalizedLedger(installmentLedgerModel?.ledger_rows);
+      const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
 
-      if (installmentLedgerModel?.ledger_rows) {
-        const allLedgerRows = Array.isArray(installmentLedgerModel.ledger_rows)
-          ? installmentLedgerModel.ledger_rows
-          : [];
-
-        // Extract advance from month 0 row
-        const advanceLedgerRow = allLedgerRows.find(r => r.month === 0);
-        if (advanceLedgerRow) {
-          advanceAmount = Number(advanceLedgerRow.amount || 0);
-          hasPaidAdvance = advanceLedgerRow.status === 'paid';
-          advancePaidAt = advanceLedgerRow.paid_at || advanceLedgerRow.paidAt || null;
-          advancePaymentMethod = advanceLedgerRow.payment_method || advanceLedgerRow.paymentMethod || 'Cash';
-        }
-
-        // Map only month > 0 rows as installments
-        installmentLedger = allLedgerRows
-          .filter(r => r.month > 0)
-          .map((row) => {
-            const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
-            const rowStatus = row.status || 'pending';
-            const isPaid = rowStatus === 'paid';
-            return {
-              monthNumber: row.month,
-              label: row.label || `Month ${row.month}`,
-              dueDate: row.due_date || row.dueDate || null,
-              dueAmount: rowDueAmount,
-              paidAmount: isPaid ? rowDueAmount : 0,
-              remainingAmount: isPaid ? 0 : rowDueAmount,
-              status: rowStatus,
-              paidAt: row.paid_at || row.paidAt || null,
-              paymentMethod: row.payment_method || row.paymentMethod || null,
-              arrears: row.arrears || 0,
-            };
-          });
-      }
-
-      const advancePayment = {
-        amount: advanceAmount,
-        paid: hasPaidAdvance,
-        paidAt: advancePaidAt,
-        paymentMethod: advancePaymentMethod,
-        status: hasPaidAdvance ? 'paid' : 'pending',
-      };
-
-
-      // Derive monthly/total from actual rows for display
-      const monthlyAmount = installmentLedger[0]?.dueAmount
-        || Number(selectedPlan?.monthly_amount || selectedPlan?.monthlyAmount || 0);
-      const totalMonths = installmentLedger.length
-        || Number(selectedPlan?.months || selectedPlan?.totalMonths || 0);
-
-      const paidInstallments = installmentLedger.filter((r) => r.status === 'paid').length;
-      const pendingInstallments = installmentLedger.filter((r) => r.status !== 'paid').length;
-
-      // ── Financial Summary ──────────────────────────────────────
-      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-      const totalInstallmentPaid = installmentLedger
-        .filter((r) => r.status === 'paid')
-        .reduce((sum, r) => sum + r.dueAmount, 0);
-      const totalInstallmentRemaining = Math.max(0, totalInstallmentDue - totalInstallmentPaid);
-
-      const grandTotalDue = advanceAmount + totalInstallmentDue;
-      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
-      const grandTotalRemaining = Math.max(0, grandTotalDue - grandTotalPaid);
+      const advanceAmount = advancePayment.amount;
+      const monthlyAmount = installmentLedger[0]?.dueAmount || Number(selectedPlan?.monthly_amount || selectedPlan?.monthlyAmount || 0);
+      const totalMonths = installmentLedger.length || Number(selectedPlan?.months || selectedPlan?.totalMonths || 0);
 
       group.orders.push({
         id: order.id,
@@ -382,25 +318,14 @@ const getRecoveryCustomers = async (req, res) => {
           advance_amount: advanceAmount,
           monthly_amount: monthlyAmount,
           months: totalMonths,
-          total_plan_value: grandTotalDue,
+          total_plan_value: summary.grandTotalDue,
         },
 
         ledger: {
           advance_payment: advancePayment,
           installment_ledger: installmentLedger,
           ledger_token: installmentLedgerModel?.short_id || null,
-          summary: {
-            totalInstallmentDue,
-            totalInstallmentPaid,
-            totalInstallmentRemaining,
-            grandTotalDue,
-            grandTotalPaid,
-            grandTotalRemaining,
-            paidInstallments,
-            pendingInstallments,
-            installmentsStarted: isDelivered && totalMonths > 0,
-            firstInstallmentDate: installmentLedger[0]?.dueDate ?? null,
-          },
+          summary: summary,
         },
       });
     }
@@ -465,11 +390,10 @@ const getDueOverdueInstallments = async (req, res) => {
     const now = new Date();
 
     for (const order of orders) {
-      if (!order.installment_ledger) continue;
-
-      const rows = Array.isArray(order.installment_ledger.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+      const rows = normalizeLedger(order.installment_ledger.ledger_rows);
 
       for (const row of rows) {
+        if (row.month === 0) continue;
         const dueDate = new Date(row.due_date || row.dueDate);
         if (dueDate < now && row.status !== 'paid') {
           overdue.push({
@@ -480,7 +404,9 @@ const getDueOverdueInstallments = async (req, res) => {
             address: order.address,
             monthNumber: row.month,
             dueDate: dueDate.toISOString().split('T')[0],
-            amount: row.amount || row.dueAmount,
+            amount: row.dueAmount,
+            paidAmount: row.paidAmount,
+            remainingAmount: row.remainingAmount
           });
         }
       }
@@ -682,64 +608,39 @@ const submitInstallment = async (req, res) => {
     const ledger = order.installment_ledger;
     if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
 
-    let rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+    let rows = normalizeLedger(Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : []);
     const rowIndex = rows.findIndex(r => (r.month == month_number || r.monthNumber == month_number));
 
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
     const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
-    const paidAmount = amount !== undefined ? parseFloat(amount) : dueAmount;
+    const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
+    const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
+    const totalPaid = existingPaid + payingNow;
 
-    // Reject overpayment for now
-    // if (paidAmount > dueAmount) {
-    //   return res.status(400).json({ success: false, message: 'Paid amount cannot exceed due amount' });
-    // }
-
-    const remaining = dueAmount - paidAmount;
-
-    // Fetch real product name from inventory using IMEI
-    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
-    let finalProductName = order.product_name;
-
-    if (imeiSerial) {
-      const invInfo = await prisma.outletInventory.findFirst({
-        where: { imei_serial: imeiSerial },
-        select: { product_name: true }
-      });
-      if (invInfo?.product_name) {
-        finalProductName = invInfo.product_name;
-      }
+    if (totalPaid > dueAmount + 1) { // 1 PKR margin for rounding
+      return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
     }
+
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
+    const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
 
     // DB Transaction
     await prisma.$transaction(async (tx) => {
-      rows[rowIndex].amount = paidAmount;
-      rows[rowIndex].status = 'paid';
+      rows[rowIndex].paid_amount = totalPaid;
       rows[rowIndex].paid_at = new Date();
       rows[rowIndex].payment_method = payment_method;
       rows[rowIndex].feedback = feedback;
       rows[rowIndex].collected_by = officerId;
       rows[rowIndex].fuel_charges = parseFloat(fuelCharges || 0);
 
-      // Carry forward the remaining balance to the next month
-      if (remaining > 0) {
-        if (rows[rowIndex + 1]) {
-          rows[rowIndex + 1].amount = parseFloat(rows[rowIndex + 1].amount || rows[rowIndex + 1].dueAmount || 0) + remaining;
-          rows[rowIndex + 1].arrears = (rows[rowIndex + 1].arrears || 0) + remaining;
-        } else {
-          // If this was the last month, append a new row for the balance
-          const nextMonthDate = new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate || new Date());
-          nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
-
-          rows.push({
-            month: parseInt(month_number) + 1,
-            due_date: nextMonthDate.toISOString().split('T')[0],
-            amount: remaining,
-            arrears: remaining,
-            status: 'pending'
-          });
-        }
+      if (totalPaid >= dueAmount) {
+        rows[rowIndex].status = 'paid';
+      } else if (totalPaid > 0) {
+        rows[rowIndex].status = 'partial';
+      } else {
+        rows[rowIndex].status = 'pending';
       }
 
       await tx.installmentLedger.update({
@@ -755,7 +656,7 @@ const submitInstallment = async (req, res) => {
           data: {
             officer_id: officerId,
             order_id: order.id,
-            amount: paidAmount,
+            amount: payingNow,
             status: 'pending',
             customer_name: order.verification?.purchaser?.name || order.customer_name,
             product_name: finalProductName,
@@ -779,7 +680,7 @@ const submitInstallment = async (req, res) => {
           customer_feedback: feedback,
           visit_notes: visit_notes,
           payment_collected: true,
-          amount_collected: paidAmount,
+          amount_collected: payingNow,
         }
       });
 
@@ -817,13 +718,24 @@ const submitInstallment = async (req, res) => {
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
 
-    sendInstallmentPaymentReceipt(phone, {
-      customerName,
-      amount: paidAmount,
-      productName: finalProductName,
-      orderRef: order.order_ref,
-      date: new Date().toLocaleDateString('en-PK')
-    }).catch(err => console.error('Wati Receipt Error:', err));
+    if (totalPaid >= dueAmount) {
+      sendInstallmentPaymentReceipt(phone, {
+        customerName,
+        amount: payingNow,
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        date: new Date().toLocaleDateString('en-PK')
+      }).catch(err => console.error('Wati Receipt Error:', err));
+    } else {
+      sendPartialInstallmentPaymentReceipt(phone, {
+        customerName,
+        paidAmount: payingNow,
+        remainingAmount: Math.max(0, dueAmount - totalPaid),
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
+      }).catch(err => console.error('Wati Partial Receipt Error:', err));
+    }
 
     const nextRow = rows[rowIndex + 1];
     if (nextRow) {

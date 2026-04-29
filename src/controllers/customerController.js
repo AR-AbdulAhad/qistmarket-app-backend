@@ -1,5 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { syncBlacklistStatus } = require('../utils/blacklistUtils');
+const { getNormalizedLedger } = require('../utils/ledgerUtils');
 
 const getCustomers = async (req, res) => {
   const {
@@ -82,6 +83,7 @@ const getCustomers = async (req, res) => {
             installment_ledger: true,
           },
         },
+        installment_ledger: true,
         cash_in_hand: {
           orderBy: { created_at: 'desc' },
           take: 1,
@@ -165,87 +167,27 @@ const getCustomers = async (req, res) => {
       const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      // ── Advance: CashInHand.amount ─────────────────────────────
-      // Default from cashInHand (fallback if no ledger row 0 exists)
-      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
-      let hasPaidAdvance = !!cashInHand;
-      let advancePaidAt = cashInHand?.created_at || null;
-      let advancePaymentMethod = cashInHand?.payment_method || null;
-
       // ── Plan info: Delivery.selected_plan se ──────────────────
       let selectedPlan = delivery?.selected_plan || null;
       if (typeof selectedPlan === 'string') {
         try { selectedPlan = JSON.parse(selectedPlan); } catch { selectedPlan = null; }
       }
 
-      // ── Installment Ledger: parse ledger_rows ─────────────────
-      // month === 0  →  Advance Payment row
-      // month  > 0  →  Monthly installment rows
-      let installmentLedger = [];
+      // ── Use normalizeLedger for consistent financial calculations ──
+      const ledgerModel = order.installment_ledger || order.delivery?.installment_ledger;
+      const normalized = getNormalizedLedger(ledgerModel?.ledger_rows);
+      const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
 
-      if (installmentLedgerModel?.ledger_rows) {
-        const allLedgerRows = Array.isArray(installmentLedgerModel.ledger_rows)
-          ? installmentLedgerModel.ledger_rows
-          : [];
+      const advAmountVal = advancePayment.amount || 0;
+      const hasPaidAdvance = advancePayment.paid;
+      const grandTotalPaid = summary.grandTotalPaid;
+      const grandTotalRemaining = summary.grandTotalRemaining;
+      const grandTotalDue = summary.grandTotalDue;
 
-        // Extract advance from month 0 row
-        const advanceLedgerRow = allLedgerRows.find(r => r.month === 0);
-        if (advanceLedgerRow) {
-          advanceAmount = Number(advanceLedgerRow.amount || 0);
-          hasPaidAdvance = advanceLedgerRow.status === 'paid';
-          advancePaidAt = advanceLedgerRow.paid_at || advanceLedgerRow.paidAt || null;
-          advancePaymentMethod = advanceLedgerRow.payment_method || advanceLedgerRow.paymentMethod || 'Cash';
-        }
-
-        // Map only month > 0 rows as installments
-        installmentLedger = allLedgerRows
-          .filter(r => r.month > 0)
-          .map((row) => {
-            const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
-            const rowStatus = row.status || 'pending';
-            const isPaid = rowStatus === 'paid';
-            return {
-              monthNumber: row.month,
-              label: row.label || `Month ${row.month}`,
-              dueDate: row.due_date || row.dueDate || null,
-              dueAmount: rowDueAmount,
-              paidAmount: isPaid ? rowDueAmount : 0,
-              remainingAmount: isPaid ? 0 : rowDueAmount,
-              status: rowStatus,
-              paidAt: row.paid_at || row.paidAt || null,
-              paymentMethod: row.payment_method || row.paymentMethod || null,
-              arrears: row.arrears || 0,
-            };
-          });
-      }
-
-      const advancePayment = {
-        amount: advanceAmount,
-        paid: hasPaidAdvance,
-        paidAt: advancePaidAt,
-        paymentMethod: advancePaymentMethod,
-        status: hasPaidAdvance ? 'paid' : 'pending',
-      };
-
-      // Use actual row amounts (not plan formula) for accurate totals
       const monthlyAmount = installmentLedger[0]?.dueAmount
         || Number(selectedPlan?.monthly_amount || selectedPlan?.monthlyAmount || 0);
       const totalMonths = installmentLedger.length
         || Number(selectedPlan?.months || selectedPlan?.totalMonths || 0);
-
-      const paidInstallments = installmentLedger.filter((r) => r.status === 'paid').length;
-      const pendingInstallments = installmentLedger.filter((r) => r.status !== 'paid').length;
-
-      // ── Financial Summary ──────────────────────────────────────
-      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-      const totalInstallmentPaid = installmentLedger
-        .filter((r) => r.status === 'paid')
-        .reduce((sum, r) => sum + r.dueAmount, 0);
-      const totalInstallmentRemaining = Math.max(0, totalInstallmentDue - totalInstallmentPaid);
-
-      const grandTotalDue = advanceAmount + totalInstallmentDue;
-      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
-      const grandTotalRemaining = Math.max(0, grandTotalDue - grandTotalPaid);
 
 
       group.orders.push({
@@ -266,7 +208,7 @@ const getCustomers = async (req, res) => {
 
         plan: {
           selected_plan: selectedPlan,
-          advance_amount: advanceAmount,
+          advance_amount: advAmountVal,
           monthly_amount: monthlyAmount,
           months: totalMonths,
           total_plan_value: grandTotalDue,
@@ -276,24 +218,13 @@ const getCustomers = async (req, res) => {
           advance_payment: advancePayment,
           installment_ledger: installmentLedger,
           ledger_token: installmentLedgerModel?.short_id || null,
-          summary: {
-            totalInstallmentDue,
-            totalInstallmentPaid,
-            totalInstallmentRemaining,
-            grandTotalDue,
-            grandTotalPaid,
-            grandTotalRemaining,
-            paidInstallments,
-            pendingInstallments,
-            installmentsStarted: totalMonths > 0,
-            firstInstallmentDate: installmentLedger[0]?.dueDate ?? null,
-          },
+          summary: summary,
         },
       });
 
       // ── Customer ledger summary update ─────────────────────────
       group.ledgerSummary.totalOrders += 1;
-      group.ledgerSummary.totalAdvanceReceived += advanceAmount;
+      group.ledgerSummary.totalAdvanceReceived += advAmountVal;
       group.ledgerSummary.totalPaid += grandTotalPaid;
       group.ledgerSummary.totalRemaining += grandTotalRemaining;
     }
@@ -362,6 +293,7 @@ const getBlacklistedCustomers = async (req, res) => {
             installment_ledger: true,
           },
         },
+        installment_ledger: true,
         cash_in_hand: {
           orderBy: { created_at: 'desc' },
           take: 1,
@@ -436,41 +368,14 @@ const getBlacklistedCustomers = async (req, res) => {
       const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
-      let hasPaidAdvance = !!cashInHand;
-      let installmentLedger = [];
+      const normalized = getNormalizedLedger(installmentLedgerModel?.ledger_rows);
+      const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
 
-      if (installmentLedgerModel?.ledger_rows) {
-        const allLedgerRows = Array.isArray(installmentLedgerModel.ledger_rows)
-          ? installmentLedgerModel.ledger_rows
-          : (typeof installmentLedgerModel.ledger_rows === 'string' ? JSON.parse(installmentLedgerModel.ledger_rows) : []);
-
-        const advanceRow = allLedgerRows.find(r => r.month === 0);
-        if (advanceRow) {
-          advanceAmount = Number(advanceRow.amount || 0);
-          hasPaidAdvance = advanceRow.status === 'paid';
-        }
-
-        installmentLedger = allLedgerRows
-          .filter(r => r.month > 0)
-          .map((row) => {
-            const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
-            const isPaid = row.status === 'paid';
-            return {
-              monthNumber: row.month,
-              label: row.label || `Month ${row.month}`,
-              dueDate: row.due_date || row.dueDate || null,
-              dueAmount: rowDueAmount,
-              paidAmount: isPaid ? rowDueAmount : 0,
-              status: row.status,
-            };
-          });
-      }
-
-      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-      const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
-      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
-      const grandTotalRemaining = Math.max(0, (advanceAmount + totalInstallmentDue) - grandTotalPaid);
+      const advanceAmount = advancePayment.amount || 0;
+      const hasPaidAdvance = advancePayment.paid;
+      const grandTotalPaid = summary.grandTotalPaid;
+      const grandTotalRemaining = summary.grandTotalRemaining;
+      const grandTotalDue = summary.grandTotalDue;
 
       group.orders.push({
         order_id: order.id,
@@ -484,13 +389,7 @@ const getBlacklistedCustomers = async (req, res) => {
           color_variant: colorVariant,
         },
         ledger: {
-          summary: {
-            grandTotalDue: advanceAmount + totalInstallmentDue,
-            grandTotalPaid,
-            grandTotalRemaining,
-            paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
-            totalInstallments: installmentLedger.length,
-          },
+          summary: summary,
           installment_ledger: installmentLedger,
         },
       });
@@ -639,41 +538,13 @@ const getClearedCustomers = async (req, res) => {
       const productName = invInfo?.product_name || cashInHand?.product_name || order.product_name;
       const colorVariant = invInfo?.color_variant || cashInHand?.color_variant || null;
 
-      let advanceAmount = cashInHand?.amount != null ? Number(cashInHand.amount) : 0;
-      let hasPaidAdvance = !!cashInHand;
-      let installmentLedger = [];
+      const normalized = getNormalizedLedger(installmentLedgerModel?.ledger_rows);
+      const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
 
-      if (installmentLedgerModel?.ledger_rows) {
-        const allLedgerRows = Array.isArray(installmentLedgerModel.ledger_rows)
-          ? installmentLedgerModel.ledger_rows
-          : (typeof installmentLedgerModel.ledger_rows === 'string' ? JSON.parse(installmentLedgerModel.ledger_rows) : []);
-
-        const advanceRow = allLedgerRows.find(r => r.month === 0);
-        if (advanceRow) {
-          advanceAmount = Number(advanceRow.amount || 0);
-          hasPaidAdvance = advanceRow.status === 'paid';
-        }
-
-        installmentLedger = allLedgerRows
-          .filter(r => r.month > 0)
-          .map((row) => {
-            const rowDueAmount = Number(row.amount || row.dueAmount || row.due_amount || 0);
-            const isPaid = row.status === 'paid' || row.status === 'Paid';
-            return {
-              monthNumber: row.month,
-              label: row.label || `Month ${row.month}`,
-              dueDate: row.due_date || row.dueDate || null,
-              dueAmount: rowDueAmount,
-              paidAmount: isPaid ? rowDueAmount : 0,
-              status: row.status,
-            };
-          });
-      }
-
-      const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-      const totalInstallmentPaid = installmentLedger.filter(r => (r.status === 'paid' || r.status === 'Paid')).reduce((sum, r) => sum + r.dueAmount, 0);
-      const grandTotalPaid = (hasPaidAdvance ? advanceAmount : 0) + totalInstallmentPaid;
-      const grandTotalRemaining = Math.max(0, (advanceAmount + totalInstallmentDue) - grandTotalPaid);
+      const advanceAmount = advancePayment.amount || 0;
+      const hasPaidAdvance = advancePayment.paid;
+      const grandTotalPaid = summary.grandTotalPaid;
+      const grandTotalRemaining = summary.grandTotalRemaining;
 
       group.orders.push({
         order_id: order.id,
@@ -687,13 +558,7 @@ const getClearedCustomers = async (req, res) => {
           color_variant: colorVariant,
         },
         ledger: {
-          summary: {
-            grandTotalDue: advanceAmount + totalInstallmentDue,
-            grandTotalPaid,
-            grandTotalRemaining,
-            paidInstallments: installmentLedger.filter(r => (r.status === 'paid' || r.status === 'Paid')).length,
-            totalInstallments: installmentLedger.length,
-          },
+          summary: summary,
           installment_ledger: installmentLedger,
         },
       });
@@ -742,6 +607,7 @@ const getCustomerLedger = async (req, res) => {
             installment_ledger: true,
           },
         },
+        installment_ledger: true,
         cash_in_hand: {
           take: 1,
           orderBy: { created_at: 'desc' },
@@ -771,37 +637,20 @@ const getCustomerLedger = async (req, res) => {
     }
 
     const purchaser = order.verification?.purchaser || null;
-    const delivery = order.delivery;
-    const ledgerModel = delivery?.installment_ledger || null;
+    const ledgerModel = order.installment_ledger || order.delivery?.installment_ledger;
     const cashRecord = order.cash_in_hand?.[0] || null;
 
-    let plan = delivery?.selected_plan || null;
+    let plan = order.delivery?.selected_plan || null;
     if (typeof plan === 'string') {
       try { plan = JSON.parse(plan); } catch (e) { plan = null; }
     }
 
-    const allRows = Array.isArray(ledgerModel?.ledger_rows) ? ledgerModel.ledger_rows : [];
-    const advanceLedgerRow = allRows.find(r => r.month === 0);
-    const installmentOnlyRows = allRows.filter(r => r.month > 0);
+    const normalized = getNormalizedLedger(ledgerModel?.ledger_rows);
+    const { advance_payment, installment_ledger: installmentLedger, summary } = normalized;
 
-    const installmentLedger = installmentOnlyRows.map((row) => ({
-      monthNumber: row.month,
-      label: row.label || `Month ${row.month}`,
-      dueDate: row.due_date || row.dueDate || null,
-      dueAmount: Number(row.amount || row.dueAmount || 0),
-      status: row.status || 'pending',
-      paidAt: row.paid_at || row.paidAt || null,
-      paymentMethod: row.payment_method || row.paymentMethod || null,
-      arrears: row.arrears || 0,
-    }));
-
-    const advanceAmount = advanceLedgerRow?.amount || cashRecord?.amount || order.advance_amount || 0;
+    const advanceAmount = advance_payment.amount || 0;
     const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
     const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
-
-    const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-    const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
-    const totalArrears = installmentLedger.reduce((sum, r) => sum + (r.arrears || 0), 0);
 
     const formatted = {
       order_id: order.id,
@@ -818,11 +667,11 @@ const getCustomerLedger = async (req, res) => {
         advanceAmount,
         monthlyAmount,
         totalMonths,
-        totalInstallmentDue,
-        totalInstallmentPaid,
-        totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
-        totalArrears,
-        paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
+        totalInstallmentDue: summary.totalInstallmentDue,
+        totalInstallmentPaid: summary.totalInstallmentPaid,
+        totalRemaining: summary.totalInstallmentRemaining,
+        totalArrears: summary.totalArrears || 0,
+        paidInstallments: summary.paidInstallments,
         totalInstallments: installmentLedger.length,
       },
       installmentLedger,

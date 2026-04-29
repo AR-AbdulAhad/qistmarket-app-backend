@@ -3,8 +3,9 @@ const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
-const { sendOTP, sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
+const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 
 
 const createOutlet = async (req, res) => {
@@ -170,12 +171,13 @@ const getDashboardStats = async (req, res) => {
         const calculateLedgerSales = (startDate) => {
             let total = 0;
             outletLedgers.forEach(ledger => {
-                const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+                const rows = normalizeLedger(ledger.ledger_rows);
                 rows.forEach(row => {
-                    if (row.status === 'paid' && row.paid_at) {
+                    const rowPaidAmount = row.paidAmount || 0;
+                    if (rowPaidAmount > 0 && row.paid_at) {
                         const paidDate = new Date(row.paid_at);
                         if (paidDate >= startDate) {
-                            total += Number(row.amount || 0);
+                            total += rowPaidAmount;
                         }
                     }
                 });
@@ -215,29 +217,15 @@ const getDashboardStats = async (req, res) => {
         let ordersWithPendingInstallments = 0;
 
         for (const order of deliveredOrders) {
-            const ledger = order.delivery?.installment_ledger;
-            if (!ledger) continue;
+            const normalized = getNormalizedLedger(order.delivery?.installment_ledger?.ledger_rows);
+            const { summary } = normalized;
 
-            const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
-            const installmentRows = rows.filter(r => r.month > 0);
+            totalInstallmentDue += summary.totalInstallmentDue;
+            totalInstallmentPaid += summary.totalInstallmentPaid;
+            totalArrears += summary.totalArrears;
+            pendingInstallmentCount += summary.pendingInstallments;
 
-            for (const row of installmentRows) {
-                const amount = Number(row.amount || 0);
-                totalInstallmentDue += amount;
-
-                if (row.status === 'paid') {
-                    totalInstallmentPaid += amount;
-                } else {
-                    pendingInstallmentCount += 1;
-                }
-
-                if (row.arrears) {
-                    totalArrears += Number(row.arrears);
-                }
-            }
-
-            // Count orders with at least one pending installment
-            if (installmentRows.some(r => r.status !== 'paid')) {
+            if (summary.pendingInstallments > 0) {
                 ordersWithPendingInstallments += 1;
             }
         }
@@ -909,7 +897,8 @@ const getOutletInstallments = async (req, res) => {
 
             let rows = [];
             try {
-                rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
+                const rowsRaw = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
+                rows = normalizeLedger(rowsRaw);
             } catch (e) { return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null }; }
 
             const installments = rows.filter(r => r.month > 0);
@@ -998,9 +987,11 @@ const getOutletInstallments = async (req, res) => {
             const ledger = order.delivery?.installment_ledger;
             if (!ledger || !ledger.ledger_rows) return;
             try {
-                const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
-                rows.filter(r => r.month > 0 && (r.status === 'paid' || r.status === 'Paid')).forEach(r => {
-                    totalRecovery += Number(r.amount || r.dueAmount || 0);
+                const rowsRaw = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
+                const rows = normalizeLedger(rowsRaw);
+                rows.filter(r => r.month > 0).forEach(r => {
+                    const rowPaidAmount = Number(r.paid_amount || (r.status === 'paid' ? (r.amount || 0) : 0));
+                    totalRecovery += rowPaidAmount;
                 });
             } catch (e) { }
         });
@@ -1039,31 +1030,12 @@ const getOutletInstallments = async (req, res) => {
                 try { plan = JSON.parse(plan); } catch (e) { plan = null; }
             }
 
-            const allRows = Array.isArray(ledgerModel?.ledger_rows) ? ledgerModel.ledger_rows : [];
+            const normalized = getNormalizedLedger(ledgerModel?.ledger_rows);
+            const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
 
-            // month === 0 → Advance Payment row; month > 0 → installment rows
-            const advanceLedgerRow = allRows.find(r => r.month === 0);
-            const installmentOnlyRows = allRows.filter(r => r.month > 0);
-
-            const installmentLedger = installmentOnlyRows.map((row) => ({
-                monthNumber: row.month,
-                label: row.label || `Month ${row.month}`,
-                dueDate: row.due_date || row.dueDate || null,
-                dueAmount: Number(row.amount || row.dueAmount || 0),
-                status: row.status || 'pending',
-                paidAt: row.paid_at || row.paidAt || null,
-                paymentMethod: row.payment_method || row.paymentMethod || null,
-                arrears: row.arrears || 0,
-            }));
-
-            // Calculate summaries from actual row data
-            const advanceAmount = advanceLedgerRow?.amount || cashRecord?.amount || order.advance_amount || 0;
+            const advanceAmount = advancePayment.amount;
             const monthlyAmount = installmentLedger[0]?.dueAmount || plan?.monthly_amount || plan?.monthlyAmount || order.monthly_amount || 0;
             const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
-
-            const totalInstallmentDue = installmentLedger.reduce((sum, r) => sum + r.dueAmount, 0);
-            const totalInstallmentPaid = installmentLedger.filter(r => r.status === 'paid').reduce((sum, r) => sum + r.dueAmount, 0);
-            const totalArrears = installmentLedger.reduce((sum, r) => sum + (r.arrears || 0), 0);
 
             return {
                 order_id: order.id,
@@ -1088,11 +1060,11 @@ const getOutletInstallments = async (req, res) => {
                     advanceAmount,
                     monthlyAmount,
                     totalMonths,
-                    totalInstallmentDue,
-                    totalInstallmentPaid,
-                    totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
-                    totalArrears,
-                    paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
+                    totalInstallmentDue: summary.totalInstallmentDue,
+                    totalInstallmentPaid: summary.totalInstallmentPaid,
+                    totalRemaining: summary.totalInstallmentRemaining,
+                    totalArrears: summary.totalArrears,
+                    paidInstallments: summary.paidInstallments,
                     totalInstallments: installmentLedger.length,
                 },
                 installmentLedger,
@@ -1174,7 +1146,7 @@ const verifyInstallmentPayment = async (req, res) => {
         const ledger = order.installment_ledger;
         if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
 
-        let rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+        let rows = normalizeLedger(Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : []);
         const rowIndex = rows.findIndex(r => (r.month == month_number || r.monthNumber == month_number));
 
         if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
@@ -1182,39 +1154,25 @@ const verifyInstallmentPayment = async (req, res) => {
 
         // Update row
         const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
-        const paidAmount = amount !== undefined ? parseFloat(amount) : dueAmount;
+        const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
+        const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
+        const totalPaid = existingPaid + payingNow;
 
-        // Reject overpayment for now
-        // if (paidAmount > dueAmount) {
-        //     return res.status(400).json({ success: false, message: 'Paid amount cannot exceed due amount' });
-        // }
+        if (totalPaid > dueAmount + 1) {
+            return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
+        }
 
-        const remaining = dueAmount - paidAmount;
-
-        rows[rowIndex].amount = paidAmount;
-        rows[rowIndex].status = 'paid';
+        rows[rowIndex].paid_amount = totalPaid;
         rows[rowIndex].paid_at = new Date();
         rows[rowIndex].payment_method = payment_method;
         rows[rowIndex].feedback = feedback;
 
-        // Carry forward the remaining balance to the next month
-        if (remaining > 0) {
-            if (rows[rowIndex + 1]) {
-                rows[rowIndex + 1].amount = parseFloat(rows[rowIndex + 1].amount || rows[rowIndex + 1].dueAmount || 0) + remaining;
-                rows[rowIndex + 1].arrears = (rows[rowIndex + 1].arrears || 0) + remaining;
-            } else {
-                // If this was the last month, append a new row for the balance
-                const nextMonthDate = new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate || new Date());
-                nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
-
-                rows.push({
-                    month: parseInt(month_number) + 1,
-                    due_date: nextMonthDate.toISOString().split('T')[0],
-                    amount: remaining,
-                    arrears: remaining,
-                    status: 'pending'
-                });
-            }
+        if (totalPaid >= dueAmount) {
+            rows[rowIndex].status = 'paid';
+        } else if (totalPaid > 0) {
+            rows[rowIndex].status = 'partial';
+        } else {
+            rows[rowIndex].status = 'pending';
         }
 
         // Save Ledger
@@ -1226,7 +1184,7 @@ const verifyInstallmentPayment = async (req, res) => {
         // Update Cash Register (Only for Cash payments)
         const isCash = ['cash', 'recovery_cash', 'recovery cash'].includes(payment_method?.toLowerCase() || 'cash');
         if (isCash) {
-            await updateCashRegister(null, outlet_id, 'installments_received', paidAmount, 'add');
+            await updateCashRegister(null, outlet_id, 'installments_received', payingNow, 'add');
         }
 
         // Fetch real product name from inventory using IMEI
@@ -1245,13 +1203,24 @@ const verifyInstallmentPayment = async (req, res) => {
 
         // Send Wati Receipt
         const customerName = order.verification?.purchaser?.name || order.customer_name;
-        sendInstallmentPaymentReceipt(phone, {
-            customerName,
-            amount: paidAmount,
-            productName: finalProductName,
-            orderRef: order.order_ref,
-            date: new Date().toLocaleDateString('en-PK')
-        }).catch(err => console.error('Wati Receipt Error:', err));
+        if (totalPaid >= dueAmount) {
+            sendInstallmentPaymentReceipt(phone, {
+                customerName,
+                amount: payingNow,
+                productName: finalProductName,
+                orderRef: order.order_ref,
+                date: new Date().toLocaleDateString('en-PK')
+            }).catch(err => console.error('Wati Receipt Error:', err));
+        } else {
+            sendPartialInstallmentPaymentReceipt(phone, {
+                customerName,
+                paidAmount: payingNow,
+                remainingAmount: Math.max(0, dueAmount - totalPaid),
+                productName: finalProductName,
+                orderRef: order.order_ref,
+                dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
+            }).catch(err => console.error('Wati Partial Receipt Error:', err));
+        }
 
         // Send Next Month Reminder if exists
         const nextRow = rows[rowIndex + 1];

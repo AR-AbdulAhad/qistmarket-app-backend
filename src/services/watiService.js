@@ -115,10 +115,8 @@ const sendInstallmentLedger = async (phone, {
   return sendTemplate(phone, WATI_LEDGER_TEMPLATE, WATI_LEDGER_BROADCAST, parameters);
 };
 
-// ─── Template 3: Installment Received ──────────────────────────────────────
-// Params: customer_name, amount, product_name, order_ref, date
-const WATI_PAYMENT_RECEIVED_TEMPLATE = process.env.WATI_INSTALLMENT_RECEIVED_TEMPLATE || 'installment_received';
-const WATI_PAYMENT_RECEIVED_BROADCAST = process.env.WATI_INSTALLMENT_RECEIVED_TEMPLATE || 'installment_received';
+const WATI_PAYMENT_RECEIVED_TEMPLATE = process.env.WATI_PAYMENT_RECEIVED_TEMPLATE || 'installment_payment_received';
+const WATI_PAYMENT_RECEIVED_BROADCAST = process.env.WATI_PAYMENT_RECEIVED_TEMPLATE || 'installment_payment_received';
 
 const sendInstallmentPaymentReceipt = async (phone, {
   customerName,
@@ -135,6 +133,29 @@ const sendInstallmentPaymentReceipt = async (phone, {
     { name: '5', value: date || new Date().toDateString() },
   ];
   return sendTemplate(phone, WATI_PAYMENT_RECEIVED_TEMPLATE, WATI_PAYMENT_RECEIVED_BROADCAST, parameters);
+};
+
+// ─── Template 3.1: Partial Installment Received ─────────────────────────────
+const WATI_PARTIAL_PAYMENT_TEMPLATE = process.env.WATI_PARTIAL_PAYMENT_TEMPLATE || 'installment_partial_received';
+const WATI_PARTIAL_PAYMENT_BROADCAST = process.env.WATI_PARTIAL_PAYMENT_TEMPLATE || 'installment_partial_received';
+
+const sendPartialInstallmentPaymentReceipt = async (phone, {
+  customerName,
+  paidAmount,
+  remainingAmount,
+  productName,
+  orderRef,
+  dueDate,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: String(paidAmount || 0) },
+    { name: '3', value: String(remainingAmount || 0) },
+    { name: '4', value: productName || 'N/A' },
+    { name: '5', value: orderRef || 'N/A' },
+    { name: '6', value: dueDate || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_PARTIAL_PAYMENT_TEMPLATE, WATI_PARTIAL_PAYMENT_BROADCAST, parameters);
 };
 
 // ─── Template 4: Next Month Reminder ──────────────────────────────────────
@@ -190,6 +211,7 @@ module.exports = {
   sendDeliveryConfirmation,
   sendInstallmentLedger,
   sendInstallmentPaymentReceipt,
+  sendPartialInstallmentPaymentReceipt,
   sendNextInstallmentReminder,
   sendComplaintReceived,
   sendComplaintResolved,

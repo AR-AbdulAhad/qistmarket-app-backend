@@ -2,8 +2,9 @@ const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const puppeteer = require('puppeteer');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
-const { sendOTP, sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
+const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { logAction } = require('../utils/auditLogger');
 const logoDataURI = '';
 
@@ -21,8 +22,13 @@ const formatDate = (d) => {
 };
 
 const statusBadge = (status) => {
-  const colors = { paid: '#22c55e', pending: '#f59e0b', overdue: '#ef4444' };
-  const color = colors[status] || '#6b7280';
+  const colors = { 
+    paid: '#22c55e', 
+    partial: '#3b82f6', 
+    pending: '#f59e0b', 
+    overdue: '#ef4444' 
+  };
+  const color = colors[status?.toLowerCase()] || '#6b7280';
   return `<span style="background:${color};color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:capitalize;display:inline-block;">${status}</span>`;
 };
 
@@ -104,23 +110,15 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
 
   const deliveryDate = formatDate(delivery?.end_time || ledger.created_at);
 
-  // ── Parse ledger rows: month=0 is Advance, month>0 are Installments ──────
-  const allRows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
-  const advanceRow = allRows.find(r => r.month === 0) || null;
-  const installmentRows = allRows.filter(r => r.month > 0);
+  // ── Use normalized ledger for consistent financial calculations ──
+  const normalized = getNormalizedLedger(ledger.ledger_rows);
+  const { advance_payment: advancePayment, installment_ledger: installmentRows, summary, rows: allRows } = normalized;
 
-  // Advance amount: prefer ledger row (month 0), fallback to cashRecord/plan/order
-  const advanceAmount = advanceRow?.amount
-    || cashRecord?.amount
-    || plan?.advance || plan?.advance_amount || plan?.advancePayment || plan?.advance_payment
-    || order.advance_amount
-    || 0;
-
-  // Stats cover ALL rows (advance + installments) — no double counting
-  const totalAmount = allRows.reduce((s, r) => s + (r.amount || 0), 0);
-  const paidAmount = allRows.filter(r => r.status === 'paid').reduce((s, r) => s + (r.amount || 0), 0);
-  const remainingAmount = totalAmount - paidAmount;
-  const paidInstallmentCount = installmentRows.filter(r => r.status === 'paid').length;
+  const advanceAmount = advancePayment.amount;
+  const totalAmount = summary.grandTotalDue;
+  const totalPaidAmount = summary.grandTotalPaid;
+  const remainingAmount = summary.grandTotalRemaining;
+  const paidInstallmentCount = summary.paidInstallments;
 
   const printBtnHtml = showPrintBtn
     ? `<button class="print-btn no-print" onclick="window.print()">🖨️ PDF Save / Print Karen</button>`
@@ -562,7 +560,7 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       <div class="stat-label">Advance Paid</div>
     </div>
     <div class="stat-item">
-      <div class="stat-value">${formatPKR(paidAmount)}</div>
+      <div class="stat-value">${formatPKR(totalPaidAmount)}</div>
       <div class="stat-label">Total Paid</div>
     </div>
     <div class="stat-item">
@@ -601,7 +599,8 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
           <th>#</th>
           <th>Mahina</th>
           <th>Due Date</th>
-          <th>Amount</th>
+          <th>Amount Due</th>
+          <th>Paid / Remaining</th>
           <th>Status</th>
           <th>Paid On</th>
         </tr>
@@ -611,16 +610,28 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     const isAdvance = row.month === 0;
     const rowLabel = row.label || (isAdvance ? 'Advance Payment' : `Month ${row.month}`);
     const rowNum = isAdvance ? '✦' : row.month;
+    
     // "Next" applies only to regular installment rows
     const priorInstallments = installmentRows.filter(r => r.month < row.month);
     const isNext = !isAdvance && row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
+    
+    const paidText = row.paidAmount > 0 ? formatPKR(row.paidAmount) : '—';
+    const remainingText = row.remainingAmount > 0 ? formatPKR(row.remainingAmount) : '—';
+
     return `<tr class="${isAdvance ? 'advance-row' : ''} ${isNext ? 'current-month' : ''}">
             <td>${rowNum}</td>
-            <td>${rowLabel}${isNext ? ' ⬅ Next' : ''}${row.arrears ? `<br/><small style="color: #ef4444; font-size: 0.6rem;">Included Arrears: ${formatPKR(row.arrears)}</small>` : ''}</td>
+            <td>
+              <div style="font-weight:700;">${rowLabel}${isNext ? ' <span style="color:#3b82f6; font-size: 0.6rem; vertical-align: middle;">⬅ Next</span>' : ''}</div>
+              ${row.arrears ? `<div style="color: #ef4444; font-size: 0.65rem; font-weight: 500;">Arrears: ${formatPKR(row.arrears)}</div>` : ''}
+            </td>
             <td>${formatDate(row.due_date)}</td>
-            <td>${formatPKR(row.amount)}</td>
+            <td style="font-weight: 700;">${formatPKR(row.dueAmount)}</td>
+            <td>
+              <div style="color: #16a34a; font-size: 0.75rem;">Paid: ${paidText}</div>
+              <div style="color: #ef4444; font-size: 0.75rem;">Rem: ${remainingText}</div>
+            </td>
             <td>${statusBadge(row.status)}</td>
-            <td>${row.paid_at ? formatDate(row.paid_at) : '—'}</td>
+            <td style="font-size: 0.75rem; color: #64748b;">${row.paid_at ? formatDate(row.paid_at) : '—'}</td>
            </tr>`;
   }).join('')}
       </tbody>
@@ -782,47 +793,33 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
     const ledger = order.installment_ledger;
     if (!ledger) return res.status(404).json({ success: false, message: 'Ledger not found' });
 
-    let rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+    let rows = normalizeLedger(Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : []);
     const rowIndex = rows.findIndex(r => (r.month == month_number || r.monthNumber == month_number));
 
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
     const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
-    const paidAmount = amount !== undefined ? parseFloat(amount) : dueAmount;
+    const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
+    const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
+    const totalPaid = existingPaid + payingNow;
 
-    // Reject overpayment for now
-    // if (paidAmount > dueAmount) {
-    //   return res.status(400).json({ success: false, message: 'Paid amount cannot exceed due amount' });
-    // }
-
-    const remaining = dueAmount - paidAmount;
+    if (totalPaid > dueAmount + 1) {
+      return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
+    }
 
     // Update current row
-    rows[rowIndex].amount = paidAmount;
-    rows[rowIndex].status = 'paid';
+    rows[rowIndex].paid_amount = totalPaid;
     rows[rowIndex].paid_at = new Date();
     rows[rowIndex].payment_method = payment_method;
     rows[rowIndex].feedback = feedback;
 
-    // Carry forward the remaining balance to the next month
-    if (remaining > 0) {
-      if (rows[rowIndex + 1]) {
-        rows[rowIndex + 1].amount = parseFloat(rows[rowIndex + 1].amount || rows[rowIndex + 1].dueAmount || 0) + remaining;
-        rows[rowIndex + 1].arrears = (rows[rowIndex + 1].arrears || 0) + remaining;
-      } else {
-        // If this was the last month, append a new row for the balance
-        const nextMonthDate = new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate || new Date());
-        nextMonthDate.setMonth(nextMonthDate.getMonth() + 1);
-
-        rows.push({
-          month: parseInt(month_number) + 1,
-          due_date: nextMonthDate.toISOString().split('T')[0],
-          amount: remaining,
-          arrears: remaining,
-          status: 'pending'
-        });
-      }
+    if (totalPaid >= dueAmount) {
+      rows[rowIndex].status = 'paid';
+    } else if (totalPaid > 0) {
+      rows[rowIndex].status = 'partial';
+    } else {
+      rows[rowIndex].status = 'pending';
     }
 
     // Save Ledger
@@ -837,24 +834,34 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         order_id: order.id,
         paymentType: 'installment',
         monthNumber: parseInt(month_number),
-        amount: parseFloat(paidAmount),
+        amount: parseFloat(payingNow),
         paymentMethod: payment_method,
         collectedBy: req.user.id
       }
     });
 
     // Update Cash Register
-    await updateCashRegister(null, outlet_id, 'installments_received', paidAmount, 'add');
+    await updateCashRegister(null, outlet_id, 'installments_received', payingNow, 'add');
 
-    // Send Wati Receipt
     const customerName = order.verification?.purchaser?.name || order.customer_name;
-    sendInstallmentPaymentReceipt(phone, {
-      customerName,
-      amount: paidAmount,
-      productName: order.product_name,
-      orderRef: order.order_ref,
-      date: new Date().toLocaleDateString('en-PK')
-    });
+    if (totalPaid >= dueAmount) {
+      sendInstallmentPaymentReceipt(phone, {
+        customerName,
+        amount: payingNow,
+        productName: order.product_name,
+        orderRef: order.order_ref,
+        date: new Date().toLocaleDateString('en-PK')
+      }).catch(err => console.error('Wati Receipt Error:', err));
+    } else {
+      sendPartialInstallmentPaymentReceipt(phone, {
+        customerName,
+        paidAmount: payingNow,
+        remainingAmount: Math.max(0, dueAmount - totalPaid),
+        productName: order.product_name,
+        orderRef: order.order_ref,
+        dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
+      }).catch(err => console.error('Wati Partial Receipt Error:', err));
+    }
 
     // Send Next Month Reminder if exists
     const nextRow = rows[rowIndex + 1];
@@ -871,7 +878,7 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
     await logAction(
       req,
       'INSTALLMENT_COLLECTION',
-      `Collected PKR ${paidAmount} from ${customerName} for order ${order.order_ref} at outlet. (Month: ${month_number})`,
+      `Collected PKR ${payingNow} from ${customerName} for order ${order.order_ref} at outlet. (Month: ${month_number})`,
       order.id,
       'Order'
     );
