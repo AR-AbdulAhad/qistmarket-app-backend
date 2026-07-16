@@ -5,7 +5,7 @@ const sendEmail = require('../utils/sendEmail');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP } = require('../services/watiService');
 const { getOTPEmailTemplate } = require('../utils/emailTemplates');
-const { logAction } = require('../utils/auditLogger');
+const { logAction, logLoginAction } = require('../utils/auditLogger');
 
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 
@@ -299,6 +299,7 @@ const verifyLoginOTP = async (req, res) => {
     };
 
     const token = jwt.sign(payload, jwtSecret);
+    await logLoginAction(req, user, 'success');
 
     return res.json({ success: true, message: 'Login successful.', token, user: payload });
   } catch (error) {
@@ -343,6 +344,17 @@ const verifyWebLoginOTP = async (req, res) => {
       return res.status(403).json({ success: false, error: { code: 403, message: 'Account is not active.' } });
     }
 
+    if (user.is_2fa_enabled) {
+      const { totp_code } = req.body;
+      if (!totp_code) {
+        return res.json({ success: false, requires2FA: true, message: 'Enter your 2FA code to continue.' });
+      }
+      const speakeasy = require('speakeasy');
+      if (!speakeasy.totp.verify({ secret: user.totp_secret, encoding: 'base32', token: totp_code, window: 1 })) {
+        return res.status(401).json({ success: false, error: { code: 401, message: 'Invalid 2FA code.' } });
+      }
+    }
+
     const payload = {
       id: user.id,
       full_name: user.full_name,
@@ -356,19 +368,7 @@ const verifyWebLoginOTP = async (req, res) => {
     };
 
     const token = jwt.sign(payload, jwtSecret);
-
-    // Manual log since req.user is not yet set in middleware
-    // await prisma.securityLog.create({
-    //     data: {
-    //         outlet_id: user.outlet_id || 0,
-    //         user_id: user.id,
-    //         user_name: user.full_name,
-    //         action: 'USER_LOGIN',
-    //         details: `User logged into dashboard from ${req.ip || 'unknown IP'}`,
-    //         target_id: user.id,
-    //         target_type: 'User'
-    //     }
-    // });
+    await logLoginAction(req, user, 'success');
 
     return res.json({ success: true, message: 'Login successful.', token, user: payload });
   } catch (error) {
@@ -834,6 +834,7 @@ const deleteUser = async (req, res) => {
     }
 
     await prisma.user.delete({ where: { id: parseInt(userId) } });
+    await logAction(req, 'USER_DELETED', `Deleted user ${user.full_name} (@${user.username}, role_id ${user.role_id}).`, user.id, 'User');
 
     return res.json({ success: true, message: 'User deleted successfully.' });
   } catch (error) {
