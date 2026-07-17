@@ -16,7 +16,8 @@ const {
     deleteInventoryItem,
     initiateStockBack,
     verifyStockBack,
-    syncProductPlans
+    syncProductPlans,
+    searchByImeiGlobal,
 } = require('../controllers/inventoryController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -42,5 +43,8 @@ router.post('/outlet/inventory/bulk-delete', authenticateJWT, bulkDeleteInventor
 router.patch('/outlet/inventory/bulk-edit', authenticateJWT, bulkUpdateInventory);
 router.patch('/outlet/inventory/:id', authenticateJWT, updateInventoryItem);
 router.delete('/outlet/inventory/:id', authenticateJWT, deleteInventoryItem);
+
+// Global IMEI / Serial Number Trace (accessible to outlet users)
+router.get('/outlet/inventory/imei-search/:imei', authenticateJWT, searchByImeiGlobal);
 
 module.exports = router;

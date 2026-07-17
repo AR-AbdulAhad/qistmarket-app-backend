@@ -1635,6 +1635,155 @@ const syncProductPlans = async (req, res) => {
     }
 };
 
+/**
+ * searchByImeiGlobal
+ * Outlet-accessible global IMEI/Serial trace:
+ *   - Current inventory record (which outlet it is at right now)
+ *   - Full stock transfer history (where it moved)
+ *   - Return/exchange records
+ *   - Order delivery record (if it was sold)
+ */
+const searchByImeiGlobal = async (req, res) => {
+    try {
+        const { imei } = req.params;
+        if (!imei || imei.trim().length < 4) {
+            return res.status(400).json({ success: false, message: 'کم از کم 4 digits درج کریں۔' });
+        }
+        const cleanImei = imei.trim();
+
+        const [inventoryItems, rawTransferHistory, returnHistory, deliveryRecord] = await Promise.all([
+            // Current inventory record across ALL outlets
+            prisma.outletInventory.findMany({
+                where: { imei_serial: { contains: cleanImei } },
+                include: { outlet: { select: { id: true, name: true, code: true, address: true } } },
+                take: 10,
+            }),
+            // Stock transfer history for this IMEI
+            prisma.stockTransfer.findMany({
+                where: { inventory: { imei_serial: { contains: cleanImei } } },
+                include: {
+                    inventory: { select: { imei_serial: true, product_name: true } }
+                },
+                orderBy: { created_at: 'desc' },
+                take: 20,
+            }),
+            // Return/exchange records
+            prisma.returnExchange.findMany({
+                where: { imei_returned: { contains: cleanImei } },
+                include: { outlet: { select: { name: true, code: true } } },
+                orderBy: { created_at: 'desc' },
+                take: 10,
+            }),
+            // Delivery order (if sold)
+            prisma.delivery.findFirst({
+                where: { product_imei: { contains: cleanImei } },
+                include: {
+                    order: {
+                        select: {
+                            order_ref: true,
+                            status: true,
+                            created_at: true,
+                            customer_name: true,
+                            whatsapp_number: true,
+                            outlet: { select: { name: true, code: true } },
+                        },
+                    },
+                },
+            }),
+        ]);
+
+        const outletIds = new Set();
+        const userIds = new Set();
+        rawTransferHistory.forEach(t => {
+            if (t.from_type === 'Outlet') outletIds.add(t.from_id);
+            else if (t.from_type) userIds.add(t.from_id);
+
+            if (t.to_type === 'Outlet') outletIds.add(t.to_id);
+            else if (t.to_type) userIds.add(t.to_id);
+        });
+
+        const [outlets, users] = await Promise.all([
+            prisma.outlet.findMany({
+                where: { id: { in: [...outletIds] } },
+                select: { id: true, name: true, code: true }
+            }),
+            prisma.user.findMany({
+                where: { id: { in: [...userIds] } },
+                select: { id: true, full_name: true, username: true }
+            })
+        ]);
+
+        const outletMap = {};
+        outlets.forEach(o => outletMap[o.id] = o);
+        
+        const userMap = {};
+        users.forEach(u => userMap[u.id] = u);
+
+        res.json({
+            success: true,
+            data: {
+                inventory: inventoryItems.map(i => ({
+                    id: i.id,
+                    imei_serial: i.imei_serial,
+                    product_name: i.product_name,
+                    category: i.category,
+                    color_variant: i.color_variant,
+                    status: i.status,
+                    purchase_price: i.purchase_price,
+                    created_at: i.created_at,
+                    outlet: i.outlet,
+                })),
+                transferHistory: rawTransferHistory.map(t => {
+                    let fromName = t.from_type;
+                    let toName = t.to_type;
+
+                    if (t.from_type === 'Outlet') {
+                        fromName = outletMap[t.from_id] ? outletMap[t.from_id].name : 'Unknown Outlet';
+                    } else if (t.from_type) {
+                        fromName = userMap[t.from_id] ? `${t.from_type} (${userMap[t.from_id].username})` : t.from_type;
+                    }
+
+                    if (t.to_type === 'Outlet') {
+                        toName = outletMap[t.to_id] ? outletMap[t.to_id].name : 'Unknown Outlet';
+                    } else if (t.to_type) {
+                        toName = userMap[t.to_id] ? `${t.to_type} (${userMap[t.to_id].username})` : t.to_type;
+                    }
+
+                    return {
+                        id: t.id,
+                        imei_serial: t.inventory?.imei_serial,
+                        product_name: t.inventory?.product_name,
+                        status: t.status,
+                        from_outlet: { name: fromName, code: t.from_type === 'Outlet' && outletMap[t.from_id] ? outletMap[t.from_id].code : '' },
+                        to_outlet: { name: toName, code: t.to_type === 'Outlet' && outletMap[t.to_id] ? outletMap[t.to_id].code : '' },
+                        created_at: t.created_at,
+                        completed_at: t.updated_at,
+                    };
+                }),
+                returnHistory: returnHistory.map(r => ({
+                    id: r.id,
+                    imei_returned: r.imei_returned,
+                    status: r.status,
+                    outlet: r.outlet,
+                    created_at: r.created_at,
+                })),
+                deliveryRecord: deliveryRecord ? {
+                    product_imei: deliveryRecord.product_imei,
+                    order_ref: deliveryRecord.order?.order_ref,
+                    order_status: deliveryRecord.order?.status,
+                    customer_name: deliveryRecord.order?.customer_name,
+                    customer_phone: deliveryRecord.order?.whatsapp_number,
+                    outlet: deliveryRecord.order?.outlet,
+                    order_date: deliveryRecord.order?.created_at,
+                } : null,
+            },
+        });
+    } catch (error) {
+        console.error('searchByImeiGlobal error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getInventory,
     getStockTransferInventory,
@@ -1652,5 +1801,6 @@ module.exports = {
     bulkUpdateInventory,
     bulkDeleteInventory,
     generateInstallments,
-    syncProductPlans
+    syncProductPlans,
+    searchByImeiGlobal,
 };
