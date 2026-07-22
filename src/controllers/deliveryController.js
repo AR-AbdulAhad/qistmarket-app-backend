@@ -2309,7 +2309,7 @@ const submitSelfPickupDelivery = async (req, res) => {
     const refinedProductNameSnapshot = paytriggerBrand;
     const paytriggerDebug = {
       enabled: pt.ENABLED(),
-      hasImei: Boolean(updatedDelivery.product_imei),
+      hasImei: Boolean(delivery.product_imei),
       hasOrder: Boolean(order),
       orderId: order?.id,
       orderRef: order?.order_ref,
@@ -2318,16 +2318,16 @@ const submitSelfPickupDelivery = async (req, res) => {
       inventoryCategory,
       eligible: Boolean(refinedProductNameSnapshot && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)),
       firstInstallmentDueDate: firstInstallmentDueDate,
-      deliveryId: updatedDelivery.id,
-      imei: updatedDelivery.product_imei,
+      deliveryId: delivery.id,
+      imei: delivery.product_imei,
     };
 
     console.log('[PayTrigger] submitDelivery debug:', paytriggerDebug);
 
-    if (enrollPaytrigger && pt.ENABLED() && updatedDelivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
+    if (enrollPaytrigger && pt.ENABLED() && delivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
       const expiration = firstInstallmentDueDate;
       console.log('[PayTrigger] calling preEnrollImei with:', {
-        imei: updatedDelivery.product_imei,
+        imei: delivery.product_imei,
         orderRef: order.order_ref,
         productName: refinedProductNameSnapshot,
         detectedBrand: paytriggerBrand,
@@ -2335,7 +2335,7 @@ const submitSelfPickupDelivery = async (req, res) => {
       });
 
       pt.preEnrollImei(
-        updatedDelivery.product_imei,
+        delivery.product_imei,
         order.order_ref,
         productNameSnapshot,
         expiration
@@ -2348,7 +2348,7 @@ const submitSelfPickupDelivery = async (req, res) => {
 
           if (result?.code === 50015) {
             try {
-              const dRes = await pt.getDeviceTag(updatedDelivery.product_imei);
+              const dRes = await pt.getDeviceTag(delivery.product_imei);
               if (dRes?.code === 200 && dRes.data) {
                 deviceTag = dRes.data.deviceTag || null;
                 serverState = dRes.data.serverState || 500;
@@ -2361,11 +2361,11 @@ const submitSelfPickupDelivery = async (req, res) => {
           }
 
           await prisma.payTriggerDevice.upsert({
-            where: { imei: updatedDelivery.product_imei },
+            where: { imei: delivery.product_imei },
             update: {
               order_id: order.id,
               order_ref: order.order_ref,
-              delivery_id: updatedDelivery.id,
+              delivery_id: delivery.id,
               product_model: productNameSnapshot,
               device_tag: deviceTag,
               server_state: serverState,
@@ -2375,10 +2375,10 @@ const submitSelfPickupDelivery = async (req, res) => {
               raw_state: result,
             },
             create: {
-              imei: updatedDelivery.product_imei,
+              imei: delivery.product_imei,
               order_id: order.id,
               order_ref: order.order_ref,
-              delivery_id: updatedDelivery.id,
+              delivery_id: delivery.id,
               product_model: productNameSnapshot,
               device_tag: deviceTag,
               enrollment_status: enrollmentStatus,
@@ -2399,7 +2399,7 @@ const submitSelfPickupDelivery = async (req, res) => {
     } else {
       console.warn('[PayTrigger] block skipped because condition failed:', {
         enabled: pt.ENABLED(),
-        hasImei: Boolean(updatedDelivery.product_imei),
+        hasImei: Boolean(delivery.product_imei),
         hasOrder: Boolean(order),
         productName: productNameSnapshot,
         inventoryCategory,
