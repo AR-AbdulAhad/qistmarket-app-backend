@@ -1,7 +1,7 @@
 const prisma = require('../../lib/prisma');
 const qrcode = require('qrcode');
 const jwt = require('jsonwebtoken');
-const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder, sendInstallmentLedger } = require('../services/watiService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
 const now = () => new Date();
@@ -598,6 +598,37 @@ const notifyPayment = async (req, res) => {
                         }).catch(err => console.error('[SmartPay Webhook] Wati Receipt Error:', err));
                     }
 
+                    // --- Create Notification for Outlet ---
+                    if (order.outlet_id) {
+                        try {
+                            const outletUsers = await prisma.user.findMany({
+                                where: {
+                                    outlet_id: order.outlet_id,
+                                    role: {
+                                        name: { in: ['Outlet Manager', 'Accountant', 'Admin'] }
+                                    }
+                                }
+                            });
+                            
+                            const notifications = outletUsers.map(u => ({
+                                userId: u.id,
+                                title: 'Online Payment Received',
+                                message: `Received Rs. ${parsedAmountFinal} via SmartPay for Order: ${order.order_ref}`,
+                                type: 'payment',
+                                relatedId: order.id,
+                                createdAt: now(),
+                                updatedAt: now()
+                            }));
+
+                            if (notifications.length > 0) {
+                                await prisma.notification.createMany({ data: notifications });
+                            }
+                        } catch (err) {
+                            console.error('[SmartPay Webhook] Failed to create notifications:', err);
+                        }
+                    }
+                    // --------------------------------------
+
                     // ── Online payment notification — Admin/Super Admin + outlet ──
                     const io = req.app.get('io');
                     const notifyTitle = 'Online Payment Received';
@@ -620,13 +651,38 @@ const notifyPayment = async (req, res) => {
                     const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
                     if (phone) {
                         let productName = order.product_name;
+                        const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
+                        
                         sendNextInstallmentReminder(phone, {
                             customerName: order.verification?.purchaser?.name || order.customer_name,
                             productName,
                             monthlyAmount: nextRow.amount || nextRow.dueAmount,
                             dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-                            ledgerUrl: ledger.token ? `${ledger.token}` : null
+                            ledgerUrl
                         }).catch(err => console.error('[SmartPay Webhook] Wati Reminder Error:', err));
+
+                        // Send Installment Ledger
+                        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+                        let firstRowAmount = 0;
+                        let dueDateStr = 'N/A';
+                        if (rows.length > 1) {
+                            firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
+                            const firstRowDate = new Date(rows[1].due_date || rows[1].dueDate);
+                            if (!isNaN(firstRowDate.getTime())) {
+                                dueDateStr = firstRowDate.toLocaleDateString('en-PK');
+                            }
+                        }
+
+                        sendInstallmentLedger(phone, {
+                            customerName: order.verification?.purchaser?.name || order.customer_name,
+                            productName,
+                            orderRef: order.order_ref,
+                            nextMonthLabel: 'Mahina 1',
+                            monthlyAmount: firstRowAmount,
+                            dueDate: dueDateStr,
+                            totalRemaining: totalRemain,
+                            ledgerUrl
+                        }).catch(e => console.error('[WATI] Ledger send error on online payment:', e));
                     }
                 }
 

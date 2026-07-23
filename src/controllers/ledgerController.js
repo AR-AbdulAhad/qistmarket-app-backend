@@ -2,7 +2,7 @@ const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const puppeteer = require('puppeteer');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
-const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendOTP, sendInstallmentLedger, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { logAction } = require('../utils/auditLogger');
@@ -665,14 +665,22 @@ const viewLedger = async (req, res) => {
   const { token } = req.params;
 
   try {
-    let decoded;
-    try {
-      decoded = jwt.verify(token, LEDGER_TOKEN_SECRET);
-    } catch (err) {
-      return res.status(401).send(renderErrorPage('Link invalid ya expire ho gaya hai.'));
+    let ledger = null;
+    
+    // Check if it's a short_id (JWT tokens are long, short_ids are typically 6-10 chars)
+    if (token.length < 50) {
+        ledger = await fetchLedger({ short_id: token });
+    } else {
+        // Fallback to legacy JWT token
+        let decoded;
+        try {
+          decoded = jwt.verify(token, LEDGER_TOKEN_SECRET);
+        } catch (err) {
+          return res.status(401).send(renderErrorPage('Link invalid ya expire ho gaya hai.'));
+        }
+        ledger = await fetchLedger({ order_id: parseInt(decoded.order_id) });
     }
 
-    const ledger = await fetchLedger({ order_id: parseInt(decoded.order_id) });
     if (!ledger) {
       return res.status(404).send(renderErrorPage('Ledger nahi mila. Meherbani karke support se rabta karen.'));
     }
@@ -874,14 +882,45 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
 
     // Send Next Month Reminder if exists
     const nextRow = rows[rowIndex + 1];
+    const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
+    
     if (nextRow) {
       sendNextInstallmentReminder(phone, {
         customerName,
         productName: order.product_name,
         monthlyAmount: nextRow.amount || nextRow.dueAmount,
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-        ledgerUrl: ledger.token ? `${ledger.token}` : null
+        ledgerUrl
       });
+    }
+
+    // Send Installment Ledger
+    const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+    let firstRowAmount = 0;
+    let dueDateStr = 'N/A';
+    if (rows.length > 1) {
+      firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
+      const firstRowDate = new Date(rows[1].due_date || rows[1].dueDate);
+      if (!isNaN(firstRowDate.getTime())) {
+          dueDateStr = firstRowDate.toLocaleDateString('en-PK');
+      }
+    }
+    
+    const altPhone = order.verification?.purchaser?.alternate_phone_number;
+    const targetPhones = [phone];
+    if (altPhone && altPhone.trim() !== '') targetPhones.push(altPhone.trim());
+    
+    for (const targetPhone of targetPhones) {
+        sendInstallmentLedger(targetPhone, {
+            customerName,
+            productName: order.product_name,
+            orderRef: order.order_ref,
+            nextMonthLabel: 'Mahina 1',
+            monthlyAmount: firstRowAmount,
+            dueDate: dueDateStr,
+            totalRemaining: totalRemain,
+            ledgerUrl
+        }).catch(e => console.error('[WATI] Ledger send error on payment:', e));
     }
 
     await logAction(
@@ -899,9 +938,83 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
   }
 };
 
+/**
+ * Manually send ledger via WhatsApp
+ * POST /api/ledger/:shortId/send
+ */
+const sendLedgerToCustomer = async (req, res) => {
+  try {
+    const { shortId } = req.params;
+    const { targetPhone } = req.body; // 'primary', 'alternate', or 'both'
+
+    const ledger = await fetchLedger({ short_id: shortId });
+    if (!ledger) {
+      return res.status(404).json({ success: false, message: 'Ledger not found' });
+    }
+
+    const order = ledger.order;
+    const purchaser = order.verification?.purchaser;
+    const customerName = purchaser?.name || 'Customer';
+    const primaryPhone = purchaser?.telephone_number || order.whatsapp_number;
+    const altPhone = purchaser?.alternate_phone_number;
+
+    let phonesToSend = [];
+    if (targetPhone === 'primary' && primaryPhone) phonesToSend.push(primaryPhone);
+    else if (targetPhone === 'alternate' && altPhone) phonesToSend.push(altPhone);
+    else if (targetPhone === 'both') {
+      if (primaryPhone) phonesToSend.push(primaryPhone);
+      if (altPhone) phonesToSend.push(altPhone);
+    } else if (!targetPhone) {
+      // default to primary
+      if (primaryPhone) phonesToSend.push(primaryPhone);
+    }
+
+    if (phonesToSend.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid phone numbers found to send to' });
+    }
+
+    const normalized = getNormalizedLedger(ledger.ledger_rows);
+    const { installment_ledger: installmentRows } = normalized;
+
+    // Use normalized rows for amount
+    let firstRowAmount = 0;
+    let dueDateStr = 'N/A';
+    if (installmentRows && installmentRows.length > 0) {
+        firstRowAmount = installmentRows[0].amount || installmentRows[0].dueAmount || 0;
+        dueDateStr = formatDatePK(installmentRows[0].due_date || installmentRows[0].dueDate);
+    }
+    
+    const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+    const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+
+    const ledgerUrl = `${shortId}`;
+
+    const sendPromises = phonesToSend.map(phone => 
+      sendInstallmentLedger(phone, {
+        customerName: customerName,
+        productName: order.product_name || 'N/A',
+        orderRef: order.order_ref,
+        nextMonthLabel: 'Mahina 1',
+        monthlyAmount: firstRowAmount,
+        dueDate: dueDateStr,
+        totalRemaining: totalRemain,
+        ledgerUrl,
+      })
+    );
+
+    await Promise.allSettled(sendPromises);
+
+    return res.json({ success: true, message: `Ledger sent to ${phonesToSend.length} number(s) successfully` });
+  } catch (error) {
+    console.error('sendLedgerToCustomer error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   viewLedger,
   downloadLedgerPdf,
   generateInstallmentPaymentOtp,
-  verifyInstallmentPaymentOtp
+  verifyInstallmentPaymentOtp,
+  sendLedgerToCustomer
 };

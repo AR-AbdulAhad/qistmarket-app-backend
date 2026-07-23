@@ -101,6 +101,11 @@ model User {
   scheduled_payments_created     ScheduledPayment[]        @relation("ScheduledPaymentCreator")
   scheduled_reports_created      ScheduledReportConfig[]   @relation("ScheduledReportCreator")
   expense_vouchers_approved      ExpenseVoucher[]          @relation("ExpenseApprover")
+  deposit_requests_submitted     BankDepositRequest[]      @relation("DepositSubmitter")
+  deposit_requests_verified      BankDepositRequest[]      @relation("DepositVerifier")
+  location_history               UserLocationHistory[]     @relation("UserLocationHistory")
+  officer_targets                OfficerTarget[]           @relation("OfficerTargets")
+  officer_targets_created        OfficerTarget[]           @relation("OfficerTargetCreator")
 
   @@index([role_id])
   @@index([is_online])
@@ -293,6 +298,7 @@ model Outlet {
   auto_assignment_config Json?
   employees        Employee[]
   bank_accounts    BankAccount[]
+  deposit_requests BankDepositRequest[] @relation("DepositOutlet")
 
   @@map("outlets")
 }
@@ -314,6 +320,7 @@ model BankAccount {
   created_by       User?             @relation("BankAccountCreator", fields: [created_by_id], references: [id])
   transactions     BankTransaction[]
   statements       BankStatement[]
+  deposit_requests BankDepositRequest[] @relation("DepositBankAccount")
   created_at       DateTime          @default(now())
   updated_at       DateTime          @updatedAt
 
@@ -337,6 +344,7 @@ model BankTransaction {
   transfer_group   String?        // shared ref linking the paired debit+credit of an inter-bank transfer
   created_by_id    Int?
   created_by       User?          @relation("BankTransactionCreator", fields: [created_by_id], references: [id])
+  deposit_requests BankDepositRequest[]
   created_at       DateTime       @default(now())
 
   @@index([bank_account_id])
@@ -371,6 +379,22 @@ model MonthlyTarget {
   updated_at    DateTime @updatedAt
 
   @@map("monthly_targets")
+}
+
+model OfficerTarget {
+  id            Int      @id @default(autoincrement())
+  officer_id    Int
+  month         String   // format "YYYY-MM"
+  target_type   String   // "amount" or "customers"
+  target_value  Float
+  created_at    DateTime @default(now())
+  created_by_id Int?
+
+  officer       User     @relation("OfficerTargets", fields: [officer_id], references: [id], onDelete: Cascade)
+  created_by    User?    @relation("OfficerTargetCreator", fields: [created_by_id], references: [id])
+
+  @@unique([officer_id, month])
+  @@map("officer_targets")
 }
 
 model BlacklistAction {
@@ -1752,4 +1776,48 @@ model EmployeePerformance {
   @@unique([employee_id, month, year])
   @@index([employee_id])
   @@map("employee_performance")
+}
+
+model BankDepositRequest {
+  id                Int           @id @default(autoincrement())
+  amount            Float
+  bank_account_id   Int?
+  payment_method    String        // "manual_deposit", "1bill", "qr_payment"
+  receipt_id        String?
+  receipt_photo_url String?
+  description       String?       @db.Text
+  status            String        @default("pending") // "pending", "verified", "rejected"
+  submitted_by_id   Int
+  outlet_id         Int?
+  verified_by_id    Int?
+  bank_transaction_id Int?
+  
+  created_at        DateTime      @default(now())
+  updated_at        DateTime      @updatedAt
+
+  submitted_by      User          @relation("DepositSubmitter", fields: [submitted_by_id], references: [id])
+  verified_by       User?         @relation("DepositVerifier", fields: [verified_by_id], references: [id])
+  bank_account      BankAccount?  @relation("DepositBankAccount", fields: [bank_account_id], references: [id])
+  outlet            Outlet?       @relation("DepositOutlet", fields: [outlet_id], references: [id])
+  bank_transaction  BankTransaction? @relation(fields: [bank_transaction_id], references: [id])
+
+  @@index([submitted_by_id])
+  @@index([outlet_id])
+  @@index([bank_account_id])
+  @@index([status])
+  @@map("bank_deposit_requests")
+}
+
+model UserLocationHistory {
+  id          Int      @id @default(autoincrement())
+  user_id     Int
+  latitude    Float
+  longitude   Float
+  timestamp   DateTime @default(now())
+
+  user        User     @relation("UserLocationHistory", fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@index([timestamp])
+  @@map("user_location_history")
 }

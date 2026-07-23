@@ -149,6 +149,52 @@ const updateVendor = async (req, res) => {
     }
 };
 
+// --- Generic Transactions ---
+
+const recordVendorTransaction = async (req, res) => {
+    const { id } = req.params;
+    const { type, amount, notes } = req.body;
+    
+    // type: 'in' (Vendor paid us -> increases our liability to them -> credit)
+    // type: 'out' (We paid Vendor -> decreases our liability to them -> debit)
+
+    if (!type || !['in', 'out'].includes(type) || !amount || amount <= 0) {
+        return res.status(400).json({ success: false, message: 'Invalid type or amount.' });
+    }
+
+    try {
+        const vendorId = parseInt(id);
+        const vendor = await prisma.vendor.findUnique({ where: { id: vendorId } });
+        if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
+
+        const isPaymentOut = type === 'out';
+        const newBalance = isPaymentOut ? vendor.balance - parseFloat(amount) : vendor.balance + parseFloat(amount);
+        const transType = isPaymentOut ? 'debit' : 'credit';
+        const description = notes || (isPaymentOut ? 'Payment Out to Vendor' : 'Payment In from Vendor');
+
+        await prisma.$transaction([
+            prisma.vendor.update({
+                where: { id: vendorId },
+                data: { balance: newBalance, updated_at: new Date() }
+            }),
+            prisma.vendorCashTransaction.create({
+                data: {
+                    vendor_id: vendorId,
+                    type: transType,
+                    amount: parseFloat(amount),
+                    balance_after: newBalance,
+                    description,
+                    created_by_id: req.user.id
+                }
+            })
+        ]);
+
+        res.json({ success: true, message: `Payment ${type.toUpperCase()} recorded successfully.`, newBalance });
+    } catch (error) {
+        console.error('recordVendorTransaction error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
 // --- Purchases ---
 
 const createPurchase = async (req, res) => {
@@ -1264,6 +1310,8 @@ module.exports = {
     getVendors,
     createVendor,
     updateVendor,
+    recordVendorTransaction,
+    getVendorLedger,
     createPurchase,
     getPurchases,
     getPurchaseById,

@@ -345,6 +345,162 @@ const createInterBankTransfer = async (req, res) => {
     }
 };
 
+// ─── Bank Deposit Requests (Outlet / Accounts Office) ───────────────
+
+/**
+ * submitBankDeposit
+ * Submit a manual bank deposit or transfer request with proof.
+ */
+const submitBankDeposit = async (req, res) => {
+    try {
+        const { amount, bank_account_id, payment_method, description } = req.body;
+        const receipt_id = req.body.receipt_id || null;
+        let receipt_photo_url = null;
+
+        if (req.file) {
+            receipt_photo_url = `/uploads/${req.file.filename}`;
+        }
+
+        if (!amount || !payment_method) {
+            return res.status(400).json({ success: false, message: 'Amount and payment_method are required.' });
+        }
+
+        const deposit = await prisma.bankDepositRequest.create({
+            data: {
+                amount: parseFloat(amount),
+                bank_account_id: bank_account_id ? parseInt(bank_account_id) : null,
+                payment_method,
+                receipt_id,
+                receipt_photo_url,
+                description,
+                submitted_by_id: req.user.id,
+                outlet_id: req.user.outlet_id || null, // Outlets will have this
+            }
+        });
+
+        await logAction(req, 'BANK_DEPOSIT_SUBMITTED', `Deposit request of PKR ${amount} submitted via ${payment_method}.`, deposit.id, 'BankDepositRequest');
+
+        res.json({ success: true, message: 'Deposit request submitted successfully.', deposit });
+    } catch (error) {
+        console.error('submitBankDeposit error:', error);
+        res.status(500).json({ success: false, message: 'Error submitting deposit request.', error: error.message });
+    }
+};
+
+/**
+ * listBankDeposits
+ * List deposit requests (filtered by status or outlet).
+ */
+const listBankDeposits = async (req, res) => {
+    try {
+        const { status, outlet_id } = req.query;
+        let where = {};
+        if (status) where.status = status;
+        if (outlet_id) where.outlet_id = parseInt(outlet_id);
+
+        // If an outlet user, only show their own outlet's requests
+        if (req.user.role_id !== 1 && req.user.role_id !== 2 && req.user.outlet_id) {
+             where.outlet_id = req.user.outlet_id;
+        }
+
+        const deposits = await prisma.bankDepositRequest.findMany({
+            where,
+            include: {
+                submitted_by: { select: { id: true, full_name: true, username: true } },
+                verified_by: { select: { id: true, full_name: true, username: true } },
+                bank_account: { select: { id: true, bank_name: true, account_number: true } },
+                outlet: { select: { id: true, name: true, code: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+
+        res.json({ success: true, data: deposits });
+    } catch (error) {
+        console.error('listBankDeposits error:', error);
+        res.status(500).json({ success: false, message: 'Error fetching deposit requests.', error: error.message });
+    }
+};
+
+/**
+ * verifyBankDeposit
+ * Accounts office verifies the deposit. Automatically creates a bank ledger transaction.
+ */
+const verifyBankDeposit = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status, remarks } = req.body; // status: "verified" or "rejected"
+
+        if (!['verified', 'rejected'].includes(status)) {
+            return res.status(400).json({ success: false, message: 'Invalid status.' });
+        }
+
+        const deposit = await prisma.bankDepositRequest.findUnique({ where: { id: parseInt(id) } });
+        if (!deposit) return res.status(404).json({ success: false, message: 'Deposit request not found.' });
+        if (deposit.status !== 'pending') return res.status(400).json({ success: false, message: `Deposit is already ${deposit.status}.` });
+
+        if (status === 'verified') {
+            if (!deposit.bank_account_id) {
+                return res.status(400).json({ success: false, message: 'Cannot verify without a destination bank_account_id. Please update the request first.' });
+            }
+
+            // Transaction: Update deposit status, Add Bank Transaction, Update Bank Account Balance
+            const result = await prisma.$transaction(async (tx) => {
+                const account = await tx.bankAccount.findUnique({ where: { id: deposit.bank_account_id } });
+                const balanceAfter = account.current_balance + deposit.amount;
+
+                const txn = await tx.bankTransaction.create({
+                    data: {
+                        bank_account_id: account.id,
+                        type: 'credit',
+                        amount: deposit.amount,
+                        balance_after: balanceAfter,
+                        description: `Deposit Verified (ID: ${deposit.id}): ${deposit.description || ''}`,
+                        reference: deposit.receipt_id,
+                        transaction_date: deposit.created_at, // or now()
+                        created_by_id: req.user.id
+                    }
+                });
+
+                await tx.bankAccount.update({
+                    where: { id: account.id },
+                    data: { current_balance: balanceAfter }
+                });
+
+                const updatedDeposit = await tx.bankDepositRequest.update({
+                    where: { id: deposit.id },
+                    data: {
+                        status: 'verified',
+                        verified_by_id: req.user.id,
+                        bank_transaction_id: txn.id,
+                        description: remarks ? `${deposit.description || ''}\nVerify Remarks: ${remarks}` : deposit.description
+                    }
+                });
+                
+                return updatedDeposit;
+            });
+            
+            await logAction(req, 'BANK_DEPOSIT_VERIFIED', `Deposit request #${id} verified. Credited PKR ${deposit.amount}.`, deposit.id, 'BankDepositRequest');
+            res.json({ success: true, message: 'Deposit verified and bank ledger updated.', deposit: result });
+
+        } else if (status === 'rejected') {
+            const updatedDeposit = await prisma.bankDepositRequest.update({
+                where: { id: parseInt(id) },
+                data: {
+                    status: 'rejected',
+                    verified_by_id: req.user.id,
+                    description: remarks ? `${deposit.description || ''}\nReject Remarks: ${remarks}` : deposit.description
+                }
+            });
+            await logAction(req, 'BANK_DEPOSIT_REJECTED', `Deposit request #${id} rejected.`, deposit.id, 'BankDepositRequest');
+            res.json({ success: true, message: 'Deposit request rejected.', deposit: updatedDeposit });
+        }
+
+    } catch (error) {
+        console.error('verifyBankDeposit error:', error);
+        res.status(500).json({ success: false, message: 'Error verifying deposit.', error: error.message });
+    }
+};
+
 module.exports = {
     getBankAccounts,
     getBankBalanceSummary,
@@ -357,4 +513,7 @@ module.exports = {
     reconcileTransactions,
     getReconciliationStatus,
     createInterBankTransfer,
+    submitBankDeposit,
+    listBankDeposits,
+    verifyBankDeposit
 };

@@ -3,6 +3,7 @@ require('dotenv').config();
 
 const WATI_ACCESS_TOKEN = process.env.WATI_ACCESS_TOKEN;
 const WATI_BASE_URL = process.env.WATI_BASE_URL;
+const COMPLAINT_URL = 'https://app.qistmarket.pk/complaint';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -81,6 +82,7 @@ const sendDeliveryConfirmation = async (phone, {
     { name: '6', value: deliveryDate || new Date().toDateString() },
     { name: '7', value: orderRef || 'N/A' },
     { name: '8', value: orderStatus || 'Delivered' },
+    { name: '9', value: COMPLAINT_URL },
   ];
   return sendTemplate(phone, WATI_DELIVERY_TEMPLATE, WATI_DELIVERY_BROADCAST, parameters);
 };
@@ -111,6 +113,7 @@ const sendInstallmentLedger = async (phone, {
     { name: '6', value: dueDate || 'N/A' },
     { name: '7', value: String(totalRemaining || 0) },
     { name: '8', value: ledgerUrl || 'N/A' },
+    { name: '9', value: COMPLAINT_URL },
   ];
   return sendTemplate(phone, WATI_LEDGER_TEMPLATE, WATI_LEDGER_BROADCAST, parameters);
 };
@@ -131,6 +134,7 @@ const sendInstallmentPaymentReceipt = async (phone, {
     { name: '3', value: productName || 'N/A' },
     { name: '4', value: orderRef || 'N/A' },
     { name: '5', value: date || new Date().toDateString() },
+    { name: '6', value: COMPLAINT_URL },
   ];
   return sendTemplate(phone, WATI_PAYMENT_RECEIVED_TEMPLATE, WATI_PAYMENT_RECEIVED_BROADCAST, parameters);
 };
@@ -154,6 +158,7 @@ const sendPartialInstallmentPaymentReceipt = async (phone, {
     { name: '4', value: productName || 'N/A' },
     { name: '5', value: orderRef || 'N/A' },
     { name: '6', value: dueDate || 'N/A' },
+    { name: '7', value: COMPLAINT_URL },
   ];
   return sendTemplate(phone, WATI_PARTIAL_PAYMENT_TEMPLATE, WATI_PARTIAL_PAYMENT_BROADCAST, parameters);
 };
@@ -176,6 +181,7 @@ const sendNextInstallmentReminder = async (phone, {
     { name: '3', value: String(monthlyAmount || 0) },
     { name: '4', value: dueDate || 'N/A' },
     { name: '5', value: ledgerUrl || 'N/A' },
+    { name: '6', value: COMPLAINT_URL },
   ];
   return sendTemplate(phone, WATI_REMINDER_TEMPLATE, WATI_REMINDER_BROADCAST, parameters);
 };
@@ -235,6 +241,7 @@ const sendPtpConfirmation = async (phone, {
     { name: '3', value: orderRef || 'N/A' },
     { name: '4', value: promisedDate || 'N/A' },
     { name: '5', value: String(amountDue || 0) },
+    { name: '6', value: COMPLAINT_URL },
   ];
   return sendTemplate(phone, WATI_PTP_TEMPLATE, WATI_PTP_BROADCAST, parameters);
 };

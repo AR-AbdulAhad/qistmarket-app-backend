@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
-const { sendOTP, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendOTP, sendInstallmentLedger, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const pt = require('../services/paytriggerService');
@@ -1123,7 +1123,7 @@ const getOutletInstallments = async (req, res) => {
         page = 1,
         limit = 10,
         search = '',
-        tab = 'fresh', // 'fresh' or 'overdue'
+        tab = 'fresh', // 'fresh', 'overdue', 'paid'
         startDate,
         endDate,
         globalSearch
@@ -1168,60 +1168,76 @@ const getOutletInstallments = async (req, res) => {
         // Categorize orders into fresh, overdue, and fully paid
         const categorized = allOrdersForTotalCount.map(order => {
             const ledger = order.delivery?.installment_ledger;
-            if (!ledger || !ledger.ledger_rows) return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null };
+            if (!ledger || !ledger.ledger_rows) return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null, remaining: 0, paid: 0 };
 
-            let rows = [];
             try {
                 const rowsRaw = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
-                rows = normalizeLedger(rowsRaw);
-            } catch (e) { return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null }; }
+                const normalized = getNormalizedLedger(rowsRaw);
+                const installments = normalized.installment_ledger;
 
-            const installments = rows.filter(r => r.month > 0);
+                const isFullyPaid = installments.length > 0 && installments.every(r => r.status === 'paid' || r.status === 'Paid');
 
-            const isFullyPaid = installments.length > 0 && installments.every(r => r.status === 'paid' || r.status === 'Paid');
+                const isOverdue = !isFullyPaid && installments.some(r => {
+                    const dueDate = r.dueDate ? new Date(r.dueDate) : null;
+                    return (r.status !== 'paid' && r.status !== 'Paid') && dueDate && dueDate <= today;
+                });
 
-            const isOverdue = !isFullyPaid && installments.some(r => {
-                const dueDate = new Date(r.due_date || r.dueDate);
-                return (r.status !== 'paid' && r.status !== 'Paid') && dueDate < today;
-            });
+                const nextPending = installments.find(r => r.status !== 'paid' && r.status !== 'Paid');
+                const nextDueDate = nextPending?.dueDate ? new Date(nextPending.dueDate) : null;
 
-            // Find next pending due date for filtering
-            const nextPending = installments.find(r => r.status !== 'paid' && r.status !== 'Paid');
-            const nextDueDate = nextPending ? new Date(nextPending.due_date || nextPending.dueDate) : null;
-
-            return { orderId: order.id, isOverdue, isFullyPaid, nextDueDate };
+                return { 
+                    orderId: order.id, 
+                    isOverdue, 
+                    isFullyPaid, 
+                    nextDueDate, 
+                    remaining: normalized.summary.grandTotalRemaining, 
+                    paid: normalized.summary.grandTotalPaid 
+                };
+            } catch (e) { 
+                return { orderId: order.id, isOverdue: false, isFullyPaid: false, nextDueDate: null, remaining: 0, paid: 0 }; 
+            }
         });
 
-        const overdueIds = categorized.filter(c => c.isOverdue).map(c => c.orderId);
-        const completedIds = categorized.filter(c => c.isFullyPaid).map(c => c.orderId);
-        const freshIds = categorized.filter(c => !c.isOverdue && !c.isFullyPaid).map(c => c.orderId);
+        const overdueList = categorized.filter(c => c.isOverdue);
+        const completedList = categorized.filter(c => c.isFullyPaid);
+        const freshList = categorized.filter(c => !c.isFullyPaid); // all active accounts
 
         // Apply Tab Filter
-        let filteredIds = [];
-        if (tab === 'overdue') filteredIds = overdueIds;
-        else if (tab === 'completed') filteredIds = completedIds;
-        else filteredIds = freshIds; // default to fresh
+        let activeList = [];
+        if (tab === 'overdue') activeList = overdueList;
+        else if (tab === 'paid' || tab === 'completed') activeList = completedList;
+        else activeList = freshList; // default to fresh
 
         // Apply Date Filter (based on next pending installment's due date)
         if (startDate || endDate) {
             const start = startDate ? new Date(startDate) : null;
             const end = endDate ? new Date(endDate) : null;
 
-            filteredIds = categorized
-                .filter(c => filteredIds.includes(c.orderId))
-                .filter(c => {
-                    if (!c.nextDueDate) return false;
-                    if (start && c.nextDueDate < start) return false;
-                    if (end && c.nextDueDate > end) return false;
-                    return true;
-                })
-                .map(c => c.orderId);
+            activeList = activeList.filter(c => {
+                if (!c.nextDueDate) return false;
+                if (start && c.nextDueDate < start) return false;
+                if (end && c.nextDueDate > end) return false;
+                return true;
+            });
         }
 
-        // Ensure no undefined IDs slip through
-        filteredIds = filteredIds.filter(id => id !== undefined && id !== null);
-
+        let filteredIds = activeList.map(c => c.orderId).filter(id => id !== undefined && id !== null);
         const totalOrders = filteredIds.length;
+
+        let totalAmount = 0;
+        if (tab === 'paid' || tab === 'completed') {
+            totalAmount = activeList.reduce((acc, curr) => acc + curr.paid, 0);
+        } else {
+            totalAmount = activeList.reduce((acc, curr) => acc + curr.remaining, 0);
+        }
+
+        // Generate summary stats for all categories
+        const summaries = {
+            fresh: { count: freshList.length, amount: freshList.reduce((acc, curr) => acc + curr.remaining, 0) },
+            overdue: { count: overdueList.length, amount: overdueList.reduce((acc, curr) => acc + curr.remaining, 0) },
+            paid: { count: completedList.length, amount: completedList.reduce((acc, curr) => acc + curr.paid, 0) }
+        };
+
         const orders = await prisma.order.findMany({
             where: { id: { in: filteredIds } },
             include: {
@@ -1272,22 +1288,7 @@ const getOutletInstallments = async (req, res) => {
             take: limitNum,
         });
 
-        // Calculate Total Recovery for the current filtered view
-        let totalRecovery = 0;
-        allOrdersForTotalCount.filter(o => filteredIds.includes(o.id)).forEach(order => {
-            const ledger = order.delivery?.installment_ledger;
-            if (!ledger || !ledger.ledger_rows) return;
-            try {
-                const rowsRaw = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : JSON.parse(ledger.ledger_rows);
-                const rows = normalizeLedger(rowsRaw);
-                rows.filter(r => r.month > 0).forEach(r => {
-                    const rowPaidAmount = Number(r.paid_amount || (r.status === 'paid' ? (r.amount || 0) : 0));
-                    totalRecovery += rowPaidAmount;
-                });
-            } catch (e) { }
-        });
-
-
+        // (Amount calculated above)
         // ── Pre-fetch Inventory details based on IMEI ──────────────────
         const allImeis = orders
             .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
@@ -1368,7 +1369,7 @@ const getOutletInstallments = async (req, res) => {
                     grandTotalRemaining: summary.grandTotalRemaining,
                 },
                 installmentLedger,
-                ledger_short_id: ledgerModel?.token || null,
+                ledger_short_id: ledgerModel?.short_id || ledgerModel?.token || null,
                 consumer_number: consumerNum,
                 smartpay_consumer_number: smartpayConsumerNum,
                 consumer_bill_status: allConsumers.find(c => c.consumer_number === consumerNum)?.bill_status || null,
@@ -1423,8 +1424,9 @@ const getOutletInstallments = async (req, res) => {
             success: true,
             data: {
                 installments: finalFormatted,
-                totalRecovery,
-                overdueCount: overdueIds.length,
+                totalAmount,
+                summaries,
+                customerCount: activeList.length,
                 pagination: {
                     total: totalOrders,
                     page: pageNum,
@@ -1470,7 +1472,7 @@ const generateInstallmentOtp = async (req, res) => {
 };
 
 const verifyInstallmentPayment = async (req, res) => {
-    const { order_id, month_number, feedback, payment_method = 'Cash', amount } = req.body;
+    const { order_id, month_number, feedback, payment_method = 'Cash', amount, alternate_number } = req.body;
     const outlet_id = req.user.outlet_id;
 
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user' });
@@ -1567,37 +1569,67 @@ const verifyInstallmentPayment = async (req, res) => {
             if (invInfo?.product_name) finalProductName = invInfo.product_name;
         }
 
-        // Send Wati Receipt (unchanged)
+        // Send Wati Receipt
         const customerName = order.verification?.purchaser?.name || order.customer_name;
-        if (totalPaid >= dueAmount) {
-            sendInstallmentPaymentReceipt(phone, {
-                customerName,
-                amount: payingNow,
-                productName: finalProductName,
-                orderRef: order.order_ref,
-                date: new Date().toLocaleDateString('en-PK')
-            }).catch(err => console.error('Wati Receipt Error:', err));
-        } else {
-            sendPartialInstallmentPaymentReceipt(phone, {
-                customerName,
-                paidAmount: payingNow,
-                remainingAmount: Math.max(0, dueAmount - totalPaid),
-                productName: finalProductName,
-                orderRef: order.order_ref,
-                dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
-            }).catch(err => console.error('Wati Partial Receipt Error:', err));
+        const targetPhones = [phone];
+        if (alternate_number && alternate_number.trim() !== '') {
+            targetPhones.push(alternate_number.trim());
+        }
+
+        for (const targetPhone of targetPhones) {
+            if (totalPaid >= dueAmount) {
+                sendInstallmentPaymentReceipt(targetPhone, {
+                    customerName,
+                    amount: payingNow,
+                    productName: finalProductName,
+                    orderRef: order.order_ref,
+                    date: new Date().toLocaleDateString('en-PK')
+                }).catch(err => console.error('Wati Receipt Error for', targetPhone, ':', err));
+            } else {
+                sendPartialInstallmentPaymentReceipt(targetPhone, {
+                    customerName,
+                    paidAmount: payingNow,
+                    remainingAmount: Math.max(0, dueAmount - totalPaid),
+                    productName: finalProductName,
+                    orderRef: order.order_ref,
+                    dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
+                }).catch(err => console.error('Wati Partial Receipt Error for', targetPhone, ':', err));
+            }
         }
 
         // Send Next Month Reminder if exists (unchanged)
         const nextRow = rows[rowIndex + 1];
+        const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
+        
         if (nextRow) {
             sendNextInstallmentReminder(phone, {
                 customerName,
                 productName: finalProductName,
                 monthlyAmount: nextRow.amount || nextRow.dueAmount,
                 dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-                ledgerUrl: ledger.token ? `${ledger.token}` : null
+                ledgerUrl
             }).catch(err => console.error('Wati Reminder Error:', err));
+        }
+
+        // Send Installment Ledger to all target phones
+        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+        let firstRowAmount = 0;
+        let dueDateStr = 'N/A';
+        if (rows.length > 1) {
+            firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
+            dueDateStr = new Date(rows[1].due_date || rows[1].dueDate).toLocaleDateString('en-PK');
+        }
+        for (const targetPhone of targetPhones) {
+            sendInstallmentLedger(targetPhone, {
+                customerName,
+                productName: finalProductName,
+                orderRef: order.order_ref,
+                nextMonthLabel: 'Mahina 1', // We can improve this, but leaving it consistent for now
+                monthlyAmount: firstRowAmount,
+                dueDate: dueDateStr,
+                totalRemaining: totalRemain,
+                ledgerUrl
+            }).catch(e => console.error('[WATI] Ledger send error on payment:', e));
         }
 
         // ── PayTrigger: Update repayment info if fully paid (non-blocking) ──
@@ -1619,16 +1651,25 @@ const verifyInstallmentPayment = async (req, res) => {
 };
 
 const getOutletOfficers = async (req, res) => {
-    const { role_id } = req.query; // 1 for VO, 2 for DO, 3 for RO
+    const { role_id, from, to, status } = req.query; // 1 for VO, 2 for DO, 3 for RO
     const outletId = req.user.outlet_id;
 
     if (!role_id) return res.status(400).json({ success: false, message: 'role_id is required' });
+
+    // Date range filter
+    const dateFilter = (from && to) ? {
+        created_at: {
+            gte: new Date(from + 'T00:00:00.000Z'),
+            lte: new Date(to + 'T23:59:59.999Z')
+        }
+    } : {};
 
     try {
         const officers = await prisma.user.findMany({
             where: {
                 outlet_id: outletId,
-                role_id: parseInt(role_id)
+                role_id: parseInt(role_id),
+                ...(status && status !== 'all' ? { status } : {})
             },
             select: {
                 id: true,
@@ -1650,7 +1691,8 @@ const getOutletOfficers = async (req, res) => {
                     where: {
                         verification: {
                             verification_officer_id: off.id
-                        }
+                        },
+                        ...dateFilter
                     },
                     select: {
                         status: true,
@@ -1717,7 +1759,8 @@ const getOutletOfficers = async (req, res) => {
                 const paidSum = await prisma.cashSubmissionHistory.aggregate({
                     where: {
                         cash_in_hand: { officer_id: off.id },
-                        status: 'paid'
+                        status: 'paid',
+                        ...(from && to ? { submission_date: { gte: new Date(from + 'T00:00:00.000Z'), lte: new Date(to + 'T23:59:59.999Z') } } : {})
                     },
                     _sum: { amount_submitted: true }
                 });
@@ -1790,7 +1833,7 @@ const getOfficerDetails = async (req, res) => {
     try {
         const officer = await prisma.user.findUnique({
             where: { id: parseInt(id) },
-            select: { id: true, full_name: true, phone: true, role_id: true, outlet_id: true }
+            select: { id: true, full_name: true, phone: true, role_id: true, outlet_id: true, status: true }
         });
 
         if (!officer || (officer.outlet_id !== outletId && req.user.role_id !== 7)) {
@@ -1960,9 +2003,17 @@ const getOutletInstallmentsDueList = async (req, res) => {
         page = 1,
         limit = 10,
         search = '',
-        tab = 'fresh', // 'fresh', 'due', 'completed'
+        category = 'all', // all, regular, fresh, overdue, blacklist, defaulter, ptp
         month,
-        year
+        year,
+        item,
+        ptp,
+        lock_status,
+        ro_id,
+        min_amount,
+        max_amount,
+        min_balance,
+        max_balance
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page));
@@ -2097,6 +2148,21 @@ const getOutletInstallmentsDueList = async (req, res) => {
             const g2Name = g2?.name || 'N/A';
             const g2Phone = g2?.telephone_number || 'N/A';
 
+            // Calculate Order-Level Stats for Categorization
+            const pendingInstallments = installmentLedger.filter(r => r.status !== 'paid' && r.status !== 'Paid');
+            const overdueInstallments = pendingInstallments.filter(r => r.dueDate && new Date(r.dueDate) < today);
+            const overdueCount = overdueInstallments.length;
+
+            let lastPaymentDate = null;
+            installmentLedger.forEach(r => {
+                if (r.paidAt) {
+                    const pd = new Date(r.paidAt);
+                    if (!lastPaymentDate || pd > lastPaymentDate) lastPaymentDate = pd;
+                }
+            });
+            const daysSinceLastPayment = lastPaymentDate ? (today - lastPaymentDate) / (1000 * 60 * 60 * 24) : 999;
+            const hasPtp = rawLedgerRows.some(r => r.ptp_date || r.ptpDate || r.ptp);
+
             // Process each installment in the ledger
             installmentLedger.forEach(inst => {
                 if (!inst.dueDate) return;
@@ -2155,12 +2221,17 @@ const getOutletInstallmentsDueList = async (req, res) => {
                             smartpay_consumer_number: smartpayConsumerNum,
                             consumer_bill_status: allConsumers.find(c => c.consumer_number === consumerNum)?.bill_status || null,
                             paytrigger_status: ledgerModel?.paytrigger_status || null,
-                        recovery_officer: order.recovery_officer ? {
-                            id: order.recovery_officer.id,
-                            name: order.recovery_officer.full_name,
-                            phone: order.recovery_officer.phone
-                        } : null
-                    });
+                            recovery_officer: order.recovery_officer ? {
+                                id: order.recovery_officer.id,
+                                name: order.recovery_officer.full_name,
+                                phone: order.recovery_officer.phone
+                            } : null,
+                            overdueCount,
+                            daysSinceLastPayment,
+                            hasPtp,
+                            orderTotalMonths: installmentLedger.length,
+                            orderPaidMonths: summary.paidInstallments || 0
+                        });
                 }
             });
         });
@@ -2168,15 +2239,23 @@ const getOutletInstallmentsDueList = async (req, res) => {
         // Sort by Due Date (ascending)
         allInstallments.sort((a, b) => a.dueDateObj - b.dueDateObj);
 
-        // Apply Tab Filter
+        // Apply Categories Filter
         let filtered = allInstallments;
-        if (tab === 'completed') {
-            filtered = allInstallments.filter(inst => inst.status === 'paid');
-        } else if (tab === 'due') {
-            filtered = allInstallments.filter(inst => inst.status !== 'paid' && inst.dueDateObj < today);
-        } else if (tab === 'fresh') {
-            filtered = allInstallments.filter(inst => inst.status !== 'paid' && inst.dueDateObj >= today);
+
+        if (category === 'regular') {
+            filtered = filtered.filter(inst => inst.overdueCount <= 1);
+        } else if (category === 'fresh') {
+            filtered = filtered.filter(inst => inst.dueDateObj >= today && inst.dueDateObj.getMonth() === (filterMonth - 1));
+        } else if (category === 'overdue') {
+            filtered = filtered.filter(inst => inst.overdueCount >= 2);
+        } else if (category === 'blacklist') {
+            filtered = filtered.filter(inst => inst.overdueCount >= 3);
+        } else if (category === 'defaulter') {
+            filtered = filtered.filter(inst => inst.overdueCount >= 3 && inst.daysSinceLastPayment >= 90);
+        } else if (category === 'ptp') {
+            filtered = filtered.filter(inst => inst.hasPtp);
         }
+        // If 'all', do nothing
 
         // Apply Search Filter
         if (q) {
@@ -2195,10 +2274,59 @@ const getOutletInstallmentsDueList = async (req, res) => {
             });
         }
 
+        // Apply Advanced Filters
+        if (item) {
+            filtered = filtered.filter(inst => (inst.product_name || '').toLowerCase().includes(item.toLowerCase()));
+        }
+        if (ptp === 'yes') {
+            filtered = filtered.filter(inst => inst.hasPtp);
+        } else if (ptp === 'no') {
+            filtered = filtered.filter(inst => !inst.hasPtp);
+        }
+        if (lock_status) {
+            filtered = filtered.filter(inst => (inst.paytrigger_status || '').toLowerCase() === lock_status.toLowerCase());
+        }
+        if (ro_id) {
+            filtered = filtered.filter(inst => inst.recovery_officer?.id == ro_id);
+        }
+        if (min_amount) {
+            filtered = filtered.filter(inst => inst.monthlyAmount >= Number(min_amount));
+        }
+        if (max_amount) {
+            filtered = filtered.filter(inst => inst.monthlyAmount <= Number(max_amount));
+        }
+        if (min_balance) {
+            filtered = filtered.filter(inst => inst.remainingAmount >= Number(min_balance));
+        }
+        if (max_balance) {
+            filtered = filtered.filter(inst => inst.remainingAmount <= Number(max_balance));
+        }
+
         // Pagination
         const total = filtered.length;
         const totalPages = Math.ceil(total / limitNum);
         const paginated = filtered.slice(skip, skip + limitNum);
+
+        // Calculate dynamic stats for the filtered list
+        const uniqueOrdersInFiltered = new Map();
+        filtered.forEach(inst => {
+            if (!uniqueOrdersInFiltered.has(inst.order_id)) {
+                uniqueOrdersInFiltered.set(inst.order_id, {
+                    monthsDue: inst.orderTotalMonths - inst.orderPaidMonths,
+                    monthsCollected: inst.orderPaidMonths,
+                    remainingAmount: inst.remainingAmount
+                });
+            }
+        });
+
+        let monthsDue = 0;
+        let monthsCollected = 0;
+        let monthsRemainingAmount = 0;
+        for (let val of uniqueOrdersInFiltered.values()) {
+            monthsDue += val.monthsDue;
+            monthsCollected += val.monthsCollected;
+            monthsRemainingAmount += val.remainingAmount;
+        }
 
         res.json({
             success: true,
@@ -2209,7 +2337,11 @@ const getOutletInstallmentsDueList = async (req, res) => {
                     totalPaidThisMonth,
                     remainingThisMonth: Math.max(0, totalDueThisMonth - totalPaidThisMonth),
                     overallSystemRemaining,
-                    overallSystemPaid
+                    overallSystemPaid,
+                    monthsDue,
+                    monthsCollected,
+                    monthsRemainingAmount,
+                    customerCount: uniqueOrdersInFiltered.size
                 },
                 pagination: {
                     total,

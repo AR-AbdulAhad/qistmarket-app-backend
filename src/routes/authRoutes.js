@@ -21,7 +21,9 @@ const {
   verifyWebLoginOTP,
   getDeviceLoginRequest,
   respondDeviceLoginRequest,
-  logoutUser
+  logoutUser,
+  recordLocation,
+  getLocationHistory
 } = require('../controllers/authController');
 
 const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
@@ -62,7 +64,7 @@ router.get('/users/recovery-officers', authenticateJWT, getRecoveryOfficers);
 
 router.post('/signup', authenticateJWT, requireSuperAdmin, signup);
 router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
-router.patch('/users/:userId/status', authenticateJWT, requireSuperAdmin, toggleUserStatus);
+router.patch('/users/:userId/status', authenticateJWT, toggleUserStatus);
 router.patch(
   '/users/:userId/edit',
   authenticateJWT,
@@ -73,6 +75,10 @@ router.patch(
 );
 router.patch('/users/:userId/permissions', authenticateJWT, requireSuperAdmin, updateUserPermissions);
 router.delete('/users/:userId', authenticateJWT, requireSuperAdmin, deleteUser);
+
+// Location tracking
+router.post('/users/location', authenticateJWT, recordLocation);
+router.get('/users/:user_id/location-history', authenticateJWT, getLocationHistory);
 
 
 module.exports = router;

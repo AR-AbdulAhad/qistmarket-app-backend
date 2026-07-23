@@ -14,6 +14,7 @@ const {
     createVendor,
     updateVendor,
     getVendorLedger,
+    recordVendorTransaction,
     createPurchaseReturn,
     getPurchaseReturns
 } = require('../controllers/vendorController');
@@ -22,6 +23,7 @@ const { authenticateJWT } = require('../middlewares/authMiddleware');
 router.get('/outlet/vendors', authenticateJWT, getVendors);
 router.post('/outlet/vendors', authenticateJWT, createVendor);
 router.patch('/outlet/vendors/:id', authenticateJWT, updateVendor);
+router.post('/outlet/vendors/:id/transaction', authenticateJWT, recordVendorTransaction);
 router.get('/outlet/vendors/ledger/:id', authenticateJWT, getVendorLedger);
 
 router.get('/outlet/vendors/purchases', authenticateJWT, getPurchases);

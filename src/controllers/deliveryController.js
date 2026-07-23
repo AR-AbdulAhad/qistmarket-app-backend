@@ -400,9 +400,10 @@ const submitDelivery = async (req, res) => {
           { expiresIn: '730d' }
         );
 
-        // Short unique ID for the PDF download link
-        const shortId = crypto.randomBytes(5).toString('hex');
-        ledgerUrl = `${ledgerToken}`;
+        // Short unique ID for the link (last 6 digits of IMEI)
+        const imeiStr = product_imei ? String(product_imei).replace(/\D/g, '') : '';
+        const shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
+        ledgerUrl = `${shortId}`;
 
         // Upsert ledger with explicit timestamps
         installmentLedger = await prisma.installmentLedger.upsert({
@@ -526,6 +527,25 @@ const submitDelivery = async (req, res) => {
           ledgerUrl,
         }).then(r => console.log('[WATI] Ledger template:', r.success ? 'sent ✓' : r.error))
           .catch(e => console.error('[WATI] Ledger template error:', e));
+      }
+      // Send to alternate phone as well
+      const altPhone = purchaser?.alternate_phone_number;
+      if (altPhone) {
+        if (installmentLedger && ledgerUrl) {
+          const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
+          const firstRow = rows[1];
+          const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+          sendInstallmentLedger(altPhone, {
+            customerName: confirmedCustomerName,
+            productName: productNameSnapshot,
+            orderRef: order.order_ref,
+            nextMonthLabel: 'Mahina 1',
+            monthlyAmount: firstRow?.amount || 0,
+            dueDate: firstRow ? formatDatePK(firstRow.due_date) : 'N/A',
+            totalRemaining: totalRemain,
+            ledgerUrl,
+          }).catch(e => console.error('[WATI] Ledger alt phone error:', e));
+        }
       }
     } else {
       console.warn('[submitDelivery] No customer phone — WATI messages skipped for order', order.order_ref);
@@ -2172,8 +2192,11 @@ const submitSelfPickupDelivery = async (req, res) => {
           LEDGER_TOKEN_SECRET,
           { expiresIn: '730d' }
         );
-        const shortId = crypto.randomBytes(5).toString('hex');
-        ledgerUrl = `${ledgerToken}`;
+        
+        // Short unique ID for the link (last 6 digits of IMEI)
+        const imeiStr = product_imei ? String(product_imei).replace(/\D/g, '') : '';
+        const shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
+        ledgerUrl = `${shortId}`;
 
         installmentLedger = await prisma.installmentLedger.create({
           data: {
@@ -2282,6 +2305,27 @@ const submitSelfPickupDelivery = async (req, res) => {
           ledgerUrl,
         }).catch(e => console.error('[WATI] Ledger template error:', e));
       }
+
+      // Send to alternate phone as well
+      const altPhone = purchaser?.alternate_phone_number;
+      if (altPhone) {
+        if (installmentLedger && ledgerUrl) {
+          const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
+          const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+          sendInstallmentLedger(altPhone, {
+            customerName: confirmedCustomerName,
+            productName: productNameSnapshot,
+            orderRef: order.order_ref,
+            nextMonthLabel: 'Mahina 1',
+            monthlyAmount: rows[1]?.amount || 0,
+            dueDate: rows[1] ? formatDatePK(rows[1].due_date) : 'N/A',
+            totalRemaining: totalRemain,
+            ledgerUrl,
+          }).catch(e => console.error('[WATI] Ledger alt phone error:', e));
+        }
+      }
+    } else {
+      console.warn('[completeDeliveryFromApp] No customer phone — WATI messages skipped for order', order.order_ref);
     }
 
     // 7. Success Response

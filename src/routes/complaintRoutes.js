@@ -8,6 +8,7 @@ const fixUploadPath = require('../middlewares/fixUploadPath');
 router.get('/complaints', authenticateJWT, getComplaints);
 router.get('/complaints/search-purchasers', authenticateJWT, searchPurchasers);
 router.post('/complaints', authenticateJWT, upload.array('media', 5), fixUploadPath, createComplaint);
+router.post('/complaints/public', upload.array('media', 5), fixUploadPath, createComplaint);
 router.put('/complaints/:id', authenticateJWT, updateComplaint);
 router.put('/complaints/:id/pick', authenticateJWT, pickComplaint);
 

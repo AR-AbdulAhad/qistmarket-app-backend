@@ -4,7 +4,8 @@ const {
     viewLedger,
     downloadLedgerPdf,
     generateInstallmentPaymentOtp,
-    verifyInstallmentPaymentOtp
+    verifyInstallmentPaymentOtp,
+    sendLedgerToCustomer
 } = require('../controllers/ledgerController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -17,5 +18,8 @@ router.get('/:token', viewLedger);
 // Installment Payment flows (Outlet Managers)
 router.post('/generate-payment-otp', authenticateJWT, generateInstallmentPaymentOtp);
 router.post('/verify-payment-and-pay', authenticateJWT, verifyInstallmentPaymentOtp);
+
+// Send Ledger via WhatsApp
+router.post('/:shortId/send', authenticateJWT, sendLedgerToCustomer);
 
 module.exports = router;

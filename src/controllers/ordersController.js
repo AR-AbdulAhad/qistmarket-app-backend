@@ -1890,7 +1890,8 @@ const getOrderById = async (req, res) => {
             }
           }
         },
-        dummyCustomer: true
+        dummyCustomer: true,
+        installment_ledger: true
       },
     });
 

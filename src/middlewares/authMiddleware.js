@@ -77,4 +77,29 @@ const requireSuperAdmin = async (req, res, next) => {
   }
 };
 
-module.exports = { authenticateJWT, requireSuperAdmin, clearUserSessionCache };
+const authorizeRoles = (...allowedRoles) => async (req, res, next) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ success: false, error: { code: 401, message: 'Unauthorized' } });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      include: { role: true },
+    });
+
+    if (!user || !user.role || !allowedRoles.includes(user.role.name)) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 403, message: 'Access denied. Insufficient role permission.' },
+      });
+    }
+
+    next();
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+module.exports = { authenticateJWT, requireSuperAdmin, authorizeRoles, clearUserSessionCache };

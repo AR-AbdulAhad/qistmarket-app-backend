@@ -46,6 +46,7 @@ const vendorRoutes = require('./src/routes/vendorRoutes');
 const inventoryRoutes = require('./src/routes/inventoryRoutes');
 const outletReportRoutes = require('./src/routes/outletReportRoutes');
 const searchRoutes = require('./src/routes/searchRoutes');
+const targetRoutes = require('./src/routes/targetRoutes');
 const securityLogRoutes = require('./src/routes/securityLogRoutes');
 const complaintRoutes = require('./src/routes/complaintRoutes');
 const tpsRoutes = require('./src/routes/tpsRoutes');
@@ -323,6 +324,16 @@ io.on('connection', (socket) => {
         });
       }
 
+      // Save to UserLocationHistory for admin route tracing
+      await prisma.userLocationHistory.create({
+        data: {
+          user_id: officerId,
+          latitude,
+          longitude,
+          accuracy: accuracy ? Number(accuracy) : null,
+        }
+      });
+
       io.to('admins').emit('officer_location_update', {
         officerId,
         latitude,
@@ -487,6 +498,7 @@ app.use('/api', expenseRoutes);
 app.use('/api', vendorRoutes);
 app.use('/api', inventoryRoutes);
 app.use('/api', outletReportRoutes);
+app.use('/api/targets', targetRoutes);
 app.use('/api', searchRoutes);
 app.use('/api/security-logs', securityLogRoutes);
 

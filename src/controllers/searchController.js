@@ -595,7 +595,7 @@ const shapeOrderHistoryResponse = (verifications, verificationRoleMap) => {
                 installment_ledger: ledgerModel ? {
                     id: ledgerModel.id,
                     short_id: ledgerModel.short_id || null,
-                    token: ledgerModel.token || null,
+                    token: ledgerModel.short_id || ledgerModel.token || null,
                     created_at: ledgerModel.created_at,
                     updated_at: ledgerModel.updated_at,
                     advance_payment,

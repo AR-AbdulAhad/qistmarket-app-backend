@@ -75,15 +75,64 @@ const getUnifiedRankings = async (req, res) => {
     try {
         const { period, month, year } = currentPeriod();
         const userInclude = {
-            select: { full_name: true, username: true, outlet: { select: { name: true } } },
+            select: { full_name: true, username: true, outlet: { select: { id: true, name: true } } },
         };
 
-        const [csr, verification, delivery, recovery] = await Promise.all([
+        const startOfMonth = new Date(year, month - 1, 1);
+        const endOfMonth = new Date(year, month, 1);
+
+        let [csr, verification, delivery, recovery] = await Promise.all([
             prisma.csrRanking.findMany({ where: { period, month, year }, orderBy: { rank: 'asc' }, include: { user: userInclude } }),
             prisma.verificationRanking.findMany({ where: { period, month, year }, orderBy: { rank: 'asc' }, include: { user: userInclude } }),
             prisma.deliveryRanking.findMany({ where: { period, month, year }, orderBy: { rank: 'asc' }, include: { user: userInclude } }),
             prisma.recoveryRanking.findMany({ where: { period, month, year }, orderBy: { rank: 'asc' }, include: { user: userInclude } }),
         ]);
+
+        // ── Live fallback: if recovery ranking table is empty for this month,
+        //    compute rankings on-the-fly from recovery visits so leaderboard
+        //    is never blank even before the ranking service triggers.
+        if (recovery.length === 0) {
+            const recoveryOfficers = await prisma.user.findMany({
+                where: { role: { name: 'Recovery Officer' } },
+                include: { outlet: { select: { id: true, name: true } } },
+            });
+
+            const liveRows = await Promise.all(
+                recoveryOfficers.map(async (officer, idx) => {
+                    const visits = await prisma.recoveryVisit.findMany({
+                        where: { officer_id: officer.id, visit_time: { gte: startOfMonth, lt: endOfMonth } },
+                        select: { payment_collected: true, amount_collected: true },
+                    });
+                    const orders = await prisma.order.findMany({
+                        where: { recovery_officer_id: officer.id, updated_at: { gte: startOfMonth, lt: endOfMonth } },
+                        select: { status: true },
+                    });
+                    const collectedVisits = visits.filter(v => v.payment_collected).length;
+                    const completedOrders = orders.filter(o => o.status === 'completed').length;
+                    const cancelledOrders = orders.filter(o => o.status === 'cancelled').length;
+                    const expiredOrders = orders.filter(o => o.status === 'expired').length;
+                    const score = (collectedVisits * 15) + (completedOrders * 5) - (cancelledOrders * 2) - (expiredOrders * 3);
+                    return {
+                        id: officer.id,
+                        officer_id: officer.id,
+                        score,
+                        rank: 0,
+                        trend: 0,
+                        total_sales: visits.reduce((s, v) => s + (v.amount_collected || 0), 0),
+                        unique_customers: 0,
+                        delivered_customers: 0,
+                        user: { full_name: officer.full_name, username: officer.username, outlet: officer.outlet },
+                        // live KPIs already available
+                        _liveVisits: visits,
+                    };
+                })
+            );
+
+            // Sort by score desc and assign ranks
+            liveRows.sort((a, b) => b.score - a.score);
+            liveRows.forEach((r, i) => { r.rank = i + 1; });
+            recovery = liveRows;
+        }
 
         const shape = (rows) => rows.map((r) => ({
             id: r.id,
@@ -91,6 +140,7 @@ const getUnifiedRankings = async (req, res) => {
             full_name: r.user?.full_name || 'Unknown',
             username: r.user?.username || '',
             outlet_name: r.user?.outlet?.name || 'Unassigned',
+            outlet_id: r.user?.outlet?.id || null,
             score: r.score,
             rank: r.rank,
             trend: r.trend,
@@ -108,8 +158,6 @@ const getUnifiedRankings = async (req, res) => {
         // Supplementary KPIs — computed from the underlying source tables
         // (not stored on the ranking rows themselves) for the top-10 rows
         // already returned per board, so this stays a bounded query volume.
-        const startOfMonth = new Date(year, month - 1, 1);
-        const endOfMonth = new Date(year, month, 1);
 
         await Promise.all([
             ...verificationShaped.slice(0, 10).map(async (row) => {
@@ -132,13 +180,16 @@ const getUnifiedRankings = async (req, res) => {
                 row.avg_delivery_minutes = avgMinutes(deliveries);
             }),
             ...recoveryShaped.slice(0, 10).map(async (row) => {
-                const visits = await prisma.recoveryVisit.findMany({
+                // Live-fallback rows already have visits cached
+                const visits = row._liveVisits ?? await prisma.recoveryVisit.findMany({
                     where: { officer_id: row.officer_id, visit_time: { gte: startOfMonth, lt: endOfMonth } },
                     select: { payment_collected: true, amount_collected: true },
                 });
                 row.visit_count = visits.length;
-                row.recovery_amount = visits.reduce((s, v) => s + (v.amount_collected || 0), 0);
+                row.amount_collected = visits.reduce((s, v) => s + (v.amount_collected || 0), 0);
+                row.recovery_rate = visits.length > 0 ? Math.round((visits.filter(v => v.payment_collected).length / visits.length) * 1000) / 10 : 0;
                 row.missed_visits = visits.filter((v) => !v.payment_collected).length;
+                delete row._liveVisits;
             }),
             ...csrShaped.map(async (row) => {
                 row.conversion_rate = row.unique_customers > 0 ? Math.round((row.delivered_customers / row.unique_customers) * 1000) / 10 : 0;

@@ -535,6 +535,16 @@ const toggleUserStatus = async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, error: { code: 404, message: 'User not found' } });
     }
+    // Authorization: Super Admin or Outlet Manager of the same outlet
+    if (req.user.role !== 'Super Admin') {
+      if (req.user.role === 'Branch User') {
+        if (user.outlet_id !== req.user.outlet_id) {
+          return res.status(403).json({ success: false, error: { code: 403, message: 'Access denied. You can only manage users in your own outlet.' } });
+        }
+      } else {
+        return res.status(403).json({ success: false, error: { code: 403, message: 'Access denied. Only Super Admin or Outlet Manager can perform this action.' } });
+      }
+    }
 
     if (user.id === req.user.id && status === 'inactive') {
       return res.status(403).json({ success: false, error: { code: 403, message: 'Cannot deactivate your own account.' } });
@@ -1290,6 +1300,59 @@ const logoutUser = async (req, res) => {
   }
 };
 
+// --- Location Tracking ---
+const recordLocation = async (req, res) => {
+  try {
+    const { latitude, longitude } = req.body;
+    if (!latitude || !longitude) {
+      return res.status(400).json({ success: false, message: 'Latitude and longitude are required' });
+    }
+    
+    // Also update last_known on User
+    await prisma.user.update({
+      where: { id: req.user.id },
+      data: { last_known_latitude: parseFloat(latitude), last_known_longitude: parseFloat(longitude), last_online_at: new Date() }
+    });
+
+    const location = await prisma.userLocationHistory.create({
+      data: {
+        user_id: req.user.id,
+        latitude: parseFloat(latitude),
+        longitude: parseFloat(longitude)
+      }
+    });
+    res.json({ success: true, data: location });
+  } catch (error) {
+    console.error('recordLocation error:', error);
+    res.status(500).json({ success: false, message: 'Error recording location' });
+  }
+};
+
+const getLocationHistory = async (req, res) => {
+  try {
+    const { user_id } = req.params;
+    const { date } = req.query; // format: YYYY-MM-DD
+    
+    let where = { user_id: parseInt(user_id) };
+    if (date) {
+      const startDate = new Date(date);
+      startDate.setHours(0, 0, 0, 0);
+      const endDate = new Date(date);
+      endDate.setHours(23, 59, 59, 999);
+      where.timestamp = { gte: startDate, lte: endDate };
+    }
+
+    const history = await prisma.userLocationHistory.findMany({
+      where,
+      orderBy: { timestamp: 'asc' }
+    });
+    res.json({ success: true, data: history });
+  } catch (error) {
+    console.error('getLocationHistory error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching location history' });
+  }
+};
+
 module.exports = {
   // OTP Login functions
   sendLoginOTP,
@@ -1301,6 +1364,10 @@ module.exports = {
   getDeviceLoginRequest,
   respondDeviceLoginRequest,
   logoutUser,
+
+  // Location Tracking
+  recordLocation,
+  getLocationHistory,
 
   // Existing functions
   signup,

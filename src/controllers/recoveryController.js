@@ -8,7 +8,8 @@ const {
   sendNextInstallmentReminder,
   sendPtpConfirmation,
   sendToMany,
-  getCompanyNotifyPhones
+  getCompanyNotifyPhones,
+  sendInstallmentLedger
 } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
@@ -734,12 +735,21 @@ const getCollectionStats = async (req, res) => {
     const totalCollected = collections.reduce((s, c) => s + c.amount, 0);
     const totalSubmitted = collections.reduce((s, c) => s + (c.submitted_amount || 0), 0);
 
+    // Fetch user cash limit
+    const limitRecord = await prisma.cashLimit.findUnique({
+      where: { scope_type_scope_id: { scope_type: 'officer', scope_id: officerId } }
+    });
+    const maxLimit = limitRecord ? limitRecord.daily_limit : null;
+    const isLimitExceeded = limitRecord ? (totalCashInHand >= limitRecord.daily_limit) : false;
+
     return res.json({
       success: true,
       data: {
         filter: filter || null,
         dateRange: start && end ? { start, end } : null,
         cashInHand: totalCashInHand,
+        cashLimit: maxLimit,
+        isLimitExceeded,
         totalCollected,
         totalSubmitted,
         count: collections.length,
@@ -1196,6 +1206,7 @@ const submitInstallment = async (req, res) => {
       })).catch(err => console.error('Wati Partial Receipt Error:', err));
     }
 
+    const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
     const nextRow = rows[rowIndex + 1];
     if (nextRow) {
       sendToMany(notifyPhones, (p) => sendNextInstallmentReminder(p, {
@@ -1203,7 +1214,7 @@ const submitInstallment = async (req, res) => {
         productName: finalProductName,
         monthlyAmount: nextRow.amount || nextRow.dueAmount,
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-        ledgerUrl: ledger.token ? `${ledger.token}` : null
+        ledgerUrl
       })).catch(err => console.error('Wati Reminder Error:', err));
     }
 
@@ -1219,6 +1230,29 @@ const submitInstallment = async (req, res) => {
         amountDue: Math.max(0, dueAmount - totalPaid),
       })).catch(err => console.error('Wati PTP Confirmation Error:', err));
     }
+
+    // Send Installment Ledger
+    const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
+    let firstRowAmount = 0;
+    let dueDateStr = 'N/A';
+    if (rows.length > 1) {
+        firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
+        const firstRowDate = new Date(rows[1].due_date || rows[1].dueDate);
+        if (!isNaN(firstRowDate.getTime())) {
+            dueDateStr = firstRowDate.toLocaleDateString('en-PK');
+        }
+    }
+
+    sendToMany(notifyPhones, (p) => sendInstallmentLedger(p, {
+        customerName,
+        productName: finalProductName,
+        orderRef: order.order_ref,
+        nextMonthLabel: 'Mahina 1',
+        monthlyAmount: firstRowAmount,
+        dueDate: dueDateStr,
+        totalRemaining: totalRemain,
+        ledgerUrl
+    })).catch(e => console.error('[WATI] Ledger send error on payment:', e));
 
     // await logAction(...) commented out
 

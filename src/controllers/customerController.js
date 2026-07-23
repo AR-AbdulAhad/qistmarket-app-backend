@@ -406,6 +406,30 @@ const getBlacklistedCustomers = async (req, res) => {
       a.customer.name.localeCompare(b.customer.name)
     );
 
+    // Attach manual blacklist reasons
+    const cnics = allBlacklisted.map(c => c.customer.cnic_number).filter(Boolean);
+    if (cnics.length > 0) {
+      const actions = await prisma.blacklistAction.findMany({
+        where: { cnic: { in: cnics }, action: 'blacklist' },
+        orderBy: { created_at: 'desc' }
+      });
+      // Get the latest blacklist action reason per cnic
+      const reasonMap = new Map();
+      for (const a of actions) {
+        if (!reasonMap.has(a.cnic)) {
+          reasonMap.set(a.cnic, a.reason);
+        }
+      }
+      
+      for (const c of allBlacklisted) {
+        if (c.customer.cnic_number && reasonMap.has(c.customer.cnic_number)) {
+          c.customer.blacklist_reason = reasonMap.get(c.customer.cnic_number) || 'Manual blacklist (No reason provided)';
+        } else {
+          c.customer.blacklist_reason = 'Auto-flagged (90+ days delinquency)';
+        }
+      }
+    }
+
     return res.status(200).json({
       success: true,
       data: {
@@ -678,7 +702,7 @@ const getCustomerLedger = async (req, res) => {
         totalInstallments: installmentLedger.length,
       },
       installmentLedger,
-      ledger_short_id: ledgerModel?.token || null
+      ledger_short_id: ledgerModel?.short_id || ledgerModel?.token || null
     };
 
     res.json({

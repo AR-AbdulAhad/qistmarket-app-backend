@@ -68,4 +68,10 @@ const { getAutoAssignmentSettings, updateAutoAssignmentSettings } = require('../
 router.get('/outlet/auto-assignment-settings', authenticateJWT, getAutoAssignmentSettings);
 router.post('/outlet/auto-assignment-settings', authenticateJWT, updateAutoAssignmentSettings);
 
+// Bank Deposit requests (from outlet users)
+const { submitBankDeposit, listBankDeposits } = require('../controllers/bankAccountController');
+const upload = require('../middlewares/uploadMiddleware');
+router.post('/outlet/bank-deposits', authenticateJWT, upload.single('receipt_photo'), submitBankDeposit);
+router.get('/outlet/bank-deposits', authenticateJWT, listBankDeposits);
+
 module.exports = router;

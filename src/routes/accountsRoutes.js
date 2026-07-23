@@ -29,6 +29,9 @@ const {
   reconcileTransactions,
   getReconciliationStatus,
   createInterBankTransfer,
+  submitBankDeposit,
+  listBankDeposits,
+  verifyBankDeposit
 } = require('../controllers/bankAccountController');
 const upload = require('../middlewares/uploadMiddleware');
 const { requirePermission } = require('../middlewares/permissionMiddleware');
@@ -104,6 +107,14 @@ const router = express.Router();
 router.post('/login', accountantLogin);
 
 // Protected Accounts routes
+// --- Bank Deposit Requests (Accessible by Outlets & Accounts) ---
+router.post('/bank-deposits', authenticateJWT, upload.single('receipt_photo'), submitBankDeposit);
+router.get('/bank-deposits', authenticateJWT, listBankDeposits);
+router.patch('/bank-deposits/:id/verify', authenticateJWT, requireAccountant, verifyBankDeposit);
+
+// --- Bank Accounts (Accessible by Outlets for deposits) ---
+router.get('/bank-accounts', authenticateJWT, getBankAccounts);
+
 router.use(authenticateJWT, requireAccountant);
 
 router.get('/dashboard-summary', getDashboardSummary);
@@ -120,8 +131,7 @@ router.get('/recovery-analytics/channel-wise', getChannelWiseRecovery);
 router.get('/alerts', getGlobalAlerts);
 router.get('/installment-receiving', getInstallmentReceivingOverview);
 
-// Bank Accounts
-router.get('/bank-accounts', getBankAccounts);
+// Bank Accounts (other routes)
 router.get('/bank-accounts/summary', getBankBalanceSummary);
 router.post('/bank-accounts', createBankAccount);
 router.patch('/bank-accounts/:id', updateBankAccount);
@@ -129,6 +139,8 @@ router.get('/bank-accounts/:id/ledger', getBankAccountLedger);
 router.post('/bank-accounts/transactions', recordBankTransaction);
 router.post('/bank-accounts/transfer', createInterBankTransfer);
 router.post('/bank-accounts/statements', upload.single('file'), uploadBankStatement);
+
+
 router.get('/bank-accounts/statements', getBankStatements);
 router.post('/bank-accounts/reconcile', reconcileTransactions);
 router.get('/bank-accounts/:bank_account_id/reconciliation-status', getReconciliationStatus);
