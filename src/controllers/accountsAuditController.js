@@ -210,9 +210,41 @@ const getLowRecoveryAlerts = async (req, res) => {
     }
 };
 
+/**
+ * getUnassignedRecoveryAlerts
+ * Delivered orders with recovery_officer_id still null. Confirmed via the
+ * order-lifecycle audit: getRecoveryCustomers (recoveryController.js) filters
+ * strictly by recovery_officer_id, so a null value means the order sits in
+ * NO officer's queue at all — the only place it's visible today is a manual
+ * admin visit to /recovery-orders. This surfaces that gap as a real alert.
+ */
+const getUnassignedRecoveryAlerts = async (req, res) => {
+    try {
+        const orders = await prisma.order.findMany({
+            where: { status: { notIn: ['Cancelled', 'Rejected'] }, is_delivered: true, recovery_officer_id: null },
+            select: { id: true, order_ref: true, customer_name: true },
+            take: 50,
+        });
+
+        const alerts = orders.length > 0 ? [{
+            severity: 'serious',
+            type: 'unassigned_recovery',
+            title: `${orders.length} delivered order(s) with no recovery officer`,
+            message: `${orders.length} delivered order(s) have no recovery officer assigned and are receiving no follow-up (${orders.slice(0, 5).map((o) => o.order_ref).join(', ')}${orders.length > 5 ? ', ...' : ''}).`,
+            link: '/recovery-orders',
+        }] : [];
+
+        res.json({ success: true, data: { count: alerts.length, alerts, orders } });
+    } catch (error) {
+        console.error('getUnassignedRecoveryAlerts error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getLoginHistory,
     getFraudAlerts,
     getDuplicateCnicAlerts,
     getLowRecoveryAlerts,
+    getUnassignedRecoveryAlerts,
 };

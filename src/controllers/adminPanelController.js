@@ -363,15 +363,19 @@ const getAttendanceMonitoring = async (req, res) => {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
-        const [employees, attendanceToday] = await Promise.all([
+        const [employees, attendanceToday, unlinkedOfficerCounts] = await Promise.all([
             prisma.employee.findMany({ where: { portal_active: true }, select: { id: true, outlet_id: true } }),
             prisma.employeeAttendance.findMany({ where: { date: today }, select: { employee_id: true, status: true } }),
+            // Officers with a User login at this outlet but no linked HR
+            // Employee record — see linkEmployeesToUsers.js. These people
+            // are working but invisible to attendance tracking entirely.
+            prisma.user.findMany({ where: { outlet_id: { not: null }, employee_profile: null }, select: { outlet_id: true } }),
         ]);
 
         const attendanceByEmployee = Object.fromEntries(attendanceToday.map((a) => [a.employee_id, a.status]));
         const outlets = await prisma.outlet.findMany({ select: { id: true, name: true } });
         const outletMap = {};
-        for (const o of outlets) outletMap[o.id] = { outlet_id: o.id, outlet_name: o.name, totalStaff: 0, present: 0, absent: 0, notMarked: 0 };
+        for (const o of outlets) outletMap[o.id] = { outlet_id: o.id, outlet_name: o.name, totalStaff: 0, present: 0, absent: 0, notMarked: 0, unlinkedOfficers: 0 };
 
         for (const emp of employees) {
             const entry = outletMap[emp.outlet_id];
@@ -383,7 +387,12 @@ const getAttendanceMonitoring = async (req, res) => {
             else entry.absent += 1;
         }
 
-        res.json({ success: true, data: Object.values(outletMap).filter((o) => o.totalStaff > 0) });
+        for (const u of unlinkedOfficerCounts) {
+            const entry = outletMap[u.outlet_id];
+            if (entry) entry.unlinkedOfficers += 1;
+        }
+
+        res.json({ success: true, data: Object.values(outletMap).filter((o) => o.totalStaff > 0 || o.unlinkedOfficers > 0) });
     } catch (error) {
         console.error('getAttendanceMonitoring error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -568,11 +577,20 @@ const getOutletStaffList = async (req, res) => {
     try {
         const staff = await prisma.user.findMany({
             where: { outlet_id: parseInt(outlet_id) },
-            select: { id: true, full_name: true, username: true, phone: true, status: true, is_online: true, role: { select: { name: true } } },
+            select: { id: true, full_name: true, username: true, phone: true, status: true, is_online: true, role: { select: { name: true } }, employee_profile: { select: { id: true } } },
             orderBy: { full_name: 'asc' },
         });
 
-        res.json({ success: true, data: staff.map((s) => ({ id: s.id, full_name: s.full_name, username: s.username, phone: s.phone, status: s.status, is_online: s.is_online, role: s.role?.name || 'Unknown' })) });
+        res.json({
+            success: true,
+            data: staff.map((s) => ({
+                id: s.id, full_name: s.full_name, username: s.username, phone: s.phone, status: s.status, is_online: s.is_online, role: s.role?.name || 'Unknown',
+                // Whether this login account has a linked HR Employee record —
+                // see linkEmployeesToUsers.js. Unlinked officers won't show up
+                // in Attendance Monitoring since that's Employee-based.
+                has_employee_record: !!s.employee_profile,
+            })),
+        });
     } catch (error) {
         console.error('getOutletStaffList error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });

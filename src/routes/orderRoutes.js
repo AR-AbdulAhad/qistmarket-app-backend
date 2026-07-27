@@ -40,17 +40,22 @@ const {
   updateOrderStatus,
 } = require('../controllers/ordersController');
 const { submitSelfPickupDelivery } = require('../controllers/deliveryController');
-const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
+const { authenticateJWT, requireSuperAdmin, authorizeRoles } = require('../middlewares/authMiddleware');
+
+// Roles that legitimately manage orders day-to-day today (confirmed via
+// OrderList.tsx/ApprovedOrderList.tsx being shared across MAIN MENU, CSR
+// PORTAL, and OUTLET PORTAL) — not just Admin/Super Admin.
+const requireOrderManager = authorizeRoles('Admin', 'Super Admin', 'Branch User', 'Sales Officer');
 const upload = require('../middlewares/uploadMiddleware');
 const fixUploadPath = require('../middlewares/fixUploadPath');
 
 // Recovery Related Order Routes (Specific routes first)
 router.get('/orders/delivered-list', authenticateJWT, getDeliveredOrders);
-router.patch('/orders/:id/assign-recovery', authenticateJWT, assignRecovery);
-router.post('/orders/assign-bulk-recovery', authenticateJWT, assignBulkRecovery);
+router.patch('/orders/:id/assign-recovery', authenticateJWT, requireOrderManager, assignRecovery);
+router.post('/orders/assign-bulk-recovery', authenticateJWT, requireOrderManager, assignBulkRecovery);
 
 // Standard Order Routes
-router.get('/orders/verification-pending', getVerificationOrders);
+router.get('/orders/verification-pending', authenticateJWT, getVerificationOrders);
 router.get('/orders/delivery-pending', authenticateJWT, getApprovedOrders);
 router.get('/orders/delivery-status', authenticateJWT, getDeliveryStatus);
 router.post('/orders/create', authenticateJWT, createOrder);
@@ -64,10 +69,10 @@ router.get('/orders/deliver/scroll', authenticateJWT, getMyDeliveryOrdersWithPag
 router.patch('/orders/:id/assign', authenticateJWT, assignOrder);
 router.post('/orders/assign-bulk', authenticateJWT, assignBulk);
 router.get('/orders/:id', authenticateJWT, getOrderById);
-router.patch('/orders/:id/assign-delivery', authenticateJWT, assignDelivery);
-router.post('/orders/assign-bulk-delivery', authenticateJWT, assignBulkDelivery);
+router.patch('/orders/:id/assign-delivery', authenticateJWT, requireOrderManager, assignDelivery);
+router.post('/orders/assign-bulk-delivery', authenticateJWT, requireOrderManager, assignBulkDelivery);
 router.patch('/orders/website-feed/:id/cancel', authenticateJWT, cancelWebsiteOrderFeedItem);
-router.patch('/orders/:id/cancel', authenticateJWT, cancelOrder);
+router.patch('/orders/:id/cancel', authenticateJWT, requireOrderManager, cancelOrder);
 router.patch('/orders/:id/status', authenticateJWT, requireSuperAdmin, updateOrderStatus);
 router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
 router.patch('/orders/:id/take', authenticateJWT, takeOrder);

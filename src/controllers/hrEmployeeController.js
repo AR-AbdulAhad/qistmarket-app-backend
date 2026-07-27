@@ -91,11 +91,21 @@ const createEmployee = async (req, res) => {
     const {
       full_name, cnic, phone, email, address, emergency_contact, emergency_phone,
       qualification, experience, date_of_birth, date_of_joining,
-      department, designation, outlet_id, basic_salary,
+      department, designation, outlet_id, basic_salary, user_id,
     } = req.body;
 
     if (!full_name) {
       return res.status(400).json({ success: false, message: 'Full name is required.' });
+    }
+
+    // Optional link to an existing operational User login (e.g. a field
+    // officer who already has a User account) — HR-only hires with no
+    // login account simply omit this and stay unlinked, same as today.
+    if (user_id) {
+      const existingLink = await prisma.employee.findUnique({ where: { user_id: parseInt(user_id) } });
+      if (existingLink) {
+        return res.status(400).json({ success: false, message: 'That user account is already linked to another employee record.' });
+      }
     }
 
     const employeeCode = await generateEmployeeCode();
@@ -127,6 +137,7 @@ const createEmployee = async (req, res) => {
           department: department || null,
           designation: designation || null,
           outlet_id: outlet_id ? parseInt(outlet_id) : null,
+          user_id: user_id ? parseInt(user_id) : null,
         },
         include: { outlet: true },
       });

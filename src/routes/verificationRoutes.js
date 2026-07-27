@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const upload = require('../middlewares/uploadMiddleware');
 const fixUploadPath = require('../middlewares/fixUploadPath');
-const { authenticateJWT } = require('../middlewares/authMiddleware');
+const { authenticateJWT, authorizeRoles } = require('../middlewares/authMiddleware');
 
 const {
   getVerifications,
@@ -60,7 +60,7 @@ router.post('/verification/check-person', authenticateJWT, checkVerificationPers
 router.post('/verification/start', authenticateJWT, startVerification);
 
 // Get verification by order ID
-router.get('/verification/order/:order_id', getVerificationByOrderId);
+router.get('/verification/order/:order_id', authenticateJWT, getVerificationByOrderId);
 
 // Save verification data
 router.post('/verification/:verification_id/purchaser', authenticateJWT, savePurchaserVerification);
@@ -135,7 +135,7 @@ router.delete('/verification/document/:document_id', authenticateJWT, deleteDocu
 router.post('/verification/:verification_id/complete', authenticateJWT, completeVerification);
 
 // Submit review (replaces admin approval)
-router.post('/verification/:verification_id/approve', authenticateJWT, submitVerificationReview);
+router.post('/verification/:verification_id/approve', authenticateJWT, authorizeRoles('Verification Officer', 'Admin', 'Super Admin'), submitVerificationReview);
 
 // NEW: Location Handling
 router.post('/verification/:verification_id/send-to-vo', authenticateJWT, sendToVOForLocation);

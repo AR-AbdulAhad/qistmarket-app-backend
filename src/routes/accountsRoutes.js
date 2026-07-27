@@ -80,6 +80,7 @@ const {
   getFraudAlerts,
   getDuplicateCnicAlerts,
   getLowRecoveryAlerts,
+  getUnassignedRecoveryAlerts,
 } = require('../controllers/accountsAuditController');
 const {
   getWarehouseStockSummary,
@@ -192,6 +193,7 @@ router.get('/audit/login-history', getLoginHistory);
 router.get('/audit/fraud-alerts', getFraudAlerts);
 router.get('/audit/duplicate-cnic', getDuplicateCnicAlerts);
 router.get('/audit/low-recovery', getLowRecoveryAlerts);
+router.get('/audit/unassigned-recovery', getUnassignedRecoveryAlerts);
 
 // Stock: warehouse, transfers, returns, IMEI/barcode search, health alerts,
 // damaged stock, product movement, pricing comparison

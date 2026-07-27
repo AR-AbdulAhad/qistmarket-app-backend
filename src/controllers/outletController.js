@@ -777,6 +777,22 @@ const verifyReturnExchangeOtp = async (req, res) => {
                     updated_at: nowDate   // ✅ explicit updated_at
                 }
             });
+
+            // Mirror the cancellation into OfficerTransaction — without this
+            // the paired credit row stays type:'credit', status:'pending'
+            // forever even though the cash was clawed back at the outlet,
+            // silently inflating every OfficerTransaction-based pending-cash
+            // figure (Accounts Dashboard, Cash In Hand page, Outlets pending
+            // cash column) by the returned/exchanged order's amount.
+            await prisma.officerTransaction.updateMany({
+                where: {
+                    officer_id: pendingCash.officer_id,
+                    order_ref: record.order.order_ref,
+                    type: 'credit',
+                    status: 'pending'
+                },
+                data: { status: 'cancelled' }
+            });
         }
 
         // Step 6: Change order status & Handle Exchange
