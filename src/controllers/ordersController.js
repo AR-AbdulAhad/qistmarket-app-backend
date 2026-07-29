@@ -2035,6 +2035,7 @@ const assignOrder = async (req, res) => {
       );
     }
     await sendOrderAssignmentNotification(updatedOrder, updatedOrder.assigned_to, 'verification', io);
+    io?.to(`officer_${user_id}`).emit('verification_data_updated', { reason: 'order_assigned', orderId: updatedOrder.id });
 
     return res.status(200).json({
       success: true,
@@ -2610,6 +2611,7 @@ const assignDelivery = async (req, res) => {
     if (updatedOrder.delivery_officer) {
       await sendOrderAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, 'delivery', io);
     }
+    io?.to(`officer_${user_id}`).emit('delivery_data_updated', { reason: 'order_assigned', orderId: updatedOrder.id });
 
     return res.status(200).json({
       success: true,

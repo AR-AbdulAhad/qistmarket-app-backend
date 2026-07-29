@@ -679,6 +679,8 @@ const submitBranchPayment = async (req, res) => {
         .catch(err => console.error('notifyOutlet error:', err));
     }
 
+    io?.to(`officer_${officerId}`).emit('recovery_data_updated', { reason: 'branch_payment_collected', orderId: order.id });
+
     return res.json({ success: true, message: 'Payment processed successfully' });
   } catch (error) {
     console.error('submitBranchPayment error:', error);
@@ -1005,6 +1007,8 @@ const logRecoveryVisit = async (req, res) => {
       })).catch(err => console.error('Wati PTP Confirmation Error:', err));
     }
 
+    req.app.get('io')?.to(`officer_${officerId}`).emit('recovery_data_updated', { reason: 'visit_logged', orderId: order.id });
+
     return res.json({ success: true, message: 'Recovery visit logged successfully with photos', visit: result });
   } catch (error) {
     console.error('logRecoveryVisit error:', error);
@@ -1266,6 +1270,10 @@ const submitInstallment = async (req, res) => {
       notifyOutlet(order.outlet_id, notifyTitle, notifyMsg, 'payment_collected', order.id, io)
         .catch(err => console.error('notifyOutlet error:', err));
     }
+
+    // Push the officer's own dashboard cards to refresh instantly instead of
+    // waiting for a manual pull-to-refresh.
+    io?.to(`officer_${officerId}`).emit('recovery_data_updated', { reason: 'installment_collected', orderId: order.id });
 
     return res.json({ success: true, message: 'Payment processed successfully' });
   } catch (error) {

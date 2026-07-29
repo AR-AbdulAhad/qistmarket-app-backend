@@ -583,6 +583,8 @@ const submitDelivery = async (req, res) => {
       );
     }
 
+    io?.to(`officer_${req.user.id}`).emit('delivery_data_updated', { reason: 'delivery_submitted', orderId: order.id });
+
     // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
     const enrollPaytrigger = enroll_paytrigger === true || enroll_paytrigger === 'true';
     const paytriggerBrand = pt.detectBrand(productNameSnapshot);
@@ -965,13 +967,29 @@ const getCashInHand = async (req, res) => {
       .filter(e => e.status === 'pending')
       .reduce((sum, e) => sum + (e.amount - (e.submitted_amount || 0)), 0);
 
+    // Cash-in-hand limit (Admin → Cash Limits) — computed against the
+    // officer's TRUE unsubmitted balance, not the (possibly date-filtered)
+    // currentBalance above, same as recoveryController.getCollectionStats.
+    const pendingEntries = await prisma.cashInHand.findMany({
+      where: { officer_id: deliveryBoyId, status: 'pending' }
+    });
+    const trueCashInHand = pendingEntries.reduce((sum, e) => sum + (e.amount - (e.submitted_amount || 0)), 0);
+    const limitRecord = await prisma.cashLimit.findUnique({
+      where: { scope_type_scope_id: { scope_type: 'officer', scope_id: deliveryBoyId } }
+    });
+    const cashLimit = limitRecord ? limitRecord.daily_limit : null;
+    const isLimitExceeded = limitRecord ? (trueCashInHand >= limitRecord.daily_limit) : false;
+
     return res.status(200).json({
       success: true,
       transaction_history: groupedHistory,
       current_balance: currentBalance,
       total_credits: totalCredits,
       total_debits: totalDebits,
-      total_unpaid: totalUnpaid
+      total_unpaid: totalUnpaid,
+      cash_in_hand: trueCashInHand,
+      cash_limit: cashLimit,
+      is_limit_exceeded: isLimitExceeded
     });
   } catch (error) {
     console.error('getCashInHand error:', error);
@@ -1483,6 +1501,8 @@ const verifyDeliveryOtp = async (req, res) => {
           io
         );
 
+        io?.to(`officer_${req.user.id}`).emit('delivery_data_updated', { reason: 'delivery_submitted', orderId: order.id });
+
         return res.status(200).json({
           success: true,
           valid: true,
@@ -1540,6 +1560,8 @@ const returnProduct = async (req, res) => {
       order_id,
       io
     );
+
+    io?.to(`officer_${req.user.id}`).emit('delivery_data_updated', { reason: 'product_returned', orderId: parseInt(order_id) });
 
     return res.status(200).json({ success: true, message: 'Product marked as returned' });
   } catch (error) {
@@ -1610,6 +1632,8 @@ const verifyRefundOtp = async (req, res) => {
       order_id,
       io
     );
+
+    io?.to(`officer_${req.user.id}`).emit('delivery_data_updated', { reason: 'refund_processed', orderId: parseInt(order_id) });
 
     return res.status(200).json({ success: true, valid: true, message: 'Refund verified and processed' });
   } catch (error) {
@@ -1746,6 +1770,8 @@ const unpickOrder = async (req, res) => {
         io
       );
     }
+
+    io?.to(`officer_${req.user.id}`).emit('delivery_data_updated', { reason: 'order_unpicked', orderId: parseInt(order_id) });
 
     return res.status(200).json({ success: true, message: 'Order has been postponed successfully', feedback });
   } catch (error) {

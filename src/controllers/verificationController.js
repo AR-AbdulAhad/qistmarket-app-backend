@@ -189,6 +189,7 @@ const startVerification = async (req, res) => {
         officerId: verification.verification_officer_id,
         current_verification: currentVerification,
       });
+      io.to(`officer_${verification.verification_officer_id}`).emit('verification_data_updated', { reason: 'verification_started', orderId: order.id });
     }
 
     return res.status(201).json({
@@ -1235,6 +1236,8 @@ const completeVerification = async (req, res) => {
       );
     }
 
+    io?.to(`officer_${updatedVerification.verification_officer_id}`).emit('verification_data_updated', { reason: 'verification_completed', orderId: updatedVerification.order_id });
+
     return res.status(200).json({
       success: true,
       message: 'Verification completed successfully',
@@ -1490,6 +1493,10 @@ const submitVerificationReview = async (req, res) => {
       io
     );
 
+    // Push to the ORIGINAL submitting officer (not the reviewer) — their
+    // order's status may have just changed to approved/rejected.
+    io?.to(`officer_${verification.verification_officer_id}`).emit('verification_data_updated', { reason: 'review_submitted', orderId: verification.order.id });
+
     if (verification.order.outlet_id) {
       await notifyOutlet(
         verification.order.outlet_id,
@@ -1629,13 +1636,14 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
 
     const where = { ...baseWhere };
     if (cursorId > 0) {
-      where.id = { gt: cursorId };
+      // Descending feed — "load more" continues below the last-seen id.
+      where.id = { lt: cursorId };
     }
 
     const orders = await prisma.order.findMany({
       where,
       take,
-      orderBy: { id: 'asc' },
+      orderBy: { id: 'desc' },
       include: {
         created_by: { select: { username: true, full_name: true } },
         assigned_to: { select: { username: true, full_name: true } },

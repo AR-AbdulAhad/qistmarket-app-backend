@@ -184,8 +184,9 @@ io.on('connection', (socket) => {
       const isVerificationOfficer = decoded.role === 'Verification Officer' || decoded.role_id === 1;
       const isDeliveryAgent = decoded.role === 'Delivery Agent' || decoded.role_id === 3;
       const isDeliveryOfficer = decoded.role === 'Delivery Officer' || decoded.role_id === 2;
+      const isRecoveryOfficer = decoded.role === 'Recovery Officer';
 
-      if (!isVerificationOfficer && !isDeliveryAgent && !isDeliveryOfficer) {
+      if (!isVerificationOfficer && !isDeliveryAgent && !isDeliveryOfficer && !isRecoveryOfficer) {
         console.warn(`[socket][officer_login] REJECTED → role not allowed: ${decoded.role} (role_id=${decoded.role_id})`);
         socket.emit('auth_error', { message: 'Not an authorized Officer/Agent' });
         return;

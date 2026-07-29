@@ -388,29 +388,34 @@ const signup = async (req, res) => {
     });
   }
 
+  const normalizedUsername = username.toLowerCase().trim();
+  const normalizedCnic = cnic.trim();
+  const normalizedPhone = phone.trim();
+  const normalizedEmail = email ? email.toLowerCase().trim() : null;
+
   try {
     const existingUser = await prisma.user.findFirst({
       where: {
         OR: [
-          { username },
-          { cnic },
-          { phone },
-          ...(email ? [{ email }] : []),
+          { username: normalizedUsername },
+          { cnic: normalizedCnic },
+          { phone: normalizedPhone },
+          ...(normalizedEmail ? [{ email: normalizedEmail }] : []),
         ],
       },
     });
 
     if (existingUser) {
-      if (existingUser.username === username) {
+      if (existingUser.username === normalizedUsername) {
         return res.status(409).json({ success: false, error: { code: 409, message: 'Username already exists.' } });
       }
-      if (existingUser.cnic === cnic) {
+      if (existingUser.cnic === normalizedCnic) {
         return res.status(409).json({ success: false, error: { code: 409, message: 'CNIC already registered.' } });
       }
-      if (existingUser.phone === phone) {
+      if (existingUser.phone === normalizedPhone) {
         return res.status(409).json({ success: false, error: { code: 409, message: 'Phone already registered.' } });
       }
-      if (email && existingUser.email === email) {
+      if (normalizedEmail && existingUser.email === normalizedEmail) {
         return res.status(409).json({ success: false, error: { code: 409, message: 'Email already registered.' } });
       }
     }
@@ -426,22 +431,33 @@ const signup = async (req, res) => {
       hashedPassword = await bcrypt.hash(password, 10);
     }
 
-    let user = await prisma.user.create({
-      data: {
-        full_name,
-        username: username.toLowerCase().trim(),
-        role_id: parseInt(role_id),
-        cnic: cnic.trim(),
-        phone: phone.trim(),
-        email: email ? email.toLowerCase().trim() : null,
-        password_hash: hashedPassword,
-        outlet_id: outlet_id ? parseInt(outlet_id) : null,
-        status: 'active',
-        created_at: now(),
-        updated_at: now()
-      },
-      include: { role: true, outlet: true },
-    });
+    let user;
+    try {
+      user = await prisma.user.create({
+        data: {
+          full_name,
+          username: normalizedUsername,
+          role_id: parseInt(role_id),
+          cnic: normalizedCnic,
+          phone: normalizedPhone,
+          email: normalizedEmail,
+          password_hash: hashedPassword,
+          outlet_id: outlet_id ? parseInt(outlet_id) : null,
+          status: 'active',
+          created_at: now(),
+          updated_at: now()
+        },
+        include: { role: true, outlet: true },
+      });
+    } catch (createError) {
+      if (createError.code === 'P2002') {
+        const target = createError.meta?.target;
+        const rawField = Array.isArray(target) ? target[0] : String(target || '');
+        const field = rawField.replace(/^User_/, '').replace(/_key$/, '') || 'field';
+        return res.status(409).json({ success: false, error: { code: 409, message: `This ${field} is already registered.` } });
+      }
+      throw createError;
+    }
 
     // Generate consumer numbers based on user's phone using standard utility
     const billConsumerNumber = await generateConsumerNumber(null, user.phone);
