@@ -25,6 +25,11 @@ const {
     getPendingCashSubmissions,
     resendCashSubmissionOTP
 } = require('../controllers/outletController');
+const {
+    getOutletCashLimits,
+    setOutletCashLimit,
+    deleteOutletCashLimit,
+} = require('../controllers/accountsCashController');
 const { generateSmartPayQr, checkSmartPayQr } = require('../controllers/smartPayController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 const { requirePermission } = require('../middlewares/permissionMiddleware');
@@ -42,6 +47,9 @@ router.get('/outlet/global-cash-in-hand', authenticateJWT, getGlobalCashInHand);
 router.get('/outlet/cash-history', authenticateJWT, getOutletCashHistory);
 router.get('/outlet/pending-cash-submissions', authenticateJWT, getPendingCashSubmissions);
 router.post('/outlet/resend-cash-otp', authenticateJWT, resendCashSubmissionOTP);
+router.get('/outlet/cash/limits', authenticateJWT, getOutletCashLimits);
+router.post('/outlet/cash/limits', authenticateJWT, setOutletCashLimit);
+router.delete('/outlet/cash/limits/:id', authenticateJWT, deleteOutletCashLimit);
 
 // Return Module
 router.get('/outlet/return-exchanges', authenticateJWT, getReturnExchanges);

@@ -277,7 +277,11 @@ const getBlacklistedCustomers = async (req, res) => {
 
     const orders = await prisma.order.findMany({
       where: {
-        is_delivered: true,
+        verification: {
+          purchaser: {
+            is_blacklisted: true,
+          },
+        },
       },
       include: {
         verification: {
@@ -318,7 +322,7 @@ const getBlacklistedCustomers = async (req, res) => {
     }
 
     // ── Filter Blacklisted Orders ──────────────────────────────
-    const blacklistedOrders = orders.filter(order => order.verification?.purchaser?.is_blacklisted);
+    const blacklistedOrders = orders; // Already filtered via DB query
 
     // ── Group by order (1 order = 1 row) (Shared logic with getCustomers) ────────────────────
     const customerMap = new Map();

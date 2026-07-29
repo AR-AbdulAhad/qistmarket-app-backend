@@ -1891,7 +1891,17 @@ const getOrderById = async (req, res) => {
           }
         },
         dummyCustomer: true,
-        installment_ledger: true
+        installment_ledger: true,
+        delivery: {
+          include: { uploads: true }
+        },
+        archived_deliveries: {
+          include: { 
+            uploads: true,
+            delivery_agent: { select: { full_name: true, username: true } }
+          },
+          orderBy: { archived_at: 'desc' }
+        }
       },
     });
 
@@ -2854,6 +2864,28 @@ const getDeliveryStatus = async (req, res) => {
   }
 };
 
+const parseSelectedPlan = (selectedPlan) => {
+  if (!selectedPlan) return null;
+  if (typeof selectedPlan === 'string') {
+    try {
+      return JSON.parse(selectedPlan);
+    } catch (error) {
+      return null;
+    }
+  }
+  return selectedPlan;
+};
+
+const getDeliveredProductName = (order) => {
+  const cashRecord = order.cash_in_hand?.[0] || null;
+  const parsedPlan = parseSelectedPlan(order.delivery?.selected_plan);
+  return cashRecord?.product_name || parsedPlan?.productName || null;
+};
+
+const getDeliveredImei = (order) => {
+  return order.delivery?.product_imei || order.cash_in_hand?.[0]?.imei_serial || null;
+};
+
 const getDeliveredOrders = async (req, res) => {
   const { page = 1, limit = 10, search = '', sortBy = 'updated_at', sortDir = 'desc', ...filters } = req.query;
   const skip = (Number(page) - 1) * Number(limit);
@@ -2916,8 +2948,16 @@ const getDeliveredOrders = async (req, res) => {
         assigned_to: { select: { username: true, full_name: true } },
         delivery_officer: { select: { username: true, full_name: true } },
         recovery_officer: { select: { username: true, full_name: true } },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
       },
     });
+
+    const formattedOrders = orders.map(order => ({
+      ...order,
+      delivered_product_name: getDeliveredProductName(order),
+      delivered_imei: getDeliveredImei(order),
+    }));
 
     const total = await prisma.order.count({ where });
     const totalPages = Math.ceil(total / take);
@@ -2925,16 +2965,115 @@ const getDeliveredOrders = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
-        orders,
+        orders: formattedOrders,
         pagination: {
           page: Number(page),
+          limit: take,
           total,
           totalPages,
+          hasNext: skip + take < total,
+          hasPrev: Number(page) > 1,
         },
       },
     });
   } catch (error) {
     console.error('Get delivered orders error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+const getReturnedOrders = async (req, res) => {
+  const { page = 1, limit = 10, search = '', sortBy = 'updated_at', sortDir = 'desc', ...filters } = req.query;
+  const skip = (Number(page) - 1) * Number(limit);
+  const take = Number(limit);
+
+  try {
+    const userFromDb = await prisma.user.findUnique({ where: { id: req.user.id } });
+    const userRole = (req.user?.role || '').toLowerCase();
+
+    const where = {
+      status: 'returned',
+    };
+
+    if (userRole === 'branch user') {
+      where.AND = [
+        {
+          OR: [
+            { outlet_id: userFromDb?.outlet_id || -1 },
+            { created_by_user_id: req.user.id }
+          ]
+        }
+      ];
+    }
+
+    if (search.trim()) {
+      where.OR = [
+        { customer_name: { contains: search } },
+        { whatsapp_number: { contains: search } },
+        { order_ref: { contains: search } },
+        { area: { contains: search } },
+      ];
+    }
+
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) {
+        if (key === 'assigned_to' || key === 'Verification Officer') {
+          where.assigned_to = { username: { contains: value } };
+        } else if (key === 'delivery_officer') {
+          where.delivery_officer = { username: { contains: value } };
+        } else if (key === 'recovery_officer') {
+          where.recovery_officer = { username: { contains: value } };
+        } else if (key === 'created_by') {
+          where.created_by = { username: { contains: value } };
+        } else if (key === 'dateRange') {
+          const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
+          if (range) where.created_at = range;
+        } else if (key !== 'startDate' && key !== 'endDate') {
+          where[key] = { contains: value };
+        }
+      }
+    });
+
+    const orders = await prisma.order.findMany({
+      where,
+      skip,
+      take,
+      orderBy: { [sortBy]: sortDir },
+      include: {
+        created_by: { select: { username: true } },
+        assigned_to: { select: { username: true, full_name: true } },
+        delivery_officer: { select: { username: true, full_name: true } },
+        recovery_officer: { select: { username: true, full_name: true } },
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
+      },
+    });
+
+    const formattedOrders = orders.map(order => ({
+      ...order,
+      delivered_product_name: getDeliveredProductName(order),
+      delivered_imei: getDeliveredImei(order),
+    }));
+
+    const total = await prisma.order.count({ where });
+    const totalPages = Math.ceil(total / take);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        orders: formattedOrders,
+        pagination: {
+          page: Number(page),
+          limit: take,
+          total,
+          totalPages,
+          hasNext: skip + take < total,
+          hasPrev: Number(page) > 1,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Get returned orders error:', error);
     return res.status(500).json({ success: false, message: 'Internal server error' });
   }
 };
@@ -3657,6 +3796,7 @@ module.exports = {
   getExpiredAssignedOrders,
   getDeliveryStatus,
   getDeliveredOrders,
+  getReturnedOrders,
   assignRecovery,
   assignBulkRecovery,
   getOutletDeliveryOfficers,

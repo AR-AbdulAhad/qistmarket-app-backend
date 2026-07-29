@@ -115,9 +115,9 @@ async function updateCsrRanking(csrId, periodType = 'month') {
         }
     });
 
-    // Unique Customers logic
-    const uniqueCustomerIds = new Set(orders.map(o => o.customer_id).filter(Boolean));
-    const uniqueCustomersCount = uniqueCustomerIds.size;
+    // Count every order as a customer-style entry so a single customer with multiple orders
+    // contributes once per order, not once overall.
+    const uniqueCustomersCount = orders.length;
 
     // Metrics based on UNIQUE CUSTOMERS
     const customerStats = {};
@@ -287,8 +287,7 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
         }
     });
 
-    const uniqueCustomerIds = new Set(deliveries.map(d => d.order?.customer_id).filter(Boolean));
-    const uniqueCustomersCount = uniqueCustomerIds.size;
+    const uniqueCustomersCount = deliveries.length;
 
     let deliveredCount = 0;
     let completedCount = 0;

@@ -15,6 +15,7 @@ const {
   updateOrderItem,
   getDeliveryStatus,
   getDeliveredOrders,
+  getReturnedOrders,
   assignRecovery,
   assignBulkRecovery,
   getMyDeliveryOrdersWithPagination,
@@ -51,8 +52,9 @@ const fixUploadPath = require('../middlewares/fixUploadPath');
 
 // Recovery Related Order Routes (Specific routes first)
 router.get('/orders/delivered-list', authenticateJWT, getDeliveredOrders);
-router.patch('/orders/:id/assign-recovery', authenticateJWT, requireOrderManager, assignRecovery);
-router.post('/orders/assign-bulk-recovery', authenticateJWT, requireOrderManager, assignBulkRecovery);
+router.get('/orders/returned-list', authenticateJWT, getReturnedOrders);
+router.patch('/orders/:id/assign-recovery', authenticateJWT, assignRecovery);
+router.post('/orders/assign-bulk-recovery', authenticateJWT, assignBulkRecovery);
 
 // Standard Order Routes
 router.get('/orders/verification-pending', authenticateJWT, getVerificationOrders);

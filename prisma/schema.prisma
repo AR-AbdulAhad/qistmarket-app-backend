@@ -63,6 +63,7 @@ model User {
   deletion_requests              AccountDeletionRequest[]  @relation("DeletionRequestUser")
   deletion_reviews               AccountDeletionRequest[]  @relation("DeletionRequestReviewer")
   deliveries                     Delivery[]                @relation("delivery_agent")
+  archived_deliveries            ArchivedDelivery[]        @relation("ArchivedDeliveryAgent")
   officerAssignments             OfficerAreaAssignment[]   @relation("OfficerAssignments")
   officerSessions                OfficerSession[]
   assigned_orders                Order[]                   @relation("assignedOrders")
@@ -187,6 +188,7 @@ model Order {
   verification_assigned_at DateTime?
   dummyCustomer            DummyCustomer?        @relation("OrderDummyCustomer")
   delivery                 Delivery?             @relation("OrderDelivery")
+  archived_deliveries      ArchivedDelivery[]    @relation("ArchivedOrderDeliveries")
   assigned_to              User?                 @relation("assignedOrders", fields: [assigned_to_user_id], references: [id])
   created_by               User?                 @relation(fields: [created_by_user_id], references: [id])
   delivery_officer         User?                 @relation("deliveryOrders", fields: [delivery_officer_id], references: [id])
@@ -1843,4 +1845,41 @@ model UserLocationHistory {
   @@index([user_id])
   @@index([timestamp])
   @@map("user_location_history")
+}
+
+model ArchivedDelivery {
+  id                 Int                @id @default(autoincrement())
+  order_id           Int
+  delivery_agent_id  Int
+  status             String             @default("pending")
+  start_time         DateTime?
+  end_time           DateTime?
+  feedback           String?
+  product_imei       String?            @db.VarChar(100)
+  selected_plan      Json?
+  installment_ledger Json?
+  self_pickup        Boolean            @default(false)
+  archived_at        DateTime           @default(now())
+  created_at         DateTime
+
+  order              Order              @relation("ArchivedOrderDeliveries", fields: [order_id], references: [id], onDelete: Cascade)
+  delivery_agent     User               @relation("ArchivedDeliveryAgent", fields: [delivery_agent_id], references: [id])
+  uploads            ArchivedDeliveryUpload[]
+
+  @@index([order_id])
+  @@index([delivery_agent_id])
+}
+
+model ArchivedDeliveryUpload {
+  id                  Int      @id @default(autoincrement())
+  archived_delivery_id Int
+  upload_type         String
+  file_url            String?
+  link                String?
+  tag                 String?
+  uploaded_at         DateTime
+
+  archived_delivery   ArchivedDelivery @relation(fields: [archived_delivery_id], references: [id], onDelete: Cascade)
+
+  @@index([archived_delivery_id])
 }

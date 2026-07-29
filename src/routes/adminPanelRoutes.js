@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateJWT } = require('../middlewares/authMiddleware');
+const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddleware');
+const { getUsers } = require('../controllers/authController');
 const {
     getOutletPerformanceSummary, getUnifiedRankings, getDeliveryManagementOverview, syncBadges, getBadges,
     getOutletRankings, getMissedRecoveryTracking, getProductSalesReport, getInstallmentStatusCounts,
@@ -8,6 +9,7 @@ const {
 } = require('../controllers/adminPanelController');
 const { sendBroadcast, getRoleOptions } = require('../controllers/broadcastController');
 
+router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
 router.get('/outlets/performance', authenticateJWT, getOutletPerformanceSummary);
 router.get('/outlets/rankings', authenticateJWT, getOutletRankings);
 router.get('/rankings', authenticateJWT, getUnifiedRankings);

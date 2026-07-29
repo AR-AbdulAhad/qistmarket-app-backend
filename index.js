@@ -331,7 +331,6 @@ io.on('connection', (socket) => {
           user_id: officerId,
           latitude,
           longitude,
-          accuracy: accuracy ? Number(accuracy) : null,
         }
       });
 
