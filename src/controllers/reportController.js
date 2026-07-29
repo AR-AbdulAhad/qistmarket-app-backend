@@ -54,7 +54,6 @@ const getReportSummary = async (req, res) => {
       ordersByDayRaw,
       salesByDayRaw,
       totalOrders,
-      customerCount,
       collectionAgg,
     ] = await Promise.all([
       prisma.order.groupBy({
@@ -83,11 +82,6 @@ const getReportSummary = async (req, res) => {
         where: { ...baseWhere, is_delivered: true },
       }),
       prisma.order.count({ where: baseWhere }),
-      prisma.order.groupBy({
-        by: ['whatsapp_number'],
-        where: baseWhere,
-        _count: { _all: true },
-      }),
       prisma.installmentLedger.findMany({
         where: {
           order: baseWhere,
@@ -175,7 +169,7 @@ const getReportSummary = async (req, res) => {
       .sort((a, b) => b.count - a.count)
       .slice(0, 10);
 
-    const totalCustomers = customerCount.length;
+    const totalCustomers = totalOrders;
 
     totalReceived = totalAdvance + totalInstallments;
 

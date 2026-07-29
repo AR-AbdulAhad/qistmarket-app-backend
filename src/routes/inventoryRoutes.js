@@ -4,6 +4,7 @@ const {
     getInventory,
     getStockTransferInventory,
     getUsedInventory,
+    getUsedInventoryReversalHistory,
     addInventory,
     initiateStockTransfer,
     verifyStockTransfer,
@@ -24,6 +25,7 @@ const { authenticateJWT } = require('../middlewares/authMiddleware');
 router.get('/outlet/inventory', authenticateJWT, getInventory);
 router.get('/outlet/inventory/get/transfer', authenticateJWT, getStockTransferInventory);
 router.get('/outlet/inventory/used', authenticateJWT, getUsedInventory);
+router.get('/outlet/inventory/used/history', authenticateJWT, getUsedInventoryReversalHistory);
 router.post('/outlet/inventory', authenticateJWT, addInventory);
 
 // Stock Transfers

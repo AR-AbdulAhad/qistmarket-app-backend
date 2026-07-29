@@ -2,6 +2,7 @@ const prisma = require('../../lib/prisma');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { sendOTP } = require('../services/watiService');
 const { logAction } = require('../utils/auditLogger');
+const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const axios = require('axios');
 const admin = require('firebase-admin');
 
@@ -147,12 +148,12 @@ const getInventory = async (req, res) => {
             ] : undefined
         };
 
-        // Get distinct product names for pagination
-        const distinctProducts = await prisma.outletInventory.findMany({
+        // Get products ordered by stock count descending for pagination
+        const distinctProducts = await prisma.outletInventory.groupBy({
+            by: ['product_name'],
             where: productSearchWhere,
-            distinct: ['product_name'],
-            select: { product_name: true },
-            orderBy: { product_name: 'asc' },
+            _count: { product_name: true },
+            orderBy: { _count: { product_name: 'desc' } },
             skip,
             take
         });
@@ -177,24 +178,19 @@ const getInventory = async (req, res) => {
             orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
         });
 
-        // 3. Calculate Global Stats (Count unique product names)
-        const [totalUniqueProducts, inStockUnique, soldUnique] = await Promise.all([
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, is_used: false,
-                status: { not: 'Used Stock' }
-                },
-                _count: true
+        // 3. Calculate Global Stats (Exact total count instead of unique product count)
+        const [totalStock, inStock, sold, outOfStock] = await Promise.all([
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: false, status: { not: 'Used Stock' } }
             }),
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, is_used: false, status: 'In Stock' },
-                _count: true
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: false, status: 'In Stock' }
             }),
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, is_used: false, status: 'Sold' },
-                _count: true
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: false, status: 'Sold' }
+            }),
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: false, status: 'Out Of Stock' }
             })
         ]);
 
@@ -202,9 +198,10 @@ const getInventory = async (req, res) => {
             success: true,
             inventory, // Frontend will group these by product_name
             stats: {
-                totalStock: totalUniqueProducts.length || 0,
-                inStock: inStockUnique.length || 0,
-                sold: soldUnique.length || 0
+                totalStock: totalStock || 0,
+                inStock: inStock || 0,
+                sold: sold || 0,
+                outOfStock: outOfStock || 0
             },
             pagination: {
                 total, // total unique products
@@ -241,12 +238,12 @@ const getStockTransferInventory = async (req, res) => {
             ] : undefined
         };
 
-        // Get distinct product names for pagination
-        const distinctProducts = await prisma.outletInventory.findMany({
+        // Get products ordered by stock count descending for pagination
+        const distinctProducts = await prisma.outletInventory.groupBy({
+            by: ['product_name'],
             where: productSearchWhere,
-            distinct: ['product_name'],
-            select: { product_name: true },
-            orderBy: { product_name: 'asc' },
+            _count: { product_name: true },
+            orderBy: { _count: { product_name: 'desc' } },
             skip,
             take
         });
@@ -269,22 +266,19 @@ const getStockTransferInventory = async (req, res) => {
             orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
         });
 
-        // 3. Calculate Global Stats (Count unique product names)
-        const [totalUniqueProducts, inStockUnique, soldUnique] = await Promise.all([
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id },
-                _count: true
+        // 3. Calculate Global Stats (Exact total count instead of unique product count)
+        const [totalStock, inStock, sold, outOfStock] = await Promise.all([
+            prisma.outletInventory.count({
+                where: { outlet_id }
             }),
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, status: 'In Stock' },
-                _count: true
+            prisma.outletInventory.count({
+                where: { outlet_id, status: 'In Stock' }
             }),
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, status: 'Sold' },
-                _count: true
+            prisma.outletInventory.count({
+                where: { outlet_id, status: 'Sold' }
+            }),
+            prisma.outletInventory.count({
+                where: { outlet_id, status: 'Out Of Stock' }
             })
         ]);
 
@@ -292,9 +286,10 @@ const getStockTransferInventory = async (req, res) => {
             success: true,
             inventory, // Frontend will group these by product_name
             stats: {
-                totalStock: totalUniqueProducts.length || 0,
-                inStock: inStockUnique.length || 0,
-                sold: soldUnique.length || 0
+                totalStock: totalStock || 0,
+                inStock: inStock || 0,
+                sold: sold || 0,
+                outOfStock: outOfStock || 0
             },
             pagination: {
                 total, // total unique products
@@ -331,11 +326,11 @@ const getUsedInventory = async (req, res) => {
             ] : undefined
         };
 
-        const distinctProducts = await prisma.outletInventory.findMany({
+        const distinctProducts = await prisma.outletInventory.groupBy({
+            by: ['product_name'],
             where: productSearchWhere,
-            distinct: ['product_name'],
-            select: { product_name: true },
-            orderBy: { product_name: 'asc' },
+            _count: { product_name: true },
+            orderBy: { _count: { product_name: 'desc' } },
             skip,
             take
         });
@@ -358,21 +353,18 @@ const getUsedInventory = async (req, res) => {
             orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
         });
 
-        const [totalUniqueProducts, inStockUnique, soldUnique] = await Promise.all([
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, is_used: true },
-                _count: true
+        const [totalStockCount, inStockCount, soldCount, outOfStockCount] = await Promise.all([
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: true }
             }),
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, is_used: true, status: { in: ['In Stock', 'Used Stock'] } },
-                _count: true
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: true, status: { in: ['In Stock', 'Used Stock'] } }
             }),
-            prisma.outletInventory.groupBy({
-                by: ['product_name'],
-                where: { outlet_id, is_used: true, status: 'Sold' },
-                _count: true
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: true, status: 'Sold' }
+            }),
+            prisma.outletInventory.count({
+                where: { outlet_id, is_used: true, status: 'Out Of Stock' }
             })
         ]);
 
@@ -380,9 +372,10 @@ const getUsedInventory = async (req, res) => {
             success: true,
             inventory,
             stats: {
-                totalStock: totalUniqueProducts.length || 0,
-                inStock: inStockUnique.length || 0,
-                sold: soldUnique.length || 0
+                totalStock: totalStockCount || 0,
+                inStock: inStockCount || 0,
+                sold: soldCount || 0,
+                outOfStock: outOfStockCount || 0
             },
             pagination: {
                 total,
@@ -393,6 +386,75 @@ const getUsedInventory = async (req, res) => {
         });
     } catch (error) {
         console.error('getUsedInventory error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getUsedInventoryReversalHistory = async (req, res) => {
+    const { outlet_id } = req.user;
+    const { page = 1, limit = 20, search = "" } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const take = parseInt(limit);
+
+    if (!outlet_id) {
+        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    }
+
+    try {
+        const where = {
+            inventory: { outlet_id },
+            status: 'Used Stock Reversed',
+            OR: search ? [
+                { inventory: { product_name: { contains: search } } },
+                { inventory: { imei_serial: { contains: search } } },
+            ] : undefined,
+        };
+
+        const [history, total] = await Promise.all([
+            prisma.stockTransfer.findMany({
+                where,
+                include: {
+                    inventory: {
+                        select: {
+                            id: true,
+                            product_name: true,
+                            imei_serial: true,
+                            category: true,
+                            color_variant: true,
+                            purchase_price: true,
+                        }
+                    }
+                },
+                orderBy: { created_at: 'desc' },
+                skip,
+                take,
+            }),
+            prisma.stockTransfer.count({ where }),
+        ]);
+
+        res.json({
+            success: true,
+            history: history.map(item => ({
+                id: item.id,
+                inventory_id: item.inventory_id,
+                product_name: item.inventory?.product_name || 'Unknown',
+                imei_serial: item.inventory?.imei_serial || null,
+                category: item.inventory?.category || null,
+                color_variant: item.inventory?.color_variant || null,
+                purchase_price: item.inventory?.purchase_price || 0,
+                status: item.status,
+                created_at: item.created_at,
+                updated_at: item.updated_at,
+            })),
+            pagination: {
+                total,
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit)),
+            },
+        });
+    } catch (error) {
+        console.error('getUsedInventoryReversalHistory error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -1020,21 +1082,115 @@ const updateInventoryItem = async (req, res) => {
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Unauthorized' });
 
     try {
-        const updated = await prisma.outletInventory.updateMany({
+        const currentItem = await prisma.outletInventory.findFirst({
             where: { id: parseInt(id), outlet_id },
-            data: {
-                product_name: data.product_name,
-                category: data.category,
-                imei_serial: data.imei_serial,
-                color_variant: data.color_variant,
-                quantity: data.quantity !== undefined ? parseInt(data.quantity) : undefined,
-                purchase_price: data.purchase_price !== undefined ? parseFloat(data.purchase_price) : undefined,
-                status: data.status,
-                updated_at: now()   // ✅ explicit updated_at
-            }
         });
 
-        if (updated.count === 0) return res.status(404).json({ success: false, message: 'Item not found' });
+        if (!currentItem) return res.status(404).json({ success: false, message: 'Item not found' });
+
+        const isReversingUsedStock = currentItem.is_used === true && data.is_used === false;
+        const linkedDelivery = currentItem.imei_serial
+            ? await prisma.delivery.findFirst({
+                where: { product_imei: currentItem.imei_serial },
+                select: {
+                    order_id: true,
+                    order: {
+                        select: { id: true, status: true, is_delivered: true },
+                    },
+                },
+            })
+            : null;
+        const linkedOrder = linkedDelivery?.order
+            ? {
+                id: linkedDelivery.order.id,
+                status: linkedDelivery.order.status,
+                is_delivered: linkedDelivery.order.is_delivered,
+            }
+            : null;
+
+        const resolvedStatus = isReversingUsedStock
+            ? (linkedOrder ? 'Sold' : 'In Stock')
+            : (data.status !== undefined ? data.status : currentItem.status);
+
+        const updateData = {
+            ...(data.product_name !== undefined ? { product_name: data.product_name } : {}),
+            ...(data.category !== undefined ? { category: data.category } : {}),
+            ...(data.imei_serial !== undefined ? { imei_serial: data.imei_serial } : {}),
+            ...(data.color_variant !== undefined ? { color_variant: data.color_variant } : {}),
+            ...(data.quantity !== undefined ? { quantity: parseInt(data.quantity) } : {}),
+            ...(data.purchase_price !== undefined ? { purchase_price: parseFloat(data.purchase_price) } : {}),
+            status: resolvedStatus,
+            ...(data.is_used !== undefined ? { is_used: Boolean(data.is_used) } : {}),
+            updated_at: now(),
+        };
+
+        if (isReversingUsedStock && data.is_used === false) {
+            updateData.is_used = false;
+        }
+
+        await prisma.outletInventory.update({
+            where: { id: currentItem.id },
+            data: updateData,
+        });
+
+        const shouldRecordReversal = currentItem.is_used === true && data.is_used === false;
+        if (shouldRecordReversal) {
+            if (linkedOrder) {
+                await prisma.order.update({
+                    where: { id: linkedOrder.id },
+                    data: {
+                        status: 'delivered',
+                        is_delivered: true,
+                        updated_at: now(),
+                    },
+                });
+
+                await logOrderStatusChange(
+                    linkedOrder.id,
+                    linkedOrder.status || 'returned',
+                    'delivered',
+                    req.user,
+                    'Restored delivered status after reversing used-stock action',
+                    true
+                );
+            }
+
+            const linkedReturn = linkedOrder
+                ? await prisma.returnExchange.findFirst({
+                    where: {
+                        order_id: linkedOrder.id,
+                        imei_returned: currentItem.imei_serial,
+                        status: { in: ['pending', 'verified'] },
+                    },
+                })
+                : null;
+
+            if (linkedReturn) {
+                await prisma.returnExchange.update({
+                    where: { id: linkedReturn.id },
+                    data: {
+                        status: 'reversed',
+                        is_used: false,
+                    },
+                });
+            }
+
+            await prisma.stockTransfer.create({
+                data: {
+                    from_type: 'Used Stock',
+                    from_id: outlet_id,
+                    to_type: 'Outlet',
+                    to_id: outlet_id,
+                    inventory_id: currentItem.id,
+                    quantity_transferred: currentItem.quantity || 1,
+                    status: 'Used Stock Reversed',
+                    created_at: now(),
+                    updated_at: now(),
+                }
+            });
+
+            await logAction(req, 'USED_STOCK_REVERSED', `Reversed used-stock status for inventory item ${currentItem.product_name}${currentItem.imei_serial ? ` (${currentItem.imei_serial})` : ''}.`, currentItem.id, 'OutletInventory');
+        }
 
         res.json({ success: true, message: 'Item updated successfully' });
     } catch (error) {
@@ -1788,6 +1944,7 @@ module.exports = {
     getInventory,
     getStockTransferInventory,
     getUsedInventory,
+    getUsedInventoryReversalHistory,
     addInventory,
     initiateStockTransfer,
     verifyStockTransfer,

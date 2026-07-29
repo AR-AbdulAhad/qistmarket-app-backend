@@ -708,6 +708,57 @@ const getReturnExchanges = async (req, res) => {
     }
 };
 
+
+const archiveDeliveryRecord = async (orderId, nowDate) => {
+    const { PrismaClient } = require('@prisma/client');
+    const prisma = new PrismaClient(); // Or use existing prisma from closure, but better not to redefine prisma. We'll assume prisma is available globally in the file.
+    const existingDelivery = await prisma.delivery.findUnique({
+        where: { order_id: orderId },
+        include: { uploads: true, installment_ledger: true }
+    });
+
+    if (existingDelivery) {
+        await prisma.archivedDelivery.create({
+            data: {
+                order_id: existingDelivery.order_id,
+                delivery_agent_id: existingDelivery.delivery_agent_id,
+                status: existingDelivery.status,
+                start_time: existingDelivery.start_time,
+                end_time: existingDelivery.end_time,
+                feedback: existingDelivery.feedback,
+                product_imei: existingDelivery.product_imei,
+                selected_plan: existingDelivery.selected_plan,
+                installment_ledger: existingDelivery.installment_ledger ? {
+                    token: existingDelivery.installment_ledger.token,
+                    short_id: existingDelivery.installment_ledger.short_id,
+                    ledger_rows: typeof existingDelivery.installment_ledger.ledger_rows === 'string' 
+                        ? JSON.parse(existingDelivery.installment_ledger.ledger_rows) 
+                        : existingDelivery.installment_ledger.ledger_rows
+                } : null,
+                self_pickup: existingDelivery.self_pickup,
+                created_at: existingDelivery.created_at,
+                archived_at: nowDate,
+                uploads: {
+                    create: existingDelivery.uploads.map(u => ({
+                        upload_type: u.upload_type,
+                        file_url: u.file_url,
+                        link: u.link,
+                        tag: u.tag,
+                        uploaded_at: u.uploaded_at
+                    }))
+                }
+            }
+        });
+
+        await prisma.consumerNumber.updateMany({
+            where: { delivery_id: existingDelivery.id },
+            data: { delivery_id: null }
+        });
+
+        await prisma.delivery.delete({ where: { id: existingDelivery.id } });
+        console.log(`Archived delivery ${existingDelivery.id} and deleted original.`);
+    }
+};
 const verifyReturnExchangeOtp = async (req, res) => {
     const outlet_id = req.user.outlet_id;
     const { record_id, otp } = req.body;
@@ -859,7 +910,7 @@ const verifyReturnExchangeOtp = async (req, res) => {
  */
 const initiateDirectReturn = async (req, res) => {
     const outlet_id = req.user.outlet_id;
-    const { order_id, is_cash_refund, refund_amount, customer_phone } = req.body;
+    const { order_id, is_cash_refund, refund_amount, customer_phone, blacklist_customer } = req.body;
 
     if (!order_id) {
         return res.status(400).json({ success: false, error: 'order_id is required.' });
@@ -919,45 +970,206 @@ const initiateDirectReturn = async (req, res) => {
             variant = deliveryPlan?.variant || deliveryPlan?.productVariant || null;
         }
 
-        const otp = Math.floor(1000 + Math.random() * 9000).toString();
+        // 48-hour logic for new vs used
+        const deliveryTime = order.delivery?.end_time || order.updated_at;
+        const nowDate = now();
+        const deliveryDate = new Date(deliveryTime);
+        const hasValidDeliveryTime = deliveryTime && !isNaN(deliveryDate.getTime());
+        const hoursSinceDelivery = hasValidDeliveryTime
+            ? (nowDate.getTime() - deliveryDate.getTime()) / (1000 * 60 * 60)
+            : Number.POSITIVE_INFINITY;
+        
+        const isUsed = hoursSinceDelivery > 48;
 
         const returnRecord = await prisma.returnExchange.create({
             data: {
                 order_id: parseInt(order_id),
                 outlet_id: outlet_id,
                 type: 'Return',
-                status: 'pending',
-                otp: otp,
+                status: 'verified',
+                verified_at: nowDate,
+                is_used: isUsed,
                 product_name: productName,
-                selected_plan: {
+                selected_plan: JSON.stringify({
                     ...deliveryPlan,
                     delivered_color: color,
                     delivered_variant: variant,
                     delivered_advance_amount: parseFloat(deliveredAdvance) || 0
-                },
+                }),
                 imei_returned: imei,
                 is_cash_refund: !!is_cash_refund,
                 refund_amount: parseFloat(refund_amount) || 0,
                 initiated_by: "Outlet",
-                created_at: now()
+                created_at: nowDate
             }
         });
 
-        // Send OTP to provided number or customer's saved number
+        // Handle Cash Refund
+        if (returnRecord.is_cash_refund && returnRecord.refund_amount > 0) {
+            await updateCashRegister(null, parseInt(outlet_id), 'expenses', returnRecord.refund_amount, 'add');
+        }
+
+        // Handle CashInHand Cancellation
+        const pendingCash = await prisma.cashInHand.findFirst({
+            where: {
+                order_id: returnRecord.order_id,
+                status: 'pending'
+            }
+        });
+
+        if (pendingCash) {
+            await prisma.cashInHand.update({
+                where: { id: pendingCash.id },
+                data: {
+                    status: 'cancelled',
+                    updated_at: nowDate
+                }
+            });
+        }
+
+        // Update Order
+        await prisma.order.update({
+            where: { id: returnRecord.order_id },
+            data: {
+                status: 'Returned',
+                imei_serial: null,
+                is_delivered: false,
+                updated_at: nowDate
+            }
+        });
+        await logOrderStatusChange(returnRecord.order_id, order.status || 'delivered', 'Returned', req.user);
+
+        // Move existing delivery to ArchivedDelivery
+        if (order.delivery) {
+            try {
+                const existingDelivery = await prisma.delivery.findUnique({
+                    where: { id: order.delivery.id },
+                    include: { uploads: true, installment_ledger: true }
+                });
+
+                if (existingDelivery) {
+                    await prisma.archivedDelivery.create({
+                        data: {
+                            order_id: existingDelivery.order_id,
+                            delivery_agent_id: existingDelivery.delivery_agent_id,
+                            status: existingDelivery.status,
+                            start_time: existingDelivery.start_time,
+                            end_time: existingDelivery.end_time,
+                            feedback: existingDelivery.feedback,
+                            product_imei: existingDelivery.product_imei,
+                            selected_plan: existingDelivery.selected_plan,
+                            installment_ledger: existingDelivery.installment_ledger ? {
+                                token: existingDelivery.installment_ledger.token,
+                                short_id: existingDelivery.installment_ledger.short_id,
+                                ledger_rows: typeof existingDelivery.installment_ledger.ledger_rows === 'string' ? JSON.parse(existingDelivery.installment_ledger.ledger_rows) : existingDelivery.installment_ledger.ledger_rows
+                            } : null,
+                            self_pickup: existingDelivery.self_pickup,
+                            created_at: existingDelivery.created_at,
+                            archived_at: nowDate,
+                            uploads: {
+                                create: existingDelivery.uploads.map(u => ({
+                                    upload_type: u.upload_type,
+                                    file_url: u.file_url,
+                                    link: u.link,
+                                    tag: u.tag,
+                                    uploaded_at: u.uploaded_at
+                                }))
+                            }
+                        }
+                    });
+
+                    // Unlink ConsumerNumber before deletion to prevent constraint errors
+                    await prisma.consumerNumber.updateMany({
+                        where: { delivery_id: existingDelivery.id },
+                        data: { delivery_id: null }
+                    });
+
+                    await prisma.delivery.delete({ where: { id: existingDelivery.id } });
+                    console.log(`Archived delivery ${existingDelivery.id} and deleted original.`);
+                }
+            } catch (err) {
+                console.error('Failed to archive delivery during return:', err); require('fs').writeFileSync('archive_error.log', err.stack || err.toString());
+            }
+        }
+
+        // Update Inventory
+        if (returnRecord.imei_returned) {
+            const inventory = await prisma.outletInventory.findFirst({
+                where: { imei_serial: returnRecord.imei_returned, outlet_id: parseInt(outlet_id) }
+            });
+
+            if (inventory) {
+                await prisma.outletInventory.update({
+                    where: { id: inventory.id },
+                    data: {
+                        status: 'In Stock',
+                        is_used: isUsed,
+                        updated_at: nowDate
+                    }
+                });
+            }
+            
+            // Paytrigger unenroll
+            if (pt.isEligible(productName, inventory?.category || 'mobile')) {
+                try {
+                    await pt.unenroll(returnRecord.imei_returned);
+                    console.log(`Paytrigger unenrolled for IMEI ${returnRecord.imei_returned}`);
+                } catch(e) {
+                    console.error('Paytrigger unenroll failed', e);
+                }
+            }
+        }
+
+        // Blacklist Customer
+        if (blacklist_customer && order.verification?.id) {
+            await prisma.purchaserVerification.updateMany({
+                where: { verification_id: order.verification.id },
+                data: { is_blacklisted: true }
+            });
+            await prisma.grantorVerification.updateMany({
+                where: { verification_id: order.verification.id },
+                data: { is_blacklisted: true }
+            });
+            
+            // Record reason in BlacklistAction table
+            if (order.verification.purchaser?.cnic_number) {
+                try {
+                    await prisma.blacklistAction.create({
+                        data: {
+                            cnic: order.verification.purchaser.cnic_number,
+                            action: 'blacklist',
+                            reason: 'Blacklisted by outlet during order return',
+                            created_by_id: req.user.id || 1
+                        }
+                    });
+                } catch (e) {
+                    console.error('Failed to create blacklist action log:', e);
+                }
+            }
+            console.log(`Blacklisted customer and grantors for verification ID ${order.verification.id}`);
+        }
+
+        // Send Notification
         const savedPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
         const phoneToUse = customer_phone || savedPhone;
-        if (phoneToUse) {
+        const { sendReturnConfirmation } = require('../services/watiService');
+        if (phoneToUse && sendReturnConfirmation) {
             try {
-                await sendOTP(phoneToUse, otp);
-                console.log(`Sales Return OTP ${otp} sent to ${phoneToUse}`);
+                await sendReturnConfirmation(phoneToUse, {
+                    customerName: order.customer_name || 'Customer',
+                    productName: productName,
+                    orderRef: order.order_ref,
+                    refundAmount: returnRecord.is_cash_refund ? returnRecord.refund_amount : 0,
+                    returnDate: nowDate.toDateString()
+                });
             } catch (err) {
-                console.error('Error sending Sales Return OTP:', err);
+                console.error('Error sending return confirmation:', err);
             }
         }
 
         return res.json({
             success: true,
-            message: 'OTP sent to customer. Please verify to complete the return.',
+            message: 'Return processed successfully.',
             data: { record_id: returnRecord.id }
         });
     } catch (error) {

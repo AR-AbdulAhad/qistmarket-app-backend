@@ -2309,6 +2309,12 @@ const getDeliveredProductDetails = async (req, res) => {
             uploads: true
           }
         },
+        archived_deliveries: {
+          include: {
+            uploads: true
+          },
+          orderBy: { archived_at: 'desc' }
+        },
         installment_ledger: true,
         cash_in_hand: {
           orderBy: { created_at: 'desc' },
@@ -2324,8 +2330,8 @@ const getDeliveredProductDetails = async (req, res) => {
       });
     }
 
-    // Check if order is delivered
-    if (!order.is_delivered && order.status !== 'delivered') {
+    // Check if order is delivered or returned
+    if (!order.is_delivered && order.status !== 'delivered' && order.status !== 'Returned') {
       return res.status(400).json({
         success: false,
         error: { code: 400, message: 'Order is not delivered yet' }
@@ -2389,6 +2395,69 @@ const getDeliveredProductDetails = async (req, res) => {
       };
     }
 
+    // Extract archived deliveries
+    let archivedDeliveries = [];
+    if (order.archived_deliveries && order.archived_deliveries.length > 0) {
+      archivedDeliveries = order.archived_deliveries.map(ad => {
+        let adPaymentDetails = null;
+        if (ad.installment_ledger && ad.installment_ledger.ledger_rows) {
+            const normalized = getNormalizedLedger(ad.installment_ledger.ledger_rows);
+            let advPayment = null;
+            if (normalized.advance_payment) {
+                advPayment = {
+                    amount: normalized.advance_payment.amount,
+                    paid_amount: normalized.advance_payment.paid ? normalized.advance_payment.amount : 0,
+                    status: normalized.advance_payment.status,
+                    paid_at: normalized.advance_payment.paidAt,
+                    payment_method: normalized.advance_payment.paymentMethod,
+                    label: normalized.advance_payment.label || 'Advance Payment'
+                };
+            }
+            adPaymentDetails = {
+                advance_payment: advPayment,
+                installment_plan: {
+                    token: ad.installment_ledger.short_id || ad.installment_ledger.token,
+                    advance_payment: normalized.advance_payment,
+                    installments: normalized.installment_ledger.map((row) => ({
+                        month: row.monthNumber,
+                        label: row.label,
+                        due_date: row.dueDate,
+                        due_amount: row.dueAmount,
+                        paid_amount: row.paidAmount,
+                        remaining_amount: row.remainingAmount,
+                        status: row.status,
+                        paid_at: row.paidAt,
+                        payment_method: row.paymentMethod,
+                        arrears: row.arrears
+                    })),
+                    summary: {
+                        total_installments: normalized.summary.totalInstallments || normalized.installment_ledger.length,
+                        paid_installments: normalized.summary.paidInstallments,
+                        pending_installments: normalized.summary.pendingInstallments,
+                        total_due_amount: normalized.summary.totalInstallmentDue,
+                        total_paid_amount: normalized.summary.totalInstallmentPaid,
+                        total_remaining_amount: normalized.summary.totalInstallmentRemaining
+                    }
+                }
+            };
+        }
+
+        return {
+            id: ad.id,
+            status: ad.status,
+            start_time: ad.start_time,
+            end_time: ad.end_time,
+            feedback: ad.feedback,
+            product_imei: ad.product_imei,
+            selected_plan: ad.selected_plan,
+            self_pickup: ad.self_pickup,
+            archived_at: ad.archived_at,
+            uploads: ad.uploads,
+            payment_details: adPaymentDetails
+        };
+      });
+    }
+
     // Extract advance payment details and installment ledger details
     let advancePayment = null;
     let installmentDetails = null;
@@ -2447,15 +2516,19 @@ const getDeliveredProductDetails = async (req, res) => {
         status: order.status,
         delivered_at: order.updated_at
       },
-      product_details: inventoryDetails || {
-        product_name: order.product_name,
+      product_details: {
+        product_name: inventoryDetails ? inventoryDetails.product_name : order.product_name,
         imei_serial: imeiSerial,
+        category: inventoryDetails ? inventoryDetails.category : undefined,
+        color_variant: inventoryDetails ? inventoryDetails.color_variant : undefined,
         total_amount: order.total_amount,
         advance_amount: order.advance_amount,
         monthly_amount: order.monthly_amount,
-        months: order.months
+        months: order.months,
+        inventory_status: inventoryDetails ? inventoryDetails.status : undefined
       },
       delivery_details: deliveryDetails,
+      archived_deliveries: archivedDeliveries,
       payment_details: {
         advance_payment: advancePayment,
         installment_plan: installmentDetails

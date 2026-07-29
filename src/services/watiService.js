@@ -87,7 +87,29 @@ const sendDeliveryConfirmation = async (phone, {
   return sendTemplate(phone, WATI_DELIVERY_TEMPLATE, WATI_DELIVERY_BROADCAST, parameters);
 };
 
-// ─── Template 2: Installment Ledger ────────────────────────────────────────
+// ─── Template 2: Return Confirmation ────────────────────────────────────────
+
+const WATI_RETURN_TEMPLATE = process.env.WATI_RETURN_CONFIRMATION_TEMPLATE || 'return_confirmation';
+const WATI_RETURN_BROADCAST = process.env.WATI_RETURN_CONFIRMATION_TEMPLATE || 'return_confirmation';
+
+const sendReturnConfirmation = async (phone, {
+  customerName,
+  productName,
+  orderRef,
+  refundAmount,
+  returnDate,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: productName || 'N/A' },
+    { name: '3', value: orderRef || 'N/A' },
+    { name: '4', value: String(refundAmount || 0) },
+    { name: '5', value: returnDate || new Date().toDateString() },
+  ];
+  return sendTemplate(phone, WATI_RETURN_TEMPLATE, WATI_RETURN_BROADCAST, parameters);
+};
+
+// ─── Template 3: Installment Ledger ────────────────────────────────────────
 // Params: customer_name, product_name, order_ref, next_month_label,
 //         monthly_amount, due_date, total_remaining, ledger_url
 
@@ -271,6 +293,7 @@ module.exports = {
   sendTemplate,
   sendOTP,
   sendDeliveryConfirmation,
+  sendReturnConfirmation,
   sendInstallmentLedger,
   sendInstallmentPaymentReceipt,
   sendPartialInstallmentPaymentReceipt,

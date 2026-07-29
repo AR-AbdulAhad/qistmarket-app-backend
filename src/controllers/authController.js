@@ -587,6 +587,8 @@ const getUsers = async (req, res) => {
       search = '',
       status = '',
       role = '',
+      role_id = '',
+      role_ids = '',
       full_name = '',
       username = '',
       email = '',
@@ -599,9 +601,23 @@ const getUsers = async (req, res) => {
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
 
+    const parseRoleIds = (value) => {
+      if (!value) return [];
+      return String(value)
+        .split(',')
+        .map((id) => parseInt(id, 10))
+        .filter((id) => !Number.isNaN(id));
+    };
+
+    const roleIds = [...parseRoleIds(role_id), ...parseRoleIds(role_ids)];
+
     const where = {
       role_id: { not: 7 },
     };
+
+    if (roleIds.length > 0) {
+      where.role_id = { in: [...new Set(roleIds)] };
+    }
 
     if (search.trim()) {
       where.OR = [
@@ -1344,7 +1360,7 @@ const getLocationHistory = async (req, res) => {
 
     const history = await prisma.userLocationHistory.findMany({
       where,
-      orderBy: { timestamp: 'asc' }
+      orderBy: { timestamp: 'desc' }
     });
     res.json({ success: true, data: history });
   } catch (error) {

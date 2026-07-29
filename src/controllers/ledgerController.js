@@ -24,6 +24,8 @@ const formatDate = (d) => {
   return date.toLocaleDateString('en-PK', { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
+const formatDatePK = (d) => formatDate(d);
+
 const statusBadge = (status) => {
   const colors = { 
     paid: '#22c55e', 

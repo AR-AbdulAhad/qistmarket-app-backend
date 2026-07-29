@@ -204,10 +204,100 @@ const deleteCashLimit = async (req, res) => {
     }
 };
 
+const getOutletCashLimits = async (req, res) => {
+    const outletId = req.user?.outlet_id;
+    if (!outletId) {
+        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    }
+
+    try {
+        const limit = await prisma.cashLimit.findUnique({
+            where: { scope_type_scope_id: { scope_type: 'outlet', scope_id: outletId } },
+        });
+
+        const pendingGroup = await prisma.cashInHand.groupBy({
+            by: ['outlet_id'],
+            where: { outlet_id: outletId, status: 'pending' },
+            _sum: { amount: true, submitted_amount: true },
+        });
+
+        const current_pending = pendingGroup.length
+            ? (pendingGroup[0]._sum.amount || 0) - (pendingGroup[0]._sum.submitted_amount || 0)
+            : 0;
+
+        const outlet = await prisma.outlet.findUnique({
+            where: { id: outletId },
+            select: { id: true, name: true, code: true },
+        });
+
+        res.json({
+            success: true,
+            data: {
+                outlet,
+                limit,
+                current_pending,
+                is_over_limit: limit ? current_pending > limit.daily_limit : false,
+            },
+        });
+    } catch (error) {
+        console.error('getOutletCashLimits error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const setOutletCashLimit = async (req, res) => {
+    const outletId = req.user?.outlet_id;
+    const { daily_limit } = req.body;
+
+    if (!outletId) {
+        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    }
+
+    if (daily_limit === undefined || daily_limit === null) {
+        return res.status(400).json({ success: false, message: 'daily_limit is required.' });
+    }
+
+    try {
+        const limit = await prisma.cashLimit.upsert({
+            where: { scope_type_scope_id: { scope_type: 'outlet', scope_id: outletId } },
+            update: { daily_limit: parseFloat(daily_limit), created_by_id: req.user.id },
+            create: { scope_type: 'outlet', scope_id: outletId, daily_limit: parseFloat(daily_limit), created_by_id: req.user.id },
+        });
+
+        res.json({ success: true, data: limit });
+    } catch (error) {
+        console.error('setOutletCashLimit error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const deleteOutletCashLimit = async (req, res) => {
+    const outletId = req.user?.outlet_id;
+    if (!outletId) {
+        return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    }
+
+    try {
+        const limit = await prisma.cashLimit.findUnique({ where: { id: parseInt(req.params.id) } });
+        if (!limit || limit.scope_type !== 'outlet' || limit.scope_id !== outletId) {
+            return res.status(403).json({ success: false, message: 'Not authorized to delete this limit.' });
+        }
+
+        await prisma.cashLimit.delete({ where: { id: parseInt(req.params.id) } });
+        res.json({ success: true, message: 'Cash limit removed.' });
+    } catch (error) {
+        console.error('deleteOutletCashLimit error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getCashReports,
     getCashSubmissionHistory,
     getCashLimits,
     setCashLimit,
     deleteCashLimit,
+    getOutletCashLimits,
+    setOutletCashLimit,
+    deleteOutletCashLimit,
 };

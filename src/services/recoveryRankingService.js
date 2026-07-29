@@ -27,8 +27,7 @@ async function updateRecoveryRanking(officerId, periodType = 'month') {
         }
     });
 
-    const uniqueCustomerIds = new Set(orders.map(o => o.customer_id).filter(Boolean));
-    const uniqueCustomersCount = uniqueCustomerIds.size;
+    const uniqueCustomersCount = orders.length;
 
     let deliveredCount = 0;
     let completedCount = 0;
