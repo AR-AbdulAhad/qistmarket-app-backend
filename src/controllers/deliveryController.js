@@ -2737,6 +2737,15 @@ const getDeliveryDashboardStats = async (req, res) => {
       return sum + ((c.amount || 0) - (c.submitted_amount || 0));
     }, 0);
 
+    // Cash-in-hand limit (Admin → Cash Limits) — same lookup as getCashInHand,
+    // duplicated here because the mobile dashboard's Cash In Hand tile reads
+    // from THIS endpoint, not getCashInHand (a separate detail screen).
+    const cashLimitRecord = await prisma.cashLimit.findUnique({
+      where: { scope_type_scope_id: { scope_type: 'officer', scope_id: userId } }
+    });
+    const cashLimit = cashLimitRecord ? cashLimitRecord.daily_limit : null;
+    const isCashLimitExceeded = cashLimitRecord ? (totalCashInHand >= cashLimitRecord.daily_limit) : false;
+
     // ─── 6. Rankings: ALL delivery officers, computed live ────────────────────
     const rankingPeriod = filter === 'custom' ? 'month' : filter;
 
@@ -2914,6 +2923,8 @@ const getDeliveryDashboardStats = async (req, res) => {
         stockValue,
         stockQty,
         cashInHand: totalCashInHand,
+        cashLimit,
+        isCashLimitExceeded,
         deliveredSalesAmount,
         officerRanking,
         targetTracking: {
