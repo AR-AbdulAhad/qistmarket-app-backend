@@ -1478,7 +1478,7 @@ const getOutletInstallments = async (req, res) => {
                         purchaser: true,
                         grantors: true,
                         documents: {
-                            where: { label: { in: ['photo - Purchaser', 'photo - Grantor 1', 'photo - Grantor 2'] } },
+                            where: { label: { in: ['Purchaser Profile', 'Grantor 1 Profile', 'Grantor 2 Profile', 'Purchaser Face Photo', 'photo - Purchaser', 'photo - Grantor 1', 'photo - Grantor 2'] } },
                             orderBy: { uploaded_at: 'desc' }
                         }
                     },
@@ -1542,6 +1542,18 @@ const getOutletInstallments = async (req, res) => {
             const purchaser = order.verification?.purchaser || null;
             const grantors = order.verification?.grantors || [];
             const documents = order.verification?.documents || [];
+
+            if (purchaser && !purchaser.profile_photo) {
+                const pPhoto = documents.find(d => d.label === 'photo - Purchaser' || d.label === 'Purchaser Profile');
+                if (pPhoto) purchaser.profile_photo = pPhoto.file_url || pPhoto.file_path;
+            }
+            grantors.forEach(g => {
+                if (!g.profile_photo) {
+                    const gPhoto = documents.find(d => d.label === `photo - Grantor ${g.grantor_number}`);
+                    if (gPhoto) g.profile_photo = gPhoto.file_url || gPhoto.file_path;
+                }
+            });
+
             const delivery = order.delivery;
             const ledgerModel = delivery?.installment_ledger || null;
             const cashRecord = order.cash_in_hand?.[0] || null;
@@ -2258,9 +2270,9 @@ const getOutletInstallmentsDueList = async (req, res) => {
                         purchaser: true,
                         grantors: true,
                         documents: {
-                            where: { label: { in: ['Purchaser Profile', 'Grantor 1 Profile', 'Grantor 2 Profile', 'Purchaser Face Photo'] } },
+                            where: { label: { in: ['Purchaser Profile', 'Grantor 1 Profile', 'Grantor 2 Profile', 'Purchaser Face Photo', 'photo - Purchaser', 'photo - Grantor 1', 'photo - Grantor 2'] } },
                             orderBy: { uploaded_at: 'desc' },
-                            take: 4
+                            take: 10
                         }
                     },
                 },
@@ -2339,6 +2351,19 @@ const getOutletInstallmentsDueList = async (req, res) => {
         orders.forEach(order => {
             const purchaser = order.verification?.purchaser || null;
             const grantors = order.verification?.grantors || [];
+            const documents = order.verification?.documents || [];
+
+            if (purchaser && !purchaser.profile_photo) {
+                const pPhoto = documents.find(d => d.label === 'photo - Purchaser' || d.label === 'Purchaser Profile');
+                if (pPhoto) purchaser.profile_photo = pPhoto.file_url || pPhoto.file_path;
+            }
+            grantors.forEach(g => {
+                if (!g.profile_photo) {
+                    const gPhoto = documents.find(d => d.label === `photo - Grantor ${g.grantor_number}`);
+                    if (gPhoto) g.profile_photo = gPhoto.file_url || gPhoto.file_path;
+                }
+            });
+
             const delivery = order.delivery;
             const ledgerModel = delivery?.installment_ledger || null;
             const cashRecord = order.cash_in_hand?.[0] || null;
