@@ -365,17 +365,54 @@ const submitBankDeposit = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Amount and payment_method are required.' });
         }
 
-        const deposit = await prisma.bankDepositRequest.create({
-            data: {
-                amount: parseFloat(amount),
-                bank_account_id: bank_account_id ? parseInt(bank_account_id) : null,
-                payment_method,
-                receipt_id,
-                receipt_photo_url,
-                description,
-                submitted_by_id: req.user.id,
-                outlet_id: req.user.outlet_id || null, // Outlets will have this
+        const amountFloat = parseFloat(amount);
+        const outletId = req.user.outlet_id || null;
+
+        const deposit = await prisma.$transaction(async (tx) => {
+            const newDeposit = await tx.bankDepositRequest.create({
+                data: {
+                    amount: amountFloat,
+                    bank_account_id: bank_account_id ? parseInt(bank_account_id) : null,
+                    payment_method,
+                    receipt_id,
+                    receipt_photo_url,
+                    description,
+                    status: 'pending',
+                    outlet_id: outletId,
+                    submitted_by_id: req.user.id
+                }
+            });
+
+            if (outletId) {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+
+                let register = await tx.cashRegister.findFirst({
+                    where: { outlet_id: outletId, date: { gte: today } }
+                });
+
+                if (register) {
+                    await tx.cashRegister.update({
+                        where: { id: register.id },
+                        data: {
+                            cash_transferred_out: register.cash_transferred_out + amountFloat,
+                            closing_cash: register.closing_cash - amountFloat
+                        }
+                    });
+                } else {
+                    await tx.cashRegister.create({
+                        data: {
+                            outlet_id: outletId,
+                            date: today,
+                            opening_cash: 0,
+                            cash_transferred_out: amountFloat,
+                            closing_cash: -Math.abs(amountFloat)
+                        }
+                    });
+                }
             }
+
+            return newDeposit;
         });
 
         await logAction(req, 'BANK_DEPOSIT_SUBMITTED', `Deposit request of PKR ${amount} submitted via ${payment_method}.`, deposit.id, 'BankDepositRequest');

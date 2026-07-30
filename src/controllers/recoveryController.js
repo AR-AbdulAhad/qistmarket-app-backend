@@ -1042,6 +1042,29 @@ const submitInstallment = async (req, res) => {
   }
 
   try {
+    // Check cash limit
+    const limitRecord = await prisma.cashLimit.findUnique({
+      where: { scope_type_scope_id: { scope_type: 'officer', scope_id: officerId } }
+    });
+
+    if (limitRecord) {
+      const cashPendingGroup = await prisma.cashInHand.groupBy({
+        by: ['officer_id'],
+        where: { officer_id: officerId, status: 'pending' },
+        _sum: { amount: true, submitted_amount: true },
+      });
+
+      const cashPending = cashPendingGroup.length 
+        ? (cashPendingGroup[0]._sum.amount || 0) - (cashPendingGroup[0]._sum.submitted_amount || 0) 
+        : 0;
+
+      if (cashPending >= limitRecord.daily_limit) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 400, message: 'Cash limit reached. Please submit your cash in hand to proceed.' }
+        });
+      }
+    }
     const order = await prisma.order.findUnique({
       where: { id: parseInt(order_id) },
       include: {

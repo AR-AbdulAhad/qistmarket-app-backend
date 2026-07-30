@@ -477,16 +477,27 @@ const getGlobalCashInHand = async (req, res) => {
 };
 
 const verifyCashSubmissionOTP = async (req, res) => {
-    const { otp, outlet_id } = req.body;
+    const { otp } = req.body;
 
-    if (!otp || !outlet_id) {
-        return res.status(400).json({ success: false, message: 'OTP and outlet_id are required' });
+    if (!otp) {
+        return res.status(400).json({ success: false, message: 'OTP is required' });
     }
 
     try {
+        // Resolve outlet_id from JWT or from DB
+        let outletId = req.user?.outlet_id;
+        if (!outletId && req.user?.id) {
+            const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { outlet_id: true } });
+            outletId = user?.outlet_id;
+        }
+
+        if (!outletId) {
+            return res.status(403).json({ success: false, message: 'Could not resolve outlet. Please login as an outlet user.' });
+        }
+
         const histories = await prisma.cashSubmissionHistory.findMany({
             where: {
-                outlet_id: parseInt(outlet_id),
+                outlet_id: outletId,
                 otp: otp,
                 status: 'pending'
             },
@@ -536,7 +547,7 @@ const verifyCashSubmissionOTP = async (req, res) => {
         }
 
         const totalAmount = histories.reduce((sum, h) => sum + h.amount_submitted, 0);
-        await updateCashRegister(null, parseInt(outlet_id), 'cash_from_delivery', totalAmount, 'add');
+        await updateCashRegister(null, outletId, 'cash_from_delivery', totalAmount, 'add');
 
         if (histories.length > 0) {
             const officerId = histories[0].cash_in_hand.officer_id;
@@ -2867,7 +2878,323 @@ const resendCashSubmissionOTP = async (req, res) => {
     }
 };
 
+
+// ==========================================
+// OUTLET TO OUTLET CASH TRANSFERS
+// ==========================================
+
+const submitCashTransferRequest = async (req, res) => {
+    const { amount, receiver_outlet_id, receipt_id, description } = req.body;
+    const sender_outlet_id = req.user?.outlet_id;
+    const submitted_by_id = req.user?.id;
+    
+    const receipt_photo_url = req.file ? `/uploads/deposits/${req.file.filename}` : null;
+
+    if (!sender_outlet_id) return res.status(403).json({ success: false, message: 'Only outlet users can transfer cash' });
+    if (!amount || isNaN(amount) || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount' });
+    if (!receiver_outlet_id) return res.status(400).json({ success: false, message: 'Target outlet is required' });
+    if (sender_outlet_id == receiver_outlet_id) return res.status(400).json({ success: false, message: 'Cannot transfer cash to your own outlet' });
+
+    try {
+        const transfer = await prisma.cashTransferRequest.create({
+            data: {
+                amount: parseFloat(amount),
+                sender_outlet_id,
+                receiver_outlet_id: parseInt(receiver_outlet_id),
+                receipt_id: receipt_id || null,
+                receipt_photo_url,
+                description: description || null,
+                status: 'pending',
+                submitted_by_id
+            }
+        });
+
+        res.json({ success: true, message: 'Transfer request submitted successfully', data: transfer });
+    } catch (error) {
+        console.error('submitCashTransferRequest error:', error);
+        res.status(500).json({ success: false, message: 'Failed to submit transfer request' });
+    }
+};
+
+const getOutgoingTransfers = async (req, res) => {
+    const outlet_id = req.user?.outlet_id;
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Only outlet users can access this' });
+
+    try {
+        const transfers = await prisma.cashTransferRequest.findMany({
+            where: { sender_outlet_id: outlet_id },
+            include: {
+                receiver_outlet: { select: { id: true, name: true, code: true } },
+                submitted_by: { select: { id: true, full_name: true } },
+                handled_by: { select: { id: true, full_name: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+        res.json({ success: true, data: transfers });
+    } catch (error) {
+        console.error('getOutgoingTransfers error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+const getIncomingTransfers = async (req, res) => {
+    const outlet_id = req.user?.outlet_id;
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Only outlet users can access this' });
+
+    try {
+        const transfers = await prisma.cashTransferRequest.findMany({
+            where: { receiver_outlet_id: outlet_id },
+            include: {
+                sender_outlet: { select: { id: true, name: true, code: true } },
+                submitted_by: { select: { id: true, full_name: true } },
+                handled_by: { select: { id: true, full_name: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+        res.json({ success: true, data: transfers });
+    } catch (error) {
+        console.error('getIncomingTransfers error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+const acceptCashTransfer = async (req, res) => {
+    const { id } = req.params;
+    const outlet_id = req.user?.outlet_id;
+    const handled_by_id = req.user?.id;
+
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Only outlet users can accept transfers' });
+
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const transfer = await tx.cashTransferRequest.findUnique({
+                where: { id: parseInt(id) }
+            });
+
+            if (!transfer) throw new Error("Transfer not found");
+            if (transfer.receiver_outlet_id !== outlet_id) throw new Error("Unauthorized to accept this transfer");
+            if (transfer.status !== 'pending') throw new Error("Transfer is not in a pending state");
+
+            const updatedTransfer = await tx.cashTransferRequest.update({
+                where: { id: parseInt(id) },
+                data: { status: 'accepted', handled_by_id }
+            });
+
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            let receiverRegister = await tx.cashRegister.findFirst({
+                where: { outlet_id, date: { gte: today } }
+            });
+            
+            if (receiverRegister) {
+                await tx.cashRegister.update({
+                    where: { id: receiverRegister.id },
+                    data: {
+                        cash_transferred_in: receiverRegister.cash_transferred_in + transfer.amount,
+                        closing_cash: receiverRegister.closing_cash + transfer.amount
+                    }
+                });
+            } else {
+                await tx.cashRegister.create({
+                    data: {
+                        outlet_id, date: today, opening_cash: 0,
+                        cash_transferred_in: transfer.amount, closing_cash: transfer.amount
+                    }
+                });
+            }
+
+            let senderRegister = await tx.cashRegister.findFirst({
+                where: { outlet_id: transfer.sender_outlet_id, date: { gte: today } }
+            });
+
+            if (senderRegister) {
+                await tx.cashRegister.update({
+                    where: { id: senderRegister.id },
+                    data: {
+                        cash_transferred_out: senderRegister.cash_transferred_out + transfer.amount,
+                        closing_cash: senderRegister.closing_cash - transfer.amount
+                    }
+                });
+            } else {
+                await tx.cashRegister.create({
+                    data: {
+                        outlet_id: transfer.sender_outlet_id, date: today, opening_cash: 0,
+                        cash_transferred_out: transfer.amount, closing_cash: -Math.abs(transfer.amount)
+                    }
+                });
+            }
+            return updatedTransfer;
+        });
+
+        res.json({ success: true, message: 'Transfer accepted successfully', data: result });
+    } catch (error) {
+        console.error('acceptCashTransfer error:', error);
+        res.status(500).json({ success: false, message: error.message || 'Failed to accept transfer' });
+    }
+};
+
+const rejectCashTransfer = async (req, res) => {
+    const { id } = req.params;
+    const outlet_id = req.user?.outlet_id;
+    const handled_by_id = req.user?.id;
+
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Only outlet users can reject transfers' });
+
+    try {
+        const transfer = await prisma.cashTransferRequest.findUnique({
+            where: { id: parseInt(id) }
+        });
+
+        if (!transfer) return res.status(404).json({ success: false, message: 'Transfer not found' });
+        if (transfer.receiver_outlet_id !== outlet_id) return res.status(403).json({ success: false, message: 'Unauthorized' });
+        if (transfer.status !== 'pending') return res.status(400).json({ success: false, message: 'Transfer is not pending' });
+
+        const updated = await prisma.cashTransferRequest.update({
+            where: { id: parseInt(id) },
+            data: { status: 'rejected', handled_by_id }
+        });
+
+        res.json({ success: true, message: 'Transfer rejected successfully', data: updated });
+    } catch (error) {
+        console.error('rejectCashTransfer error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+const getBasicOutletsList = async (req, res) => {
+    try {
+        const outlets = await prisma.outlet.findMany({
+            select: { id: true, name: true, code: true },
+            orderBy: { name: 'asc' }
+        });
+        res.json({ success: true, data: outlets });
+    } catch (error) {
+        console.error('getBasicOutletsList error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+const getOutletCashLimits = async (req, res) => {
+    try {
+        const outletId = req.user?.outlet_id;
+        if (!outletId) {
+            return res.status(403).json({ success: false, message: 'Only outlet users can access this.' });
+        }
+
+        // Fetch limits for officers belonging to this outlet
+        // First get the users (officers) for this outlet
+        const officers = await prisma.user.findMany({
+            where: { outlet_id: outletId, role_id: { in: [2, 3] } }, // Delivery and Recovery officers
+            select: { id: true, full_name: true }
+        });
+        const officerIds = officers.map(o => o.id);
+
+        if (!officerIds.length) {
+            return res.json({ success: true, data: [] });
+        }
+
+        const limits = await prisma.cashLimit.findMany({
+            where: { scope_type: 'officer', scope_id: { in: officerIds } },
+            orderBy: { created_at: 'desc' }
+        });
+
+        const cashByOfficer = await prisma.cashInHand.groupBy({
+            by: ['officer_id'],
+            where: { officer_id: { in: officerIds }, status: 'pending' },
+            _sum: { amount: true, submitted_amount: true },
+        });
+
+        const officerNameById = Object.fromEntries(officers.map((o) => [o.id, o.full_name]));
+        const officerPending = Object.fromEntries(cashByOfficer.map((c) => [c.officer_id, (c._sum.amount || 0) - (c._sum.submitted_amount || 0)]));
+
+        const data = limits.map((l) => {
+            const current = officerPending[l.scope_id] || 0;
+            const name = officerNameById[l.scope_id] || 'Unknown officer';
+            return { id: l.id, scope_type: l.scope_type, scope_id: l.scope_id, name, daily_limit: l.daily_limit, current_pending: current, is_over_limit: current > l.daily_limit };
+        });
+
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error('getOutletCashLimits error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const setOutletCashLimit = async (req, res) => {
+    try {
+        const outletId = req.user?.outlet_id;
+        if (!outletId) {
+            return res.status(403).json({ success: false, message: 'Only outlet users can access this.' });
+        }
+
+        const { scope_type, scope_id, daily_limit } = req.body;
+        if (scope_type !== 'officer' || !scope_id || daily_limit === undefined) {
+            return res.status(400).json({ success: false, message: 'scope_type (officer), scope_id, and daily_limit are required.' });
+        }
+
+        // Verify the officer belongs to this outlet
+        const officer = await prisma.user.findFirst({
+            where: { id: parseInt(scope_id), outlet_id: outletId }
+        });
+
+        if (!officer) {
+            return res.status(403).json({ success: false, message: 'Officer not found in your outlet.' });
+        }
+
+        const limit = await prisma.cashLimit.upsert({
+            where: { scope_type_scope_id: { scope_type, scope_id: parseInt(scope_id) } },
+            update: { daily_limit: parseFloat(daily_limit), created_by_id: req.user.id },
+            create: { scope_type, scope_id: parseInt(scope_id), daily_limit: parseFloat(daily_limit), created_by_id: req.user.id },
+        });
+
+        res.json({ success: true, data: limit });
+    } catch (error) {
+        console.error('setOutletCashLimit error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const deleteOutletCashLimit = async (req, res) => {
+    try {
+        const outletId = req.user?.outlet_id;
+        if (!outletId) {
+            return res.status(403).json({ success: false, message: 'Only outlet users can access this.' });
+        }
+
+        const limitId = parseInt(req.params.id);
+        const limit = await prisma.cashLimit.findUnique({ where: { id: limitId } });
+        
+        if (!limit || limit.scope_type !== 'officer') {
+            return res.status(404).json({ success: false, message: 'Cash limit not found.' });
+        }
+
+        // Verify the officer belongs to this outlet
+        const officer = await prisma.user.findFirst({
+            where: { id: limit.scope_id, outlet_id: outletId }
+        });
+
+        if (!officer) {
+            return res.status(403).json({ success: false, message: 'Officer not found in your outlet.' });
+        }
+
+        await prisma.cashLimit.delete({ where: { id: limitId } });
+        res.json({ success: true, message: 'Cash limit removed.' });
+    } catch (error) {
+        console.error('deleteOutletCashLimit error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
+
+    submitCashTransferRequest,
+    getOutgoingTransfers,
+    getIncomingTransfers,
+    acceptCashTransfer,
+    rejectCashTransfer,
+    getBasicOutletsList,
+
     createOutlet,
     getOutlets,
     getAllOutlets,
@@ -2891,5 +3218,8 @@ module.exports = {
     updateInstallmentNote,
     sendBulkReminders,
     getPendingCashSubmissions,
-    resendCashSubmissionOTP
+    resendCashSubmissionOTP,
+    getOutletCashLimits,
+    setOutletCashLimit,
+    deleteOutletCashLimit
 };

@@ -110,6 +110,8 @@ model User {
   location_history               UserLocationHistory[]     @relation("UserLocationHistory")
   officer_targets                OfficerTarget[]           @relation("OfficerTargets")
   officer_targets_created        OfficerTarget[]           @relation("OfficerTargetCreator")
+  cash_transfers_submitted       CashTransferRequest[]     @relation("TransferSubmitter")
+  cash_transfers_handled         CashTransferRequest[]     @relation("TransferHandler")
 
   @@index([role_id])
   @@index([is_online])
@@ -304,6 +306,8 @@ model Outlet {
   employees        Employee[]
   bank_accounts    BankAccount[]
   deposit_requests BankDepositRequest[] @relation("DepositOutlet")
+  transfers_sent   CashTransferRequest[] @relation("SenderOutlet")
+  transfers_received CashTransferRequest[] @relation("ReceiverOutlet")
 
   @@map("outlets")
 }
@@ -498,6 +502,8 @@ model CashRegister {
   created_at            DateTime @default(now())
   updated_at            DateTime @updatedAt
   vendor_payments       Float    @default(0)
+  cash_transferred_in   Float    @default(0)
+  cash_transferred_out  Float    @default(0)
   outlet                Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
 
   @@unique([outlet_id, date])
@@ -1882,4 +1888,30 @@ model ArchivedDeliveryUpload {
   archived_delivery   ArchivedDelivery @relation(fields: [archived_delivery_id], references: [id], onDelete: Cascade)
 
   @@index([archived_delivery_id])
+}
+
+model CashTransferRequest {
+  id                Int       @id @default(autoincrement())
+  amount            Float
+  sender_outlet_id  Int
+  receiver_outlet_id Int
+  receipt_id        String?
+  receipt_photo_url String?
+  description       String?   @db.Text
+  status            String    @default("pending") // pending, accepted, rejected
+  submitted_by_id   Int
+  handled_by_id     Int?
+  
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @updatedAt
+
+  sender_outlet     Outlet    @relation("SenderOutlet", fields: [sender_outlet_id], references: [id])
+  receiver_outlet   Outlet    @relation("ReceiverOutlet", fields: [receiver_outlet_id], references: [id])
+  submitted_by      User      @relation("TransferSubmitter", fields: [submitted_by_id], references: [id])
+  handled_by        User?     @relation("TransferHandler", fields: [handled_by_id], references: [id])
+
+  @@index([sender_outlet_id])
+  @@index([receiver_outlet_id])
+  @@index([status])
+  @@map("cash_transfer_requests")
 }

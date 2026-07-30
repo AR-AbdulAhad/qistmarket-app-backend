@@ -24,13 +24,17 @@ const {
     updateInstallmentNote,
     getPendingCashSubmissions,
     resendCashSubmissionOTP,
-    sendBulkReminders
-} = require('../controllers/outletController');
-const {
+    sendBulkReminders,
+    submitCashTransferRequest,
+    getOutgoingTransfers,
+    getIncomingTransfers,
+    acceptCashTransfer,
+    rejectCashTransfer,
+    getBasicOutletsList,
     getOutletCashLimits,
     setOutletCashLimit,
-    deleteOutletCashLimit,
-} = require('../controllers/accountsCashController');
+    deleteOutletCashLimit
+} = require('../controllers/outletController');
 const { generateSmartPayQr, checkSmartPayQr } = require('../controllers/smartPayController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 const { requirePermission } = require('../middlewares/permissionMiddleware');
@@ -83,5 +87,13 @@ const { submitBankDeposit, listBankDeposits } = require('../controllers/bankAcco
 const upload = require('../middlewares/uploadMiddleware');
 router.post('/outlet/bank-deposits', authenticateJWT, upload.single('receipt_photo'), submitBankDeposit);
 router.get('/outlet/bank-deposits', authenticateJWT, listBankDeposits);
+
+// Outlet to Outlet Cash Transfers
+router.post('/outlet/cash-transfers', authenticateJWT, upload.single('receipt_photo'), submitCashTransferRequest);
+router.get('/outlet/cash-transfers/outgoing', authenticateJWT, getOutgoingTransfers);
+router.get('/outlet/cash-transfers/incoming', authenticateJWT, getIncomingTransfers);
+router.post('/outlet/cash-transfers/:id/accept', authenticateJWT, acceptCashTransfer);
+router.post('/outlet/cash-transfers/:id/reject', authenticateJWT, rejectCashTransfer);
+router.get('/outlet/list/basic', authenticateJWT, getBasicOutletsList);
 
 module.exports = router;
