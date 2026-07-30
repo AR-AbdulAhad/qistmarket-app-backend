@@ -2864,8 +2864,13 @@ const getDeliveryDashboardStats = async (req, res) => {
     });
 
     // ─── 7. Target Tracking ───────────────────────────────────────────────────
-    const monthlyTarget = Number(process.env.DELIVERY_TARGET_AMOUNT || 500000);
-    const customerTarget = Number(process.env.DELIVERY_TARGET_CUSTOMERS || 50);
+    const currentMonthStr = `${nowDt.getFullYear()}-${String(nowDt.getMonth() + 1).padStart(2, '0')}`;
+    const targetRecord = await prisma.officerTarget.findUnique({
+      where: { officer_id_month: { officer_id: userId, month: currentMonthStr } }
+    });
+
+    const monthlyTarget = targetRecord?.target_amount || 0;
+    const customerTarget = targetRecord?.target_customers || 0;
     const remainingAmount = Math.max(0, monthlyTarget - deliveredSalesAmount);
     const remainingCustomers = Math.max(0, customerTarget - customersDone);
 

@@ -391,13 +391,13 @@ model MonthlyTarget {
 }
 
 model OfficerTarget {
-  id            Int      @id @default(autoincrement())
-  officer_id    Int
-  month         String   // format "YYYY-MM"
-  target_type   String   // "amount" or "customers"
-  target_value  Float
-  created_at    DateTime @default(now())
-  created_by_id Int?
+  id               Int      @id @default(autoincrement())
+  officer_id       Int
+  month            String   // format "YYYY-MM"
+  target_amount    Float
+  target_customers Int
+  created_at       DateTime @default(now())
+  created_by_id    Int?
 
   officer       User     @relation("OfficerTargets", fields: [officer_id], references: [id], onDelete: Cascade)
   created_by    User?    @relation("OfficerTargetCreator", fields: [created_by_id], references: [id])

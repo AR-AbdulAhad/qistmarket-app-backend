@@ -29,9 +29,9 @@ const getTargets = async (req, res) => {
 
 const assignTarget = async (req, res) => {
     try {
-        const { officer_id, month, target_type, target_value } = req.body;
+        const { officer_id, month, target_amount, target_customers } = req.body;
 
-        if (!officer_id || !month || !target_type || !target_value) {
+        if (!officer_id || !month || target_amount === undefined || target_customers === undefined) {
             return res.status(400).json({ success: false, message: 'Missing required fields.' });
         }
 
@@ -56,8 +56,8 @@ const assignTarget = async (req, res) => {
             data: {
                 officer_id: parseInt(officer_id),
                 month,
-                target_type,
-                target_value: parseFloat(target_value),
+                target_amount: parseFloat(target_amount),
+                target_customers: parseInt(target_customers),
                 created_by_id: req.user?.id || null
             }
         });

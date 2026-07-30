@@ -1976,8 +1976,13 @@ const getRecoveryDashboardStats = async (req, res) => {
     }
 
     // Target Tracking (variables used in response below)
-    const monthlyTarget = Number(process.env.RECOVERY_TARGET_AMOUNT || 500000);
-    const customerTarget = Number(process.env.RECOVERY_TARGET_CUSTOMERS || 50);
+    const currentMonthStr = `${nowDt.getFullYear()}-${String(nowDt.getMonth() + 1).padStart(2, '0')}`;
+    const targetRecord = await prisma.officerTarget.findUnique({
+      where: { officer_id_month: { officer_id: userId, month: currentMonthStr } }
+    });
+
+    const monthlyTarget = targetRecord?.target_amount || 0;
+    const customerTarget = targetRecord?.target_customers || 0;
     const achievedAmount = collectedAmountSum._sum.amount_collected || 0;
     const achievedCustomers = statusCounts['completed'] || 0;
     const remainingAmount = Math.max(0, monthlyTarget - achievedAmount);
