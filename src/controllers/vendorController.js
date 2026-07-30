@@ -872,6 +872,11 @@ const getVendorLedger = async (req, res) => {
             orderBy: { created_at: 'desc' }
         });
 
+        const genericTransactions = await prisma.vendorCashTransaction.findMany({
+            where: { vendor_id: vendor.id },
+            orderBy: { created_at: 'desc' }
+        });
+
         // Merge and Sort
         const ledger = [
             ...purchases.map(p => ({
@@ -904,6 +909,16 @@ const getVendorLedger = async (req, res) => {
                 debit: 0,
                 credit: r.total_amount, // Balance Decrease
                 notes: r.notes
+            })),
+            ...genericTransactions.map(t => ({
+                id: t.id,
+                type: t.type === 'credit' ? 'Payment In' : 'Payment Out',
+                reference: `VCT-${t.id}`,
+                date: t.created_at,
+                amount: t.amount,
+                debit: t.type === 'credit' ? t.amount : 0,
+                credit: t.type === 'debit' ? t.amount : 0,
+                notes: t.description
             }))
         ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 

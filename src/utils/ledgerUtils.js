@@ -37,14 +37,8 @@ function normalizeLedger(rows) {
                 const nextRow = updatedRows.find(r => r.month === row.month + 1);
 
                 if (nextRow) {
-                    // Update current row to be "paid" at the amount actually paid
-                    row.amount = paidAmount;
-                    row.status = 'paid';
-                    row.paid_amount = paidAmount;
-                    
-                    // Push remaining to next month
-                    nextRow.amount = (Number(nextRow.amount || nextRow.dueAmount || 0)) + remaining;
-                    nextRow.arrears = (Number(nextRow.arrears || 0)) + remaining;
+                    // Push remaining PLUS current accumulated arrears to next month
+                    nextRow.arrears = (Number(nextRow.arrears || 0)) + remaining + (Number(row.arrears || 0));
                 }
             }
         }

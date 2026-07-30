@@ -11,7 +11,8 @@ const {
     getAllOutlets,
     getFinancialReport,
     getInstallmentRecoveriesReport,
-    getOfficerRecoveryReport
+    getOfficerRecoveryReport,
+    getInstallmentAnalytics
 } = require('../controllers/outletReportController');
 
 // All routes require authentication
@@ -76,5 +77,12 @@ router.get('/outlet-reports/installment-recoveries', getInstallmentRecoveriesRep
  * @desc    Get performance and collections of recovery officers
  */
 router.get('/outlet-reports/officer-recoveries', getOfficerRecoveryReport);
+
+/**
+ * @route   GET /api/outlet-reports/analytics/installments
+ * @desc    Get advanced installment analytics for the outlet
+ * @access  Private
+ */
+router.get('/outlet-reports/analytics/installments', getInstallmentAnalytics);
 
 module.exports = router;

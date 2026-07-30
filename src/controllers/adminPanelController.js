@@ -196,14 +196,23 @@ const getUnifiedRankings = async (req, res) => {
             }),
         ]);
 
+        const filterByOutlet = (rows) => {
+            if (req.user && req.user.outlet_id) {
+                const filtered = rows.filter(r => r.outlet_id === req.user.outlet_id);
+                // Re-rank for the filtered list
+                return filtered.map((r, idx) => ({ ...r, rank: idx + 1 }));
+            }
+            return rows;
+        };
+
         res.json({
             success: true,
             data: {
                 period: { period, month, year },
-                csr: csrShaped,
-                verification: verificationShaped,
-                delivery: deliveryShaped,
-                recovery: recoveryShaped,
+                csr: filterByOutlet(csrShaped),
+                verification: filterByOutlet(verificationShaped),
+                delivery: filterByOutlet(deliveryShaped),
+                recovery: filterByOutlet(recoveryShaped),
             },
         });
     } catch (error) {
@@ -228,16 +237,19 @@ const getOutletRankings = async (req, res) => {
         const outlets = await prisma.outlet.findMany({ where: { type: { not: 'warehouse' } }, select: { id: true, name: true, code: true } });
         const orders = await prisma.order.findMany({
             where: { outlet_id: { in: outlets.map((o) => o.id) }, status: { notIn: ['Cancelled', 'Rejected'] }, created_at: { gte: startOfMonth } },
-            select: { outlet_id: true, total_amount: true, installment_ledger: { select: { ledger_rows: true } } },
+            select: { outlet_id: true, total_amount: true, is_delivered: true, installment_ledger: { select: { ledger_rows: true } } },
         });
 
         const stats = {};
-        for (const o of outlets) stats[o.id] = { outlet_id: o.id, outlet_name: o.name, outlet_code: o.code, totalSales: 0, dueAmount: 0, recoveredAmount: 0, onTimeCount: 0, lateCount: 0 };
+        for (const o of outlets) stats[o.id] = { outlet_id: o.id, outlet_name: o.name, outlet_code: o.code, totalSales: 0, dueAmount: 0, recoveredAmount: 0, customerCount: 0 };
 
         for (const order of orders) {
             const entry = stats[order.outlet_id];
             if (!entry) continue;
             entry.totalSales += order.total_amount || 0;
+            if (order.is_delivered) {
+                entry.customerCount += 1;
+            }
 
             const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
             for (const row of rows) {
@@ -245,18 +257,15 @@ const getOutletRankings = async (req, res) => {
                 entry.dueAmount += amount;
                 if (row.status === 'paid') {
                     entry.recoveredAmount += amount;
-                    if (row.paid_at && row.dueDate && new Date(row.paid_at) <= new Date(row.dueDate)) entry.onTimeCount += 1;
-                    else entry.lateCount += 1;
                 }
             }
         }
 
         const ranked = Object.values(stats).map((s) => {
             const recoveryPct = s.dueAmount > 0 ? (s.recoveredAmount / s.dueAmount) * 100 : 0;
-            const onTimePct = s.onTimeCount + s.lateCount > 0 ? (s.onTimeCount / (s.onTimeCount + s.lateCount)) * 100 : 0;
-            // Blended score: sales scaled down + recovery% + on-time% weighted evenly
-            const score = Math.round(s.totalSales / 1000 + recoveryPct * 5 + onTimePct * 5);
-            return { ...s, recoveryPercentage: Math.round(recoveryPct * 10) / 10, onTimePercentage: Math.round(onTimePct * 10) / 10, score };
+            // Blended score: sales scaled down + recovery% + customerCount weighted
+            const score = Math.round(s.totalSales / 1000 + recoveryPct * 5 + s.customerCount * 10);
+            return { ...s, recoveryPercentage: Math.round(recoveryPct * 10) / 10, score };
         }).sort((a, b) => b.score - a.score)
           .map((s, idx) => ({ ...s, rank: idx + 1, tier: tierFor(s.score) }));
 

@@ -568,6 +568,162 @@ const getOfficerRecoveryReport = async (req, res) => {
     }
 };
 
+/**
+ * getInstallmentAnalytics
+ * Aggregates advanced analytics for installment accounts (PTPs, locks, trends).
+ */
+const getInstallmentAnalytics = async (req, res) => {
+    try {
+        const outletId = req.user.outlet_id;
+        if (!outletId) {
+            return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+        }
+
+        const outletFilter = { outlet_id: outletId };
+
+        // 1. Total Installment Customers
+        const activeOrders = await prisma.order.findMany({
+            where: {
+                outlet_id: outletId,
+                months: { gt: 0 },
+                status: { in: ['pending', 'in_progress', 'delivered'] }
+            },
+            select: { id: true, imei_serial: true }
+        });
+        const orderIds = activeOrders.map(o => o.id);
+
+        // 2. Ledgers for these orders
+        const ledgers = await prisma.installmentLedger.findMany({
+            where: { order_id: { in: orderIds } }
+        });
+
+        let totalOnlineAmount = 0;
+        let onlineCount = 0;
+        let totalCashAmount = 0;
+        let cashCount = 0;
+        let totalOfficerAmount = 0;
+        let officerCount = 0;
+
+        const todayDate = new Date();
+        todayDate.setHours(0, 0, 0, 0);
+        const yesterdayDate = new Date(todayDate);
+        yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+
+        const firstDayOfThisMonth = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
+        const lastDayOfThisMonth = new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0, 23, 59, 59, 999);
+        
+        let todayRecovered = 0;
+        let yesterdayRecovered = 0;
+        let lastMonthRecovered = 0; 
+        const firstDayOfLastMonth = new Date(todayDate.getFullYear(), todayDate.getMonth() - 1, 1);
+        const lastDayOfLastMonth = new Date(todayDate.getFullYear(), todayDate.getMonth(), 0, 23, 59, 59, 999);
+
+        let expectedDueThisMonth = 0;
+        let recoveredThisMonth = 0;
+
+        let totalLockedBalance = 0;
+        let lockedCount = 0;
+
+        for (const ledger of ledgers) {
+            const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            let ledgerRemainingBalance = 0;
+            
+            for (const row of rows) {
+                const amount = parseFloat(row.amount || row.dueAmount || 0);
+
+                if (row.status !== 'paid') {
+                    ledgerRemainingBalance += amount;
+                }
+
+                if (row.dueDate) {
+                    const due = new Date(row.dueDate);
+                    if (due >= firstDayOfThisMonth && due <= lastDayOfThisMonth) {
+                        expectedDueThisMonth += amount;
+                    }
+                }
+
+                if (row.status === 'paid' && row.paid_at) {
+                    const paidDate = new Date(row.paid_at);
+                    const paidDateStart = new Date(paidDate);
+                    paidDateStart.setHours(0,0,0,0);
+
+                    if (paidDateStart.getTime() === todayDate.getTime()) todayRecovered += amount;
+                    if (paidDateStart.getTime() === yesterdayDate.getTime()) yesterdayRecovered += amount;
+                    if (paidDate >= firstDayOfLastMonth && paidDate <= lastDayOfLastMonth) lastMonthRecovered += amount;
+                    if (paidDate >= firstDayOfThisMonth && paidDate <= lastDayOfThisMonth) recoveredThisMonth += amount;
+
+                    if (row.method === 'online' || row.payment_method === 'online') {
+                        totalOnlineAmount += amount;
+                        onlineCount++;
+                    } else {
+                        totalCashAmount += amount;
+                        cashCount++;
+                    }
+
+                    if (row.collected_by_role === 'recovery_officer' || row.collected_by) {
+                        totalOfficerAmount += amount;
+                        officerCount++;
+                    }
+                }
+            }
+            ledger.remainingBalance = ledgerRemainingBalance;
+        }
+
+        // 3. PTP and Device Locks from PayTriggerDevice
+        const ptpDevices = await prisma.payTriggerDevice.findMany({
+            where: { order_id: { in: orderIds } }
+        });
+
+        const ptpStats = { active: 0, broken: 0, fulfilled: 0, none: 0 };
+        for (const device of ptpDevices) {
+            const status = device.ptp_status || 'none';
+            if (ptpStats[status] !== undefined) ptpStats[status]++;
+            else ptpStats[status] = 1;
+
+            if (device.lock_status === 'locked') {
+                lockedCount++;
+                const ledger = ledgers.find(l => l.order_id === device.order_id);
+                if (ledger) {
+                    totalLockedBalance += ledger.remainingBalance;
+                }
+            }
+        }
+
+        const avgLockedBalance = lockedCount > 0 ? (totalLockedBalance / lockedCount) : 0;
+        const monthRecoveryRatio = expectedDueThisMonth > 0 ? ((recoveredThisMonth / expectedDueThisMonth) * 100) : 0;
+
+        res.json({
+            success: true,
+            data: {
+                totalCustomers: orderIds.length,
+                paymentSplits: {
+                    online: { count: onlineCount, amount: totalOnlineAmount },
+                    cash: { count: cashCount, amount: totalCashAmount },
+                    officer: { count: officerCount, amount: totalOfficerAmount }
+                },
+                ptpStats,
+                devices: {
+                    lockedCount,
+                    totalLockedBalance,
+                    avgLockedBalance
+                },
+                trends: {
+                    today: todayRecovered,
+                    yesterday: yesterdayRecovered,
+                    lastMonth: lastMonthRecovered,
+                    thisMonthExpected: expectedDueThisMonth,
+                    thisMonthRecovered: recoveredThisMonth,
+                    recoveryRatio: monthRecoveryRatio
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('getInstallmentAnalytics error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getDaybook,
     getStockSummary,
@@ -578,5 +734,6 @@ module.exports = {
     getAllOutlets,
     getFinancialReport,
     getInstallmentRecoveriesReport,
-    getOfficerRecoveryReport
+    getOfficerRecoveryReport,
+    getInstallmentAnalytics
 };
