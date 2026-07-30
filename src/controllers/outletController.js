@@ -308,7 +308,11 @@ const getDashboardStats = async (req, res) => {
         let ordersWithPendingInstallments = 0;
 
         for (const order of deliveredOrders) {
-            const normalized = getNormalizedLedger(order.delivery?.installment_ledger?.ledger_rows);
+            let rawRows = [];
+            const lr = order.delivery?.installment_ledger?.ledger_rows;
+            if (lr) rawRows = typeof lr === 'string' ? JSON.parse(lr) : lr;
+            
+            const normalized = getNormalizedLedger(rawRows);
             const { summary } = normalized;
 
             totalInstallmentDue += summary.totalInstallmentDue;
@@ -1550,7 +1554,11 @@ const getOutletInstallments = async (req, res) => {
                 try { plan = JSON.parse(plan); } catch (e) { plan = null; }
             }
 
-            const normalized = getNormalizedLedger(ledgerModel?.ledger_rows);
+            let rawRows1553 = [];
+            if (ledgerModel?.ledger_rows) {
+                rawRows1553 = typeof ledgerModel.ledger_rows === 'string' ? JSON.parse(ledgerModel.ledger_rows) : ledgerModel.ledger_rows;
+            }
+            const normalized = getNormalizedLedger(rawRows1553);
             const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
 
             const advanceAmount = advancePayment.amount;
@@ -1874,7 +1882,7 @@ const verifyInstallmentPayment = async (req, res) => {
         return res.json({ success: true, message: 'Payment processed successfully' });
     } catch (error) {
         console.error('verifyInstallmentPayment error:', error);
-        return res.status(500).json({ success: false, message: 'Internal server error' });
+        res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
@@ -2339,9 +2347,6 @@ const getOutletInstallmentsDueList = async (req, res) => {
             const imeiSerial = cashRecord?.imei_serial || delivery?.product_imei || order.imei_serial || null;
             const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
 
-            const normalized = getNormalizedLedger(ledgerModel?.ledger_rows);
-            const { installment_ledger: installmentLedger, summary } = normalized;
-
             let rawLedgerRows = [];
             try {
                 if (ledgerModel?.ledger_rows) {
@@ -2352,6 +2357,9 @@ const getOutletInstallmentsDueList = async (req, res) => {
             } catch (e) {
                 console.error("Error parsing raw ledger rows:", e);
             }
+
+            const normalized = getNormalizedLedger(rawLedgerRows);
+            const { installment_ledger: installmentLedger, summary } = normalized;
 
             const pendingInstallments = installmentLedger.filter(r => r.status !== 'paid' && r.status !== 'Paid');
             const overdueInstallments = pendingInstallments.filter(r => r.dueDate && new Date(r.dueDate) < today);
