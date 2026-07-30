@@ -160,26 +160,28 @@ const getUnifiedRankings = async (req, res) => {
         // already returned per board, so this stays a bounded query volume.
 
         await Promise.all([
-            ...verificationShaped.slice(0, 10).map(async (row) => {
-                const verifications = await prisma.verification.findMany({
-                    where: { verification_officer_id: row.officer_id, created_at: { gte: startOfMonth, lt: endOfMonth } },
-                    select: { status: true, start_time: true, end_time: true },
+            ...verificationShaped.map(async (row) => {
+                const orders = await prisma.order.findMany({
+                    where: { assigned_to_user_id: row.officer_id, verification_assigned_at: { gte: startOfMonth, lt: endOfMonth } },
+                    select: { status: true },
                 });
-                row.total_verifications = verifications.length;
-                row.approved_verifications = verifications.filter((v) => v.status === 'approved' || v.status === 'completed').length;
-                row.rejected_verifications = verifications.filter((v) => v.status === 'rejected').length;
-                row.avg_verification_minutes = avgMinutes(verifications);
+                row.total_verifications = orders.length;
+                row.approved_verifications = orders.filter((o) => o.status === 'delivered').length;
+                row.rejected_verifications = orders.filter((o) => o.status === 'rejected').length;
+                row.score = row.approved_verifications * 10;
+                row.tier = tierFor(row.score);
             }),
-            ...deliveryShaped.slice(0, 10).map(async (row) => {
-                const deliveries = await prisma.delivery.findMany({
-                    where: { delivery_agent_id: row.officer_id, created_at: { gte: startOfMonth, lt: endOfMonth } },
-                    select: { status: true, start_time: true, end_time: true },
+            ...deliveryShaped.map(async (row) => {
+                const orders = await prisma.order.findMany({
+                    where: { delivery_officer_id: row.officer_id, delivery_assigned_at: { gte: startOfMonth, lt: endOfMonth } },
+                    select: { status: true },
                 });
-                row.successful_deliveries = deliveries.filter((d) => d.status === 'delivered' || d.status === 'completed').length;
-                row.failed_deliveries = deliveries.filter((d) => d.status === 'cancelled' || d.status === 'failed').length;
-                row.avg_delivery_minutes = avgMinutes(deliveries);
+                row.successful_deliveries = orders.filter((o) => o.status === 'delivered').length;
+                row.failed_deliveries = orders.filter((o) => ['cancelled', 'failed', 'rejected'].includes(o.status)).length;
+                row.score = row.successful_deliveries * 10;
+                row.tier = tierFor(row.score);
             }),
-            ...recoveryShaped.slice(0, 10).map(async (row) => {
+            ...recoveryShaped.map(async (row) => {
                 // Live-fallback rows already have visits cached
                 const visits = row._liveVisits ?? await prisma.recoveryVisit.findMany({
                     where: { officer_id: row.officer_id, visit_time: { gte: startOfMonth, lt: endOfMonth } },
@@ -189,12 +191,19 @@ const getUnifiedRankings = async (req, res) => {
                 row.amount_collected = visits.reduce((s, v) => s + (v.amount_collected || 0), 0);
                 row.recovery_rate = visits.length > 0 ? Math.round((visits.filter(v => v.payment_collected).length / visits.length) * 1000) / 10 : 0;
                 row.missed_visits = visits.filter((v) => !v.payment_collected).length;
+                row.score = Math.floor(row.amount_collected / 1000); // 1 point per 1000 Rs recovered
+                row.tier = tierFor(row.score);
                 delete row._liveVisits;
             }),
             ...csrShaped.map(async (row) => {
                 row.conversion_rate = row.unique_customers > 0 ? Math.round((row.delivered_customers / row.unique_customers) * 1000) / 10 : 0;
             }),
         ]);
+
+        // Re-rank based on accurate live scores
+        verificationShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
+        deliveryShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
+        recoveryShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
 
         const filterByOutlet = (rows) => {
             if (req.user && req.user.outlet_id) {
