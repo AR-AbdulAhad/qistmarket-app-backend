@@ -1917,9 +1917,7 @@ const getOutletOfficers = async (req, res) => {
                 // For Verification Officers - Get stats from Order table
                 const orders = await prisma.order.findMany({
                     where: {
-                        verification: {
-                            verification_officer_id: off.id
-                        },
+                        assigned_to_user_id: off.id,
                         ...dateFilter
                     },
                     select: {
@@ -1929,42 +1927,13 @@ const getOutletOfficers = async (req, res) => {
                 });
 
                 // Calculate stats based on Order status
-                const pendingCount = orders.filter(o =>
-                    o.status === 'Pending Verification' ||
-                    o.status === 'pending' ||
-                    o.status === 'new'
-                ).length;
-
-                const inProgressCount = orders.filter(o =>
-                    o.status === 'Verification In Progress' ||
-                    o.status === 'in_progress' ||
-                    o.status === 'In Progress'
-                ).length;
-
-                const completedCount = orders.filter(o =>
-                    o.status === 'Verified' ||
-                    o.status === 'verified' ||
-                    o.status === 'Approved' ||
-                    o.status === 'approved'
-                ).length;
-
-                const rejectedCount = orders.filter(o =>
-                    o.status === 'Rejected' ||
-                    o.status === 'rejected'
-                ).length;
-
-                const expiredCount = orders.filter(o =>
-                    o.status === 'Expired' ||
-                    o.status === 'expired'
-                ).length;
-
-                const deliveredCount = orders.filter(o => o.is_delivered === true).length;
-
-                const approvedCount = orders.filter(o =>
-                    o.status === 'Approved' ||
-                    o.status === 'approved' ||
-                    o.status === 'Ready for Delivery'
-                ).length;
+                const pendingCount = orders.filter(o => ['pending verification', 'pending', 'new'].includes((o.status || '').toLowerCase())).length;
+                const inProgressCount = orders.filter(o => ['verification in progress', 'in_progress', 'in progress'].includes((o.status || '').toLowerCase())).length;
+                const completedCount = orders.filter(o => (o.status || '').toLowerCase() === 'completed').length;
+                const approvedCount = orders.filter(o => ['approved', 'verified', 'ready for delivery'].includes((o.status || '').toLowerCase())).length;
+                const rejectedCount = orders.filter(o => (o.status || '').toLowerCase() === 'rejected').length;
+                const expiredCount = orders.filter(o => (o.status || '').toLowerCase() === 'expired').length;
+                const deliveredCount = orders.filter(o => o.is_delivered === true || (o.status || '').toLowerCase() === 'delivered').length;
 
                 return {
                     ...off,
@@ -2027,8 +1996,9 @@ const getOutletOfficers = async (req, res) => {
                         where: {
                             to_id: off.id,
                             to_type: 'Delivery Officer',
+                            status: { in: ['transferred'] },
                             inventory: {
-                                status: 'Out Of Stock'
+                                status: 'With Delivery Officer'
                             }
                         }
                     });
@@ -2076,7 +2046,10 @@ const getOfficerDetails = async (req, res) => {
                 where: {
                     to_id: officer.id,
                     to_type: 'Delivery Officer',
-                    inventory: { status: 'Out Of Stock' }
+                    status: { in: ['transferred'] },
+                    inventory: {
+                        status: 'With Delivery Officer'
+                    }
                 },
                 include: { inventory: true },
                 orderBy: { created_at: 'desc' }
@@ -2126,9 +2099,7 @@ const getOfficerDetails = async (req, res) => {
             // 6. Orders for VO (role_id = 1) - Directly from Order table with verification relation
             role === 1 ? prisma.order.findMany({
                 where: {
-                    verification: {
-                        verification_officer_id: officer.id
-                    }
+                    assigned_to_user_id: officer.id
                 },
                 include: {
                     verification: true
@@ -2165,13 +2136,13 @@ const getOfficerDetails = async (req, res) => {
 
         // Count order statuses for VO (from Order table, not Verification table)
         const verificationStats = {
-            pending: ordersForVO.filter(o => o.status === 'pending').length,
-            in_progress: ordersForVO.filter(o => o.status === 'in_progress').length,
-            completed: ordersForVO.filter(o => o.status === 'completed').length,
-            approved: ordersForVO.filter(o => o.status === 'approved').length,
-            delivered: ordersForVO.filter(o => o.status === 'delivered').length,
-            rejected: ordersForVO.filter(o => o.status === 'rejected').length,
-            expired: ordersForVO.filter(o => o.status === 'expired').length
+            pending: ordersForVO.filter(o => ['pending verification', 'pending', 'new'].includes((o.status || '').toLowerCase())).length,
+            in_progress: ordersForVO.filter(o => ['verification in progress', 'in_progress', 'in progress'].includes((o.status || '').toLowerCase())).length,
+            completed: ordersForVO.filter(o => (o.status || '').toLowerCase() === 'completed').length,
+            approved: ordersForVO.filter(o => ['approved', 'verified', 'ready for delivery'].includes((o.status || '').toLowerCase())).length,
+            delivered: ordersForVO.filter(o => o.is_delivered === true || (o.status || '').toLowerCase() === 'delivered').length,
+            rejected: ordersForVO.filter(o => (o.status || '').toLowerCase() === 'rejected').length,
+            expired: ordersForVO.filter(o => (o.status || '').toLowerCase() === 'expired').length
         };
 
         // Format orders for VO response
@@ -2191,17 +2162,30 @@ const getOfficerDetails = async (req, res) => {
             verification_feedback: order.verification?.verification_feedback
         })) : null;
 
+        // Format deliveries for DO
+        let formattedDeliveredProducts = null;
+        if (role === 2) {
+            const imeis = delivered_products.map(d => d.product_imei).filter(Boolean);
+            const inventories = await prisma.outletInventory.findMany({
+                where: { imei_serial: { in: imeis } },
+                select: { imei_serial: true, product_name: true }
+            });
+            const inventoryMap = new Map(inventories.map(inv => [inv.imei_serial, inv.product_name]));
+
+            formattedDeliveredProducts = delivered_products.map(d => ({
+                order_ref: d.order?.order_ref,
+                customer_name: d.order?.customer_name,
+                product_name: inventoryMap.get(d.product_imei) || d.order?.product_name || 'Unknown Product',
+                imei_serial: d.product_imei,
+                delivery_date: d.created_at
+            }));
+        }
+
         res.json({
             success: true,
             officer,
             inventory: role === 2 ? inventory.map(t => t.inventory) : null,
-            delivered_products: role === 2 ? delivered_products.map(d => ({
-                order_ref: d.order.order_ref,
-                customer_name: d.order.customer_name,
-                product_name: d.order.product_name,
-                imei_serial: d.product_imei,
-                delivery_date: d.created_at
-            })) : null,
+            delivered_products: formattedDeliveredProducts,
             verifications: formattedOrdersForVO,
             cash,
             submission_history: submissionHistory.map(h => ({
@@ -2216,9 +2200,10 @@ const getOfficerDetails = async (req, res) => {
                 paid_cash: paidAmount,
                 pending_cash: pendingAmount,
                 total_collection: paidAmount + pendingAmount,
-                verification_stats: verificationStats
+                verification_stats: role === 1 ? verificationStats : null
             }
         });
+
     } catch (error) {
         console.error('getOfficerDetails error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -2231,9 +2216,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
         page = 1,
         limit = 10,
         search = '',
-        category = 'all', // all, regular, fresh, overdue, blacklist, defaulter, ptp
-        month,
-        year,
+        category = 'all', // all, regular, fresh, overdue, blacklist, defaulter, ptp, paid
         item,
         ptp,
         lock_status,
@@ -2241,27 +2224,19 @@ const getOutletInstallmentsDueList = async (req, res) => {
         min_amount,
         max_amount,
         min_balance,
-        max_balance
+        max_balance,
+        start_date,
+        end_date
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
     const q = search.trim().toLowerCase();
 
     try {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-
-        // Determine date range for chosen month & year
-        const defaultYear = today.getFullYear();
-        const defaultMonth = today.getMonth() + 1; // 1-indexed
-
-        const filterMonth = month ? parseInt(month) : defaultMonth;
-        const filterYear = year ? parseInt(year) : defaultYear;
-
-        const start = new Date(filterYear, filterMonth - 1, 1);
-        const end = new Date(filterYear, filterMonth, 0, 23, 59, 59, 999);
 
         // Fetch all delivered orders for the outlet
         const orders = await prisma.order.findMany({
@@ -2276,7 +2251,8 @@ const getOutletInstallmentsDueList = async (req, res) => {
                         grantors: true,
                         documents: {
                             where: { label: { in: ['Purchaser Profile', 'Grantor 1 Profile', 'Grantor 2 Profile', 'Purchaser Face Photo'] } },
-                            orderBy: { uploaded_at: 'desc' }
+                            orderBy: { uploaded_at: 'desc' },
+                            take: 4
                         }
                     },
                 },
@@ -2308,11 +2284,20 @@ const getOutletInstallmentsDueList = async (req, res) => {
                 cash_in_hand: {
                     take: 1,
                     orderBy: { created_at: 'desc' },
+                },
+                recovery_visits: {
+                    where: { promised_date: { not: null } },
+                    orderBy: { created_at: 'desc' },
+                    take: 1
+                },
+                paytrigger_devices: {
+                    take: 1,
+                    orderBy: { created_at: 'desc' }
                 }
             }
         });
 
-        // ── Pre-fetch Inventory details based on IMEI to map product_name ──
+        // Pre-fetch Inventory details based on IMEI to map product_name
         const allImeis = orders
             .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
             .filter(Boolean);
@@ -2329,21 +2314,27 @@ const getOutletInstallmentsDueList = async (req, res) => {
             }
         }
 
-        // Stats aggregations
-        let totalDueThisMonth = 0;
-        let totalPaidThisMonth = 0;
-        let overallSystemRemaining = 0;
-        let overallSystemPaid = 0;
+        // Aggregate summaries per category
+        const categoriesSummary = {
+            all: { amount: 0, customers: 0 },
+            regular: { amount: 0, customers: 0 },
+            fresh: { amount: 0, customers: 0 },
+            overdue: { amount: 0, customers: 0 },
+            blacklist: { amount: 0, customers: 0 },
+            defaulter: { amount: 0, customers: 0 },
+            ptp: { amount: 0, customers: 0 },
+            paid: { amount: 0, customers: 0 }
+        };
 
         const allInstallments = [];
 
         orders.forEach(order => {
             const purchaser = order.verification?.purchaser || null;
             const grantors = order.verification?.grantors || [];
-            const documents = order.verification?.documents || [];
             const delivery = order.delivery;
             const ledgerModel = delivery?.installment_ledger || null;
             const cashRecord = order.cash_in_hand?.[0] || null;
+            const device = order.paytrigger_devices?.[0] || null;
 
             const imeiSerial = cashRecord?.imei_serial || delivery?.product_imei || order.imei_serial || null;
             const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
@@ -2351,11 +2342,6 @@ const getOutletInstallmentsDueList = async (req, res) => {
             const normalized = getNormalizedLedger(ledgerModel?.ledger_rows);
             const { installment_ledger: installmentLedger, summary } = normalized;
 
-            // Increment overall system stats
-            overallSystemRemaining += summary.totalInstallmentRemaining;
-            overallSystemPaid += summary.totalInstallmentPaid;
-
-            // Parse raw ledger rows to extract specific installment-level notes
             let rawLedgerRows = [];
             try {
                 if (ledgerModel?.ledger_rows) {
@@ -2367,16 +2353,6 @@ const getOutletInstallmentsDueList = async (req, res) => {
                 console.error("Error parsing raw ledger rows:", e);
             }
 
-            // Extract Guarantor 1 & Guarantor 2 separately
-            const g1 = grantors.find(g => g.grantor_number === 1) || grantors[0] || null;
-            const g2 = grantors.find(g => g.grantor_number === 2) || (grantors[0] && grantors[1] && grantors[0].id !== grantors[1].id ? grantors[1] : null);
-
-            const g1Name = g1?.name || 'N/A';
-            const g1Phone = g1?.telephone_number || 'N/A';
-            const g2Name = g2?.name || 'N/A';
-            const g2Phone = g2?.telephone_number || 'N/A';
-
-            // Calculate Order-Level Stats for Categorization
             const pendingInstallments = installmentLedger.filter(r => r.status !== 'paid' && r.status !== 'Paid');
             const overdueInstallments = pendingInstallments.filter(r => r.dueDate && new Date(r.dueDate) < today);
             const overdueCount = overdueInstallments.length;
@@ -2389,101 +2365,164 @@ const getOutletInstallmentsDueList = async (req, res) => {
                 }
             });
             const daysSinceLastPayment = lastPaymentDate ? (today - lastPaymentDate) / (1000 * 60 * 60 * 24) : 999;
-            const hasPtp = rawLedgerRows.some(r => r.ptp_date || r.ptpDate || r.ptp);
 
-            // Process each installment in the ledger
-            installmentLedger.forEach(inst => {
-                if (!inst.dueDate) return;
-                const instDate = new Date(inst.dueDate);
+            // PTP Logic from Recovery
+            const latestPtpVisit = order.recovery_visits?.[0];
+            let ptpStatus = null;
+            let hasPtp = false;
+            if (latestPtpVisit && summary.totalInstallmentRemaining > 0) {
+                ptpStatus = latestPtpVisit.promised_date < today ? 'broken' : 'active';
+                hasPtp = true;
+            }
 
-                // Check if this installment falls in the selected month & year
-                if (instDate >= start && instDate <= end) {
-                    totalDueThisMonth += inst.dueAmount;
-                    totalPaidThisMonth += inst.paidAmount;
+            // Determine Account Category
+            let accountCategory = '';
+            if (summary.totalInstallmentRemaining <= 0) {
+                accountCategory = 'paid';
+            } else if (overdueCount >= 3 && daysSinceLastPayment >= 90) {
+                accountCategory = 'defaulter';
+            } else if (overdueCount >= 3) {
+                accountCategory = 'blacklist';
+            } else if (overdueCount === 2) {
+                accountCategory = 'overdue';
+            } else if (overdueCount === 1) {
+                accountCategory = 'regular';
+            } else {
+                accountCategory = 'fresh'; // 0 overdue (due date is today or future)
+            }
 
-                    // Extract alternate number
-                    const altNum = purchaser?.alternate_contact || order.alternate_contact || 'N/A';
-                    const customerArea = order.area || purchaser?.present_address || 'N/A';
+            const isPtp = hasPtp;
 
-                    // Find installment-specific note and payment history details
-                    const matchedRawRow = rawLedgerRows.find(r => r.month === inst.monthNumber);
-                    const installmentNote = matchedRawRow?.note || '';
+            // Find the representative installment for the table row
+            let repInstallment = pendingInstallments[0]; 
+            if (!repInstallment && installmentLedger.length > 0) {
+                repInstallment = installmentLedger[installmentLedger.length - 1];
+            }
+            if (!repInstallment) return; // Ignore if no ledger
 
-                    const paymentHistory = matchedRawRow?.payment_history || (matchedRawRow?.paid_at ? [{
-                        amount: matchedRawRow.paid_amount,
-                        date: matchedRawRow.paid_at,
-                        method: matchedRawRow.payment_method || 'Cash'
-                    }] : []);
+            const instDate = repInstallment.dueDate ? new Date(repInstallment.dueDate) : null;
+            
+            // Advance Filters Check
+            let includeInGlobalList = true;
+            if (start_date && end_date && instDate) {
+                const sDate = new Date(start_date); sDate.setHours(0,0,0,0);
+                const eDate = new Date(end_date); eDate.setHours(23,59,59,999);
+                if (instDate < sDate || instDate > eDate) includeInGlobalList = false;
+            }
 
-                        const allConsumers = ledgerModel?.consumer_numbers || [];
-                        const consumerNum = allConsumers.find(c => c.consumer_number?.startsWith('1017'))?.consumer_number || allConsumers[0]?.consumer_number || null;
-                        const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6002'))?.consumer_number || null;
-                        
-                        allInstallments.push({
-                            // ... (rest of properties are pushed correctly, we just inject the variables here)
-                            order_id: order.id,
-                            order_ref: order.order_ref,
-                            customer_name: purchaser?.name || order.customer_name,
-                            whatsapp_number: order.whatsapp_number,
-                            alternate_number: altNum,
-                            area: customerArea,
-                            dueDate: inst.dueDate,
-                            purchaseDate: order.created_at,
-                            grantor1Name: g1Name,
-                            grantor1Phone: g1Phone,
-                            grantor2Name: g2Name,
-                            grantor2Phone: g2Phone,
-                            product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
-                            imei_serial: imeiSerial || 'N/A',
-                            monthlyAmount: inst.dueAmount,
-                            remainingAmount: summary.totalInstallmentRemaining, // remaining installment amount for order
-                            partialPayment: (inst.paidAmount > 0 && inst.status !== 'paid') ? inst.paidAmount : (inst.status === 'paid' ? inst.dueAmount : null),
-                            paidDate: matchedRawRow?.paid_at || inst.paidAt || null,
-                            paymentHistory: paymentHistory,
-                            payment_history: paymentHistory,
-                            note: installmentNote,
-                            monthNumber: inst.monthNumber,
-                            status: inst.status || 'pending',
-                            dueDateObj: instDate,
-                            consumer_number: consumerNum,
-                            smartpay_consumer_number: smartpayConsumerNum,
-                            consumer_bill_status: allConsumers.find(c => c.consumer_number === consumerNum)?.bill_status || null,
-                            paytrigger_status: ledgerModel?.paytrigger_status || null,
-                            recovery_officer: order.recovery_officer ? {
-                                id: order.recovery_officer.id,
-                                name: order.recovery_officer.full_name,
-                                phone: order.recovery_officer.phone
-                            } : null,
-                            overdueCount,
-                            daysSinceLastPayment,
-                            hasPtp,
-                            orderTotalMonths: installmentLedger.length,
-                            orderPaidMonths: summary.paidInstallments || 0
-                        });
-                }
-            });
+            if (includeInGlobalList) {
+                // Populate Summaries
+                const addSummary = (catKey) => {
+                    if (!categoriesSummary[catKey]) return;
+                    categoriesSummary[catKey].customers++;
+                    categoriesSummary[catKey].amount += summary.totalInstallmentRemaining;
+                };
+
+                addSummary('all');
+                if (accountCategory) addSummary(accountCategory);
+                if (isPtp) addSummary('ptp');
+
+                const g1 = grantors.find(g => g.grantor_number === 1) || grantors[0] || null;
+                const g2 = grantors.find(g => g.grantor_number === 2) || (grantors[0] && grantors[1] && grantors[0].id !== grantors[1].id ? grantors[1] : null);
+
+                const matchedRawRow = rawLedgerRows.find(r => r.month === repInstallment.monthNumber);
+                const paymentHistory = matchedRawRow?.payment_history || (matchedRawRow?.paid_at ? [{
+                    amount: matchedRawRow.paid_amount,
+                    date: matchedRawRow.paid_at,
+                    method: matchedRawRow.payment_method || 'Cash'
+                }] : []);
+
+                const allConsumers = ledgerModel?.consumer_numbers || [];
+                const consumerNum = allConsumers.find(c => c.consumer_number?.startsWith('1017'))?.consumer_number || allConsumers[0]?.consumer_number || null;
+                const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6002'))?.consumer_number || null;
+
+                const deviceStatus = device?.status || ledgerModel?.paytrigger_status || null;
+                allInstallments.push({
+                    order_id: order.id,
+                    order_ref: order.order_ref,
+                    customer_name: purchaser?.name || order.customer_name,
+                    whatsapp_number: order.whatsapp_number,
+                    alternate_number: purchaser?.alternate_contact || order.alternate_contact || 'N/A',
+                    area: order.area || purchaser?.present_address || 'N/A',
+                    dueDate: repInstallment.dueDate,
+                    dueDateObj: instDate,
+                    purchaseDate: order.created_at,
+                    grantor1Name: g1?.name || 'N/A',
+                    grantor1Phone: g1?.telephone_number || 'N/A',
+                    grantor2Name: g2?.name || 'N/A',
+                    grantor2Phone: g2?.telephone_number || 'N/A',
+                    product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
+                    imei_serial: imeiSerial || 'N/A',
+                    monthlyAmount: repInstallment.dueAmount,
+                    remainingAmount: summary.totalInstallmentRemaining, 
+                    partialPayment: (repInstallment.paidAmount > 0 && repInstallment.status !== 'paid') ? repInstallment.paidAmount : (repInstallment.status === 'paid' ? repInstallment.dueAmount : null),
+                    paidDate: matchedRawRow?.paid_at || repInstallment.paidAt || null,
+                    paymentHistory: paymentHistory,
+                    note: matchedRawRow?.note || '',
+                    monthNumber: repInstallment.monthNumber,
+                    status: repInstallment.status || 'pending',
+                    consumer_number: consumerNum,
+                    smartpay_consumer_number: smartpayConsumerNum,
+                    consumer_bill_status: allConsumers.find(c => c.consumer_number === consumerNum)?.bill_status || null,
+                    paytrigger_status: deviceStatus,
+                    recovery_officer: order.recovery_officer ? {
+                        id: order.recovery_officer.id,
+                        name: order.recovery_officer.full_name,
+                        phone: order.recovery_officer.phone
+                    } : null,
+                    overdueCount,
+                    daysSinceLastPayment,
+                    hasPtp: isPtp,
+                    ptpStatus: ptpStatus,
+                    promisedDate: latestPtpVisit?.promised_date || null,
+                    orderTotalMonths: installmentLedger.length,
+                    orderPaidMonths: summary.paidInstallments || 0,
+                    orderPaidTotal: summary.totalInstallmentPaid || 0,
+                    accountCategory: accountCategory,
+                    
+                    // Fields for expandable InstallmentsTable
+                    purchaser: purchaser || null,
+                    grantors: grantors,
+                    installmentLedger: installmentLedger,
+                    ledgerSummaries: {
+                        advanceAmount: normalized.advance_payment ? normalized.advance_payment.amount : 0,
+                        monthlyAmount: repInstallment.dueAmount,
+                        totalMonths: installmentLedger.length,
+                        totalInstallmentDue: summary.totalInstallmentDue,
+                        totalInstallmentPaid: summary.totalInstallmentPaid,
+                        totalRemaining: summary.totalInstallmentRemaining,
+                        paidInstallments: summary.paidInstallments,
+                        totalInstallments: installmentLedger.length
+                    }
+                });
+            }
         });
 
         // Sort by Due Date (ascending)
-        allInstallments.sort((a, b) => a.dueDateObj - b.dueDateObj);
+        allInstallments.sort((a, b) => {
+            if (!a.dueDateObj) return 1;
+            if (!b.dueDateObj) return -1;
+            return a.dueDateObj - b.dueDateObj;
+        });
 
-        // Apply Categories Filter
+        // Apply Primary Category Filter
         let filtered = allInstallments;
 
         if (category === 'regular') {
-            filtered = filtered.filter(inst => inst.overdueCount <= 1);
+            filtered = filtered.filter(inst => inst.accountCategory === 'regular');
         } else if (category === 'fresh') {
-            filtered = filtered.filter(inst => inst.dueDateObj >= today && inst.dueDateObj.getMonth() === (filterMonth - 1));
+            filtered = filtered.filter(inst => inst.accountCategory === 'fresh');
         } else if (category === 'overdue') {
-            filtered = filtered.filter(inst => inst.overdueCount >= 2);
+            filtered = filtered.filter(inst => inst.accountCategory === 'overdue');
         } else if (category === 'blacklist') {
-            filtered = filtered.filter(inst => inst.overdueCount >= 3);
+            filtered = filtered.filter(inst => inst.accountCategory === 'blacklist');
         } else if (category === 'defaulter') {
-            filtered = filtered.filter(inst => inst.overdueCount >= 3 && inst.daysSinceLastPayment >= 90);
+            filtered = filtered.filter(inst => inst.accountCategory === 'defaulter');
         } else if (category === 'ptp') {
             filtered = filtered.filter(inst => inst.hasPtp);
+        } else if (category === 'paid') {
+            filtered = filtered.filter(inst => inst.accountCategory === 'paid');
         }
-        // If 'all', do nothing
 
         // Apply Search Filter
         if (q) {
@@ -2530,52 +2569,47 @@ const getOutletInstallmentsDueList = async (req, res) => {
             filtered = filtered.filter(inst => inst.remainingAmount <= Number(max_balance));
         }
 
-        // Pagination
-        const total = filtered.length;
-        const totalPages = Math.ceil(total / limitNum);
-        const paginated = filtered.slice(skip, skip + limitNum);
-
-        // Calculate dynamic stats for the filtered list
-        const uniqueOrdersInFiltered = new Map();
-        filtered.forEach(inst => {
-            if (!uniqueOrdersInFiltered.has(inst.order_id)) {
-                uniqueOrdersInFiltered.set(inst.order_id, {
-                    monthsDue: inst.orderTotalMonths - inst.orderPaidMonths,
-                    monthsCollected: inst.orderPaidMonths,
-                    remainingAmount: inst.remainingAmount
-                });
-            }
-        });
-
         let monthsDue = 0;
         let monthsCollected = 0;
-        let monthsRemainingAmount = 0;
-        for (let val of uniqueOrdersInFiltered.values()) {
-            monthsDue += val.monthsDue;
-            monthsCollected += val.monthsCollected;
-            monthsRemainingAmount += val.remainingAmount;
-        }
+        let systemCollected = 0;
+        let systemOutstanding = 0;
+
+        filtered.forEach(inst => {
+            systemOutstanding += inst.remainingAmount;
+            systemCollected += inst.orderPaidTotal;
+            monthsDue += inst.monthlyAmount;
+            monthsCollected += (inst.partialPayment || 0);
+        });
+
+        const totalItems = filtered.length;
+        const paginated = filtered.slice(skip, skip + limitNum);
 
         res.json({
             success: true,
             data: {
                 installments: paginated,
-                stats: {
-                    totalDueThisMonth,
-                    totalPaidThisMonth,
-                    remainingThisMonth: Math.max(0, totalDueThisMonth - totalPaidThisMonth),
-                    overallSystemRemaining,
-                    overallSystemPaid,
-                    monthsDue,
-                    monthsCollected,
-                    monthsRemainingAmount,
-                    customerCount: uniqueOrdersInFiltered.size
-                },
                 pagination: {
-                    total,
+                    total: totalItems,
                     page: pageNum,
                     limit: limitNum,
-                    totalPages
+                    totalPages: Math.ceil(totalItems / limitNum)
+                },
+                categories_summary: categoriesSummary,
+                stats: {
+                    // Legacy keys for /outlet/installments
+                    months_due: monthsDue,
+                    months_collected: monthsCollected,
+                    months_remaining: monthsDue - monthsCollected,
+                    system_outstanding: systemOutstanding,
+                    system_collected: systemCollected,
+                    
+                    // New keys for /outlet/installments/view
+                    monthsDue: monthsDue,
+                    monthsCollected: monthsCollected,
+                    monthsRemainingAmount: monthsDue - monthsCollected,
+                    overallSystemRemaining: systemOutstanding,
+                    overallSystemPaid: systemCollected,
+                    customerCount: categoriesSummary.all ? categoriesSummary.all.customers : 0
                 }
             }
         });
@@ -2633,6 +2667,54 @@ const updateInstallmentNote = async (req, res) => {
         res.json({ success: true, message: 'Installment note updated successfully' });
     } catch (error) {
         console.error('updateInstallmentNote error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const sendBulkReminders = async (req, res) => {
+    try {
+        const { order_ids } = req.body;
+        if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0) {
+            return res.status(400).json({ success: false, message: 'No orders provided' });
+        }
+
+        const orders = await prisma.order.findMany({
+            where: { id: { in: order_ids } },
+            include: { delivery: true, customer: true }
+        });
+
+        const today = new Date();
+        today.setHours(0,0,0,0);
+        let sentCount = 0;
+        const { getNormalizedLedger } = require('../utils/ledgerUtils');
+
+        for (const order of orders) {
+            const rawLedger = Array.isArray(order.delivery?.installment_ledger) ? order.delivery.installment_ledger : JSON.parse(order.delivery?.installment_ledger || '[]');
+            const normalized = getNormalizedLedger(rawLedger);
+            const installmentLedger = normalized.installment_ledger;
+            
+            const pendingInstallment = installmentLedger.find(i => i.status === 'pending');
+            if (!pendingInstallment) continue;
+
+            const phone = order.whatsapp_number;
+            const customerName = order.customer?.name || order.customer_name;
+            const dueDate = pendingInstallment.dueDate;
+            const dueAmount = pendingInstallment.remainingAmount || pendingInstallment.dueAmount;
+
+            if (phone && dueDate) {
+                await sendNextInstallmentReminder(phone, {
+                    customer_name: customerName,
+                    amount_due: dueAmount,
+                    due_date: new Date(dueDate).toLocaleDateString('en-PK'),
+                    order_ref: order.order_ref
+                }).catch(err => console.error('Wati bulk reminder error:', err));
+                sentCount++;
+            }
+        }
+
+        res.json({ success: true, message: `Reminders sent to ${sentCount} customers` });
+    } catch (error) {
+        console.error('sendBulkReminders error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -2774,6 +2856,7 @@ module.exports = {
     getOfficerDetails,
     getOutletInstallmentsDueList,
     updateInstallmentNote,
+    sendBulkReminders,
     getPendingCashSubmissions,
     resendCashSubmissionOTP
 };

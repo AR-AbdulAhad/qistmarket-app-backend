@@ -23,7 +23,8 @@ const {
     getOutletInstallmentsDueList,
     updateInstallmentNote,
     getPendingCashSubmissions,
-    resendCashSubmissionOTP
+    resendCashSubmissionOTP,
+    sendBulkReminders
 } = require('../controllers/outletController');
 const {
     getOutletCashLimits,
@@ -60,6 +61,7 @@ router.post('/outlet/resend-return-otp', authenticateJWT, resendReturnOtp);
 router.get('/outlet/installments', authenticateJWT, getOutletInstallments);
 router.get('/outlet/installments/due-list', authenticateJWT, getOutletInstallmentsDueList);
 router.patch('/outlet/installments/:id/note', authenticateJWT, updateInstallmentNote);
+router.post('/outlet/installments/reminders', authenticateJWT, sendBulkReminders);
 
 // Installment Payment flows (Outlet Managers)
 router.post('/outlet/installment/generate-otp', authenticateJWT, generateInstallmentOtp);

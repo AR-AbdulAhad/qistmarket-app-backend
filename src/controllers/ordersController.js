@@ -3001,10 +3001,14 @@ const getReturnedOrders = async (req, res) => {
       where.AND = [
         {
           OR: [
-            { outlet_id: userFromDb?.outlet_id || -1 },
+            { outlet_id: userFromDb?.outlet_id},
             { created_by_user_id: req.user.id }
           ]
         }
+      ];
+    } else if (userRole === 'sales officer') {
+      where.AND = [
+        { created_by_user_id: req.user.id }
       ];
     }
 
