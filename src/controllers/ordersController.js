@@ -920,12 +920,8 @@ const getOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-              let dateField = 'created_at';
-              const statusStr = (filters.status || '').toLowerCase();
-              if (statusStr.includes('delivered') || statusStr.includes('completed') || statusStr.includes('approved') || statusStr.includes('rejected') || statusStr.includes('cancelled') || statusStr.includes('picked') || statusStr.includes('returned')) {
-                 dateField = 'updated_at';
-              }
-              where[dateField] = range;
+
+              where['updated_at'] = range;
             }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
@@ -1049,12 +1045,8 @@ const getOrdersWithPagination = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-              let dateField = 'created_at';
-              const statusStr = (filters.status || '').toLowerCase();
-              if (statusStr.includes('delivered') || statusStr.includes('completed') || statusStr.includes('approved') || statusStr.includes('rejected') || statusStr.includes('cancelled') || statusStr.includes('picked') || statusStr.includes('returned')) {
-                 dateField = 'updated_at';
-              }
-              baseWhere[dateField] = range;
+
+              baseWhere['updated_at'] = range;
             }
         } else if (key !== 'startDate' && key !== 'endDate') {
           baseWhere[key] = { contains: value };
@@ -2380,12 +2372,8 @@ const getVerificationOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-              let dateField = 'created_at';
-              const statusStr = (filters.status || '').toLowerCase();
-              if (statusStr.includes('delivered') || statusStr.includes('completed') || statusStr.includes('approved') || statusStr.includes('rejected') || statusStr.includes('cancelled') || statusStr.includes('picked') || statusStr.includes('returned')) {
-                 dateField = 'updated_at';
-              }
-              where[dateField] = range;
+
+              where['updated_at'] = range;
             }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
@@ -2481,12 +2469,8 @@ const getApprovedOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-              let dateField = 'created_at';
-              const statusStr = (filters.status || '').toLowerCase();
-              if (statusStr.includes('delivered') || statusStr.includes('completed') || statusStr.includes('approved') || statusStr.includes('rejected') || statusStr.includes('cancelled') || statusStr.includes('picked') || statusStr.includes('returned')) {
-                 dateField = 'updated_at';
-              }
-              where[dateField] = range;
+
+              where['updated_at'] = range;
             }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
@@ -2958,12 +2942,8 @@ const getDeliveredOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-              let dateField = 'created_at';
-              const statusStr = (filters.status || '').toLowerCase();
-              if (statusStr.includes('delivered') || statusStr.includes('completed') || statusStr.includes('approved') || statusStr.includes('rejected') || statusStr.includes('cancelled') || statusStr.includes('picked') || statusStr.includes('returned')) {
-                 dateField = 'updated_at';
-              }
-              where[dateField] = range;
+
+              where['updated_at'] = range;
             }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
@@ -3065,12 +3045,8 @@ const getReturnedOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-              let dateField = 'created_at';
-              const statusStr = (filters.status || '').toLowerCase();
-              if (statusStr.includes('delivered') || statusStr.includes('completed') || statusStr.includes('approved') || statusStr.includes('rejected') || statusStr.includes('cancelled') || statusStr.includes('picked') || statusStr.includes('returned')) {
-                 dateField = 'updated_at';
-              }
-              where[dateField] = range;
+
+              where['updated_at'] = range;
             }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
@@ -3861,3 +3837,5 @@ module.exports = {
   createConvertedSale,
   updateOrderStatus,
 };
+
+
