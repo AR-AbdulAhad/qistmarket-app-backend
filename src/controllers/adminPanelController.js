@@ -166,7 +166,7 @@ const getUnifiedRankings = async (req, res) => {
                     select: { status: true },
                 });
                 row.total_verifications = orders.length;
-                row.approved_verifications = orders.filter((o) => o.status === 'delivered').length;
+                row.approved_verifications = orders.filter((o) => o.status === 'completed').length;
                 row.rejected_verifications = orders.filter((o) => o.status === 'rejected').length;
                 row.score = row.approved_verifications * 10;
                 row.tier = tierFor(row.score);
