@@ -2918,6 +2918,10 @@ const getDeliveredOrders = async (req, res) => {
           ]
         }
       ];
+    } else if (userRole === 'sales officer') {
+      where.AND = [
+        { created_by_user_id: req.user.id }
+      ];
     }
 
     if (search.trim()) {
