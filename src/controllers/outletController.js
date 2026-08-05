@@ -941,7 +941,7 @@ const verifyReturnExchangeOtp = async (req, res) => {
  */
 const initiateDirectReturn = async (req, res) => {
     const outlet_id = req.user.outlet_id;
-    const { order_id, is_cash_refund, refund_amount, customer_phone, blacklist_customer } = req.body;
+    const { order_id, is_cash_refund, refund_amount, customer_phone, blacklist_customer, keep_enrolled = true } = req.body;
 
     if (!order_id) {
         return res.status(400).json({ success: false, error: 'order_id is required.' });
@@ -1140,13 +1140,24 @@ const initiateDirectReturn = async (req, res) => {
                 });
             }
             
-            // Paytrigger unenroll
+            // Paytrigger enrollment handling
             if (pt.isEligible(productName, inventory?.category || 'mobile')) {
                 try {
-                    await pt.unenroll(returnRecord.imei_returned);
-                    console.log(`Paytrigger unenrolled for IMEI ${returnRecord.imei_returned}`);
+                    if (keep_enrolled) {
+                        await pt.removeLock({ imei: returnRecord.imei_returned });
+                        console.log(`Paytrigger expiration/lock removed for IMEI ${returnRecord.imei_returned} (kept enrolled)`);
+                        const io = req.app.get('io');
+                        if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'success', title: 'PayTrigger', message: 'Device kept enrolled, lock removed.' });
+                    } else {
+                        await pt.unenroll(returnRecord.imei_returned);
+                        console.log(`Paytrigger unenrolled for IMEI ${returnRecord.imei_returned}`);
+                        const io = req.app.get('io');
+                        if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'success', title: 'PayTrigger', message: 'Device unenrolled successfully.' });
+                    }
                 } catch(e) {
-                    console.error('Paytrigger unenroll failed', e);
+                    console.error('Paytrigger action failed', e);
+                    const io = req.app.get('io');
+                    if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Action failed: ${e.message}` });
                 }
             }
         }
@@ -1306,7 +1317,8 @@ const searchDeliveredOrders = async (req, res) => {
                 cash_in_hand: {
                     take: 1,
                     orderBy: { created_at: 'desc' }
-                }
+                },
+                paytrigger_devices: true
             },
             orderBy: { created_at: 'desc' },
             take: 20
@@ -1349,7 +1361,8 @@ const searchDeliveredOrders = async (req, res) => {
                 delivered_color: deliveredColor,
                 delivered_variant: deliveredVariant,
                 delivered_imei: deliveredImei,
-                delivered_advance: deliveredAdvance
+                delivered_advance: deliveredAdvance,
+                is_enrolled: order.paytrigger_devices && order.paytrigger_devices.length > 0
             };
         });
 

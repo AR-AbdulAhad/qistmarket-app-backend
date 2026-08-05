@@ -693,6 +693,9 @@ const submitDelivery = async (req, res) => {
               last_sync_at: new Date(),
               raw_state: result,
             },
+          }).then(() => {
+            const io = req.app.get('io');
+            if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'success', title: 'PayTrigger', message: 'Device successfully enrolled.' });
           }).catch(e => console.error('[PayTrigger] create/update device failed:', e.message));
         } else {
           console.warn('[PayTrigger] pre-enroll returned non-200:', {
@@ -700,8 +703,14 @@ const submitDelivery = async (req, res) => {
             message: result?.message,
             result,
           });
+          const io = req.app.get('io');
+          if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${result?.message}` });
         }
-      }).catch(e => console.error('[PayTrigger] pre-enroll failed:', e.message));
+      }).catch(e => {
+        console.error('[PayTrigger] pre-enroll failed:', e.message);
+        const io = req.app.get('io');
+        if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${e.message}` });
+      });
     } else {
       console.warn('[PayTrigger] block skipped because condition failed:', {
         enabled: pt.ENABLED(),
@@ -2481,6 +2490,9 @@ const submitSelfPickupDelivery = async (req, res) => {
               last_sync_at: new Date(),
               raw_state: result,
             },
+          }).then(() => {
+            const io = req.app.get('io');
+            if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'success', title: 'PayTrigger', message: 'Device successfully enrolled.' });
           }).catch(e => console.error('[PayTrigger] create/update device failed:', e.message));
         } else {
           console.warn('[PayTrigger] pre-enroll returned non-200:', {
@@ -2488,8 +2500,14 @@ const submitSelfPickupDelivery = async (req, res) => {
             message: result?.message,
             result,
           });
+          const io = req.app.get('io');
+          if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${result?.message}` });
         }
-      }).catch(e => console.error('[PayTrigger] pre-enroll failed:', e.message));
+      }).catch(e => {
+        console.error('[PayTrigger] pre-enroll failed:', e.message);
+        const io = req.app.get('io');
+        if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${e.message}` });
+      });
     } else {
       console.warn('[PayTrigger] block skipped because condition failed:', {
         enabled: pt.ENABLED(),
