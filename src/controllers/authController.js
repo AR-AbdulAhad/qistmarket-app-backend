@@ -4,6 +4,7 @@ const { jwtSecret } = require('../config/jwtConfig');
 const sendEmail = require('../utils/sendEmail');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOTP } = require('../services/watiService');
+const jazzSmsService = require('../services/jazzSmsService');
 const { getOTPEmailTemplate } = require('../utils/emailTemplates');
 const { logAction, logLoginAction } = require('../utils/auditLogger');
 
@@ -14,7 +15,7 @@ const { notifyAdmins } = require('../utils/notificationUtils');
 const now = () => new Date();
 
 const sendLoginOTP = async (req, res) => {
-  const { identifier } = req.body;  // identifier can be phone or email
+  const { identifier, channel } = req.body;  // identifier can be phone or email; channel: optional, 'jazz' forces Jazz-only SMS
 
   // Validate identifier
   if (!identifier) {
@@ -86,8 +87,26 @@ const sendLoginOTP = async (req, res) => {
 
     // Send OTP based on identifier type
     if (isPhone) {
-      // Send OTP via WhatsApp
-      await sendOTP(identifier, otp);
+      if (channel === 'jazz') {
+        // Explicit "Send OTP via Jazz" button — Jazz only, WATI not called.
+        const jazzResult = await jazzSmsService.sendOTPSms(identifier, otp);
+        if (!jazzResult.success) {
+          return res.status(502).json({
+            success: false,
+            error: { code: 502, message: jazzResult.error || jazzResult.raw || 'Jazz SMS failed to send.' }
+          });
+        }
+      } else {
+        // Send OTP via WhatsApp (existing, unchanged)
+        await sendOTP(identifier, otp);
+        // Also send via Jazz CMT SMS — additive, never blocks/breaks the
+        // WhatsApp send above if it fails or isn't configured.
+        try {
+          await jazzSmsService.sendOTPSms(identifier, otp);
+        } catch (jazzError) {
+          console.error('[JazzSMS] sendLoginOTP error (non-blocking):', jazzError.message);
+        }
+      }
     } else {
       // Send OTP via Email
       await sendEmail({
@@ -154,6 +173,11 @@ const sendWebLoginOTP = async (req, res) => {
 
     if (isPhone) {
       await sendOTP(identifier, otp);
+      try {
+        await jazzSmsService.sendOTPSms(identifier, otp);
+      } catch (jazzError) {
+        console.error('[JazzSMS] sendWebLoginOTP error (non-blocking):', jazzError.message);
+      }
     } else {
       await sendEmail({
         to: identifier,
