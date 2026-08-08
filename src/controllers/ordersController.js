@@ -4,7 +4,8 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { logAction } = require('../utils/auditLogger');
-const { sendOTP, sendTemplate, sendOrderStatusNotification } = require('../services/watiService');
+const { sendTemplate, sendOrderStatusNotification } = require('../services/watiService');
+const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth } = require('../services/rankingService');
 

@@ -1,6 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
-const { sendOTP } = require('../services/watiService');
+const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { logAction } = require('../utils/auditLogger');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const axios = require('axios');

@@ -10,7 +10,7 @@ const {
   generateQrDataUrl,
   ensureUniqueUsername,
 } = require('../utils/employeeUtils');
-const { sendOTP } = require('../services/watiService');
+const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { logLoginAction } = require('../utils/auditLogger');
 
 const now = () => new Date();

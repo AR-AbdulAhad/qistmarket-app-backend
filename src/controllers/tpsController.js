@@ -327,7 +327,37 @@ const billPayment = async (req, res) => {
                     submission_ref: consumer.cash_submission_ref
                 });
             }
-            
+
+            // Outlet bank-deposit via 1Bill — see bankAccountController.submitBankDeposit.
+            // consumer.cash_submission_ref holds 'BDR-<id>' for these, never matched by
+            // the CashSubmissionHistory/OfficerTransaction updates above (0 rows, no-op).
+            if (consumer.cash_submission_ref?.startsWith('BDR-')) {
+                const bdrId = parseInt(consumer.cash_submission_ref.replace('BDR-', ''), 10);
+                if (!isNaN(bdrId)) {
+                    try {
+                        const bdr = await prisma.bankDepositRequest.update({
+                            where: { id: bdrId },
+                            data: {
+                                status: 'verified',
+                                description: `Auto-verified via 1Bill (1LINK TPS - ${bank_mnemonic || ''}), tran_auth_id: ${tran_auth_id}`
+                            }
+                        });
+                        if (io) {
+                            if (bdr.outlet_id) io.to(`outlet_${bdr.outlet_id}`).emit('bank_deposit_updated', { id: bdr.id, status: 'verified' });
+                            if (bdr.accountant_id) io.to(`user_${bdr.accountant_id}`).emit('bank_deposit_updated', { id: bdr.id, status: 'verified' });
+                        }
+                        notifyAdmins('Bank Deposit Verified', `PKR ${parsedAmountFinal} confirmed via 1Bill (Deposit #${bdr.id}).`, 'bank_deposit', bdr.id, io)
+                            .catch(err => console.error('notifyAdmins error:', err));
+                        if (bdr.outlet_id) {
+                            notifyOutlet(bdr.outlet_id, 'Bank Deposit Verified', `PKR ${parsedAmountFinal} confirmed via 1Bill.`, 'bank_deposit', bdr.id, io)
+                                .catch(err => console.error('notifyOutlet error:', err));
+                        }
+                    } catch (bdrErr) {
+                        console.error('[TPS BillPayment] BankDepositRequest update error:', bdrErr);
+                    }
+                }
+            }
+
             await prisma.tpsPaymentLog.update({ where: { id: logEntry.id }, data: { response_code_sent: "00" } });
             return res.status(200).json({ response_Code: "00", Identification_parameter: "SUCCESS" });
         }

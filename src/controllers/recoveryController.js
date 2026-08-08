@@ -2,7 +2,6 @@ const prisma = require('../../lib/prisma');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const {
-  sendOTP,
   sendInstallmentPaymentReceipt,
   sendPartialInstallmentPaymentReceipt,
   sendNextInstallmentReminder,
@@ -11,6 +10,7 @@ const {
   getCompanyNotifyPhones,
   sendInstallmentLedger
 } = require('../services/watiService');
+const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');

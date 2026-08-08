@@ -24,94 +24,95 @@ model Otp {
 }
 
 model User {
-  id                             Int                       @id @default(autoincrement())
-  full_name                      String
-  role_id                        Int
-  username                       String                    @unique
-  password_hash                  String?
-  email                          String?                   @unique
-  cnic                           String?
-  phone                          String?
-  device_id                      String?
-  session_token                  String?                   @db.VarChar(64)
-  status                         String                    @default("active")
-  created_at                     DateTime                  @default(now())
-  updated_at                     DateTime                  @updatedAt
-  bio                            String?                   @db.Text
-  image                          String?                   @db.VarChar(255)
-  coverImage                     String?                   @db.VarChar(255)
-  permissions_json               Json?
-  fcm_token                      String?                   @db.VarChar(255)
-  reset_token_expires            DateTime?
-  reset_token_hash               String?
-  totp_secret                    String?
-  is_2fa_enabled                 Boolean                   @default(false)
-  bike_km_range                  Int?
-  is_online                      Boolean                   @default(false)
-  last_known_latitude            Float?
-  last_known_longitude           Float?
-  bill_consumer_number           String?                   @unique
-  smart_pay_consumer_number      String?                   @unique
-  last_online_at                 DateTime?
-  working_hours_end              String?                   @db.VarChar(30)
-  working_hours_start            String?                   @db.VarChar(30)
-  outlet_id                      Int?
-  officer_profile_history        Json?
-  current_active_verification_id Int?                      @unique
-  badges                         Badge[]
-  employee_profile               Employee?
-  deletion_requests              AccountDeletionRequest[]  @relation("DeletionRequestUser")
-  deletion_reviews               AccountDeletionRequest[]  @relation("DeletionRequestReviewer")
-  deliveries                     Delivery[]                @relation("delivery_agent")
-  archived_deliveries            ArchivedDelivery[]        @relation("ArchivedDeliveryAgent")
-  officerAssignments             OfficerAreaAssignment[]   @relation("OfficerAssignments")
-  officerSessions                OfficerSession[]
-  assigned_orders                Order[]                   @relation("assignedOrders")
-  created_orders                 Order[]
-  delivery_orders                Order[]                   @relation("deliveryOrders")
-  recovery_orders                Order[]                   @relation("recoveryOrders")
-  product_change_histories       OrderProductHistory[]     @relation("ProductChangeHistory")
-  current_active_verification    Verification?             @relation("active_verification", fields: [current_active_verification_id], references: [id])
-  outlet                         Outlet?                   @relation(fields: [outlet_id], references: [id])
-  role                           Role                      @relation(fields: [role_id], references: [id])
-  verifications                  Verification[]            @relation("verification_officer")
-  verification_reviews           VerificationReview[]      @relation("verification_reviewer")
-  cash_in_hand                   CashInHand[]              @relation("OfficerCashInHand")
-  assigned_complaints            Complaint[]               @relation("assignedComplaints")
-  created_complaints             Complaint[]               @relation("createdComplaints")
-  notifications                  Notification[]
-  otp_logs                       OtpLog[]
-  recovery_visits                RecoveryVisit[]           @relation("OfficerRecoveryVisit")
-  return_exchanges               ReturnExchange[]          @relation("OfficerReturnExchange")
-  security_logs                  SecurityLog[]
-  verification_edit_history      VerificationEditHistory[] @relation("user_edits")
-  vendor_purchase_edits          VendorPurchaseEditHistory[] @relation("vendor_purchase_edits")
-  collected_payments             OrderPayment[]            @relation("PaymentCollector")
-  status_changes                 OrderStatusHistory[]      @relation("UserOrderStatusChanges")
-  csr_rankings                   CsrRanking[]
-  verification_rankings          VerificationRanking[]
-  delivery_rankings              DeliveryRanking[]
-  recovery_rankings              RecoveryRanking[]
-  officer_transactions           OfficerTransaction[]      @relation("OfficerTransactions")
-  consumer_numbers               ConsumerNumber[]          @relation("UserConsumerNumbers")
-  device_login_requests          DeviceLoginRequest[]
-  bank_accounts_created          BankAccount[]             @relation("BankAccountCreator")
-  bank_transactions_created      BankTransaction[]         @relation("BankTransactionCreator")
-  blacklist_actions_created      BlacklistAction[]         @relation("BlacklistActionCreator")
-  monthly_targets_created        MonthlyTarget[]           @relation("MonthlyTargetCreator")
-  cash_limits_created            CashLimit[]               @relation("CashLimitCreator")
-  bank_statements_uploaded       BankStatement[]           @relation("BankStatementUploader")
-  vendor_cash_transactions_created VendorCashTransaction[] @relation("VendorCashTransactionCreator")
-  scheduled_payments_created     ScheduledPayment[]        @relation("ScheduledPaymentCreator")
-  scheduled_reports_created      ScheduledReportConfig[]   @relation("ScheduledReportCreator")
-  expense_vouchers_approved      ExpenseVoucher[]          @relation("ExpenseApprover")
-  deposit_requests_submitted     BankDepositRequest[]      @relation("DepositSubmitter")
-  deposit_requests_verified      BankDepositRequest[]      @relation("DepositVerifier")
-  location_history               UserLocationHistory[]     @relation("UserLocationHistory")
-  officer_targets                OfficerTarget[]           @relation("OfficerTargets")
-  officer_targets_created        OfficerTarget[]           @relation("OfficerTargetCreator")
-  cash_transfers_submitted       CashTransferRequest[]     @relation("TransferSubmitter")
-  cash_transfers_handled         CashTransferRequest[]     @relation("TransferHandler")
+  id                               Int                         @id @default(autoincrement())
+  full_name                        String
+  role_id                          Int
+  username                         String                      @unique
+  password_hash                    String?
+  email                            String?                     @unique
+  cnic                             String?
+  phone                            String?
+  device_id                        String?
+  session_token                    String?                     @db.VarChar(64)
+  status                           String                      @default("active")
+  created_at                       DateTime                    @default(now())
+  updated_at                       DateTime                    @updatedAt
+  bio                              String?                     @db.Text
+  image                            String?                     @db.VarChar(255)
+  coverImage                       String?                     @db.VarChar(255)
+  permissions_json                 Json?
+  fcm_token                        String?                     @db.VarChar(255)
+  reset_token_expires              DateTime?
+  reset_token_hash                 String?
+  totp_secret                      String?
+  is_2fa_enabled                   Boolean                     @default(false)
+  bike_km_range                    Int?
+  is_online                        Boolean                     @default(false)
+  last_known_latitude              Float?
+  last_known_longitude             Float?
+  bill_consumer_number             String?                     @unique
+  smart_pay_consumer_number        String?                     @unique
+  last_online_at                   DateTime?
+  working_hours_end                String?                     @db.VarChar(30)
+  working_hours_start              String?                     @db.VarChar(30)
+  outlet_id                        Int?
+  officer_profile_history          Json?
+  current_active_verification_id   Int?                        @unique
+  badges                           Badge[]
+  employee_profile                 Employee?
+  deletion_requests                AccountDeletionRequest[]    @relation("DeletionRequestUser")
+  deletion_reviews                 AccountDeletionRequest[]    @relation("DeletionRequestReviewer")
+  deliveries                       Delivery[]                  @relation("delivery_agent")
+  archived_deliveries              ArchivedDelivery[]          @relation("ArchivedDeliveryAgent")
+  officerAssignments               OfficerAreaAssignment[]     @relation("OfficerAssignments")
+  officerSessions                  OfficerSession[]
+  assigned_orders                  Order[]                     @relation("assignedOrders")
+  created_orders                   Order[]
+  delivery_orders                  Order[]                     @relation("deliveryOrders")
+  recovery_orders                  Order[]                     @relation("recoveryOrders")
+  product_change_histories         OrderProductHistory[]       @relation("ProductChangeHistory")
+  current_active_verification      Verification?               @relation("active_verification", fields: [current_active_verification_id], references: [id])
+  outlet                           Outlet?                     @relation(fields: [outlet_id], references: [id])
+  role                             Role                        @relation(fields: [role_id], references: [id])
+  verifications                    Verification[]              @relation("verification_officer")
+  verification_reviews             VerificationReview[]        @relation("verification_reviewer")
+  cash_in_hand                     CashInHand[]                @relation("OfficerCashInHand")
+  assigned_complaints              Complaint[]                 @relation("assignedComplaints")
+  created_complaints               Complaint[]                 @relation("createdComplaints")
+  notifications                    Notification[]
+  otp_logs                         OtpLog[]
+  recovery_visits                  RecoveryVisit[]             @relation("OfficerRecoveryVisit")
+  return_exchanges                 ReturnExchange[]            @relation("OfficerReturnExchange")
+  security_logs                    SecurityLog[]
+  verification_edit_history        VerificationEditHistory[]   @relation("user_edits")
+  vendor_purchase_edits            VendorPurchaseEditHistory[] @relation("vendor_purchase_edits")
+  collected_payments               OrderPayment[]              @relation("PaymentCollector")
+  status_changes                   OrderStatusHistory[]        @relation("UserOrderStatusChanges")
+  csr_rankings                     CsrRanking[]
+  verification_rankings            VerificationRanking[]
+  delivery_rankings                DeliveryRanking[]
+  recovery_rankings                RecoveryRanking[]
+  officer_transactions             OfficerTransaction[]        @relation("OfficerTransactions")
+  consumer_numbers                 ConsumerNumber[]            @relation("UserConsumerNumbers")
+  device_login_requests            DeviceLoginRequest[]
+  bank_accounts_created            BankAccount[]               @relation("BankAccountCreator")
+  bank_transactions_created        BankTransaction[]           @relation("BankTransactionCreator")
+  blacklist_actions_created        BlacklistAction[]           @relation("BlacklistActionCreator")
+  monthly_targets_created          MonthlyTarget[]             @relation("MonthlyTargetCreator")
+  cash_limits_created              CashLimit[]                 @relation("CashLimitCreator")
+  bank_statements_uploaded         BankStatement[]             @relation("BankStatementUploader")
+  vendor_cash_transactions_created VendorCashTransaction[]     @relation("VendorCashTransactionCreator")
+  scheduled_payments_created       ScheduledPayment[]          @relation("ScheduledPaymentCreator")
+  scheduled_reports_created        ScheduledReportConfig[]     @relation("ScheduledReportCreator")
+  expense_vouchers_approved        ExpenseVoucher[]            @relation("ExpenseApprover")
+  deposit_requests_submitted       BankDepositRequest[]        @relation("DepositSubmitter")
+  deposit_requests_verified        BankDepositRequest[]        @relation("DepositVerifier")
+  deposit_requests_as_accountant   BankDepositRequest[]        @relation("DepositAccountant")
+  location_history                 UserLocationHistory[]       @relation("UserLocationHistory")
+  officer_targets                  OfficerTarget[]             @relation("OfficerTargets")
+  officer_targets_created          OfficerTarget[]             @relation("OfficerTargetCreator")
+  cash_transfers_submitted         CashTransferRequest[]       @relation("TransferSubmitter")
+  cash_transfers_handled           CashTransferRequest[]       @relation("TransferHandler")
 
   @@index([role_id])
   @@index([is_online])
@@ -124,14 +125,14 @@ model User {
 // has an active device and logs in from a different one; resolved by the
 // existing device approving/denying, or auto-approved after a timeout.
 model DeviceLoginRequest {
-  id             Int       @id @default(autoincrement())
-  user_id        Int
-  new_device_id  String
-  new_fcm_token  String?   @db.VarChar(255)
-  status         String    @default("pending") // pending | approved | denied | completed
-  created_at     DateTime  @default(now())
-  resolved_at    DateTime?
-  user           User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  id            Int       @id @default(autoincrement())
+  user_id       Int
+  new_device_id String
+  new_fcm_token String?   @db.VarChar(255)
+  status        String    @default("pending") // pending | approved | denied | completed
+  created_at    DateTime  @default(now())
+  resolved_at   DateTime?
+  user          User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id])
   @@index([status])
@@ -139,7 +140,7 @@ model DeviceLoginRequest {
 }
 
 model Role {
-  id               Int     @id @default(autoincrement())
+  id               Int    @id @default(autoincrement())
   name             String
   permissions_json Json?
   users            User[]
@@ -228,8 +229,8 @@ model OrderStatusHistory {
   remarks    String?  @db.Text
   created_at DateTime @default(now())
 
-  order      Order    @relation("OrderStatusHistoryLogs", fields: [order_id], references: [id], onDelete: Cascade)
-  user       User?    @relation("UserOrderStatusChanges", fields: [user_id], references: [id])
+  order Order @relation("OrderStatusHistoryLogs", fields: [order_id], references: [id], onDelete: Cascade)
+  user  User? @relation("UserOrderStatusChanges", fields: [user_id], references: [id])
 
   @@index([order_id])
   @@index([user_id])
@@ -237,21 +238,21 @@ model OrderStatusHistory {
 }
 
 model DummyCustomer {
-  id                 Int      @id @default(autoincrement())
-  order_id           Int      @unique
-  customer_name      String?
-  whatsapp_number    String?
-  address            String?
-  city               String?
-  area               String?
-  block              String?
-  house_no           String?
-  street             String?
-  zone               String?
-  alternate_contact  String?
-  moved_at           DateTime @default(now())
+  id                Int      @id @default(autoincrement())
+  order_id          Int      @unique
+  customer_name     String?
+  whatsapp_number   String?
+  address           String?
+  city              String?
+  area              String?
+  block             String?
+  house_no          String?
+  street            String?
+  zone              String?
+  alternate_contact String?
+  moved_at          DateTime @default(now())
 
-  order              Order    @relation("OrderDummyCustomer", fields: [order_id], references: [id], onDelete: Cascade)
+  order Order @relation("OrderDummyCustomer", fields: [order_id], references: [id], onDelete: Cascade)
 
   @@index([order_id])
   @@map("dummy_customers")
@@ -282,79 +283,79 @@ model Complaint {
 }
 
 model Outlet {
-  id               Int               @id @default(autoincrement())
-  code             String            @unique
-  name             String
-  address          String?
-  status           String            @default("active")
-  type             String            @default("outlet") // "outlet" | "warehouse"
-  created_at       DateTime          @default(now())
-  updated_at       DateTime          @updatedAt
-  orders           Order[]
-  users            User[]
-  cash_in_hand     CashInHand[]      @relation("OutletCashInHand")
-  cashRegisters    CashRegister[]
-  expenseVouchers  ExpenseVoucher[]
-  inventories      OutletInventory[]
-  return_exchanges ReturnExchange[]  @relation("OutletReturnExchange")
-  security_logs    SecurityLog[]
-  vendorPayments   VendorPayment[]
-  vendorPurchases  VendorPurchase[]
-  vendorPurchaseReturns VendorPurchaseReturn[]
-  vendors          Vendor[]
+  id                     Int                    @id @default(autoincrement())
+  code                   String                 @unique
+  name                   String
+  address                String?
+  status                 String                 @default("active")
+  type                   String                 @default("outlet") // "outlet" | "warehouse"
+  created_at             DateTime               @default(now())
+  updated_at             DateTime               @updatedAt
+  orders                 Order[]
+  users                  User[]
+  cash_in_hand           CashInHand[]           @relation("OutletCashInHand")
+  cashRegisters          CashRegister[]
+  expenseVouchers        ExpenseVoucher[]
+  inventories            OutletInventory[]
+  return_exchanges       ReturnExchange[]       @relation("OutletReturnExchange")
+  security_logs          SecurityLog[]
+  vendorPayments         VendorPayment[]
+  vendorPurchases        VendorPurchase[]
+  vendorPurchaseReturns  VendorPurchaseReturn[]
+  vendors                Vendor[]
   auto_assignment_config Json?
-  employees        Employee[]
-  bank_accounts    BankAccount[]
-  deposit_requests BankDepositRequest[] @relation("DepositOutlet")
-  transfers_sent   CashTransferRequest[] @relation("SenderOutlet")
-  transfers_received CashTransferRequest[] @relation("ReceiverOutlet")
+  employees              Employee[]
+  bank_accounts          BankAccount[]
+  deposit_requests       BankDepositRequest[]   @relation("DepositOutlet")
+  transfers_sent         CashTransferRequest[]  @relation("SenderOutlet")
+  transfers_received     CashTransferRequest[]  @relation("ReceiverOutlet")
 
   @@map("outlets")
 }
 
 model BankAccount {
-  id               Int               @id @default(autoincrement())
+  id               Int                  @id @default(autoincrement())
   bank_name        String
   account_title    String
-  account_number   String            @unique
+  account_number   String               @unique
   iban             String?
   branch_code      String?
   outlet_id        Int?
-  outlet           Outlet?           @relation(fields: [outlet_id], references: [id])
-  opening_balance  Float             @default(0)
-  current_balance  Float             @default(0)
-  is_active        Boolean           @default(true)
+  outlet           Outlet?              @relation(fields: [outlet_id], references: [id])
+  opening_balance  Float                @default(0)
+  current_balance  Float                @default(0)
+  is_active        Boolean              @default(true)
   notes            String?
   created_by_id    Int?
-  created_by       User?             @relation("BankAccountCreator", fields: [created_by_id], references: [id])
+  created_by       User?                @relation("BankAccountCreator", fields: [created_by_id], references: [id])
   transactions     BankTransaction[]
   statements       BankStatement[]
   deposit_requests BankDepositRequest[] @relation("DepositBankAccount")
-  created_at       DateTime          @default(now())
-  updated_at       DateTime          @updatedAt
+  created_at       DateTime             @default(now())
+  updated_at       DateTime             @updatedAt
 
   @@index([outlet_id])
   @@map("bank_accounts")
 }
 
 model BankTransaction {
-  id               Int            @id @default(autoincrement())
+  id               Int                  @id @default(autoincrement())
   bank_account_id  Int
-  bank_account     BankAccount    @relation(fields: [bank_account_id], references: [id])
-  type             String         // "credit" | "debit"
+  bank_account     BankAccount          @relation(fields: [bank_account_id], references: [id])
+  type             String // "credit" | "debit"
   amount           Float
   balance_after    Float
   description      String?
   reference        String?
-  transaction_date DateTime       @default(now())
-  reconciled       Boolean        @default(false)
+  transaction_date DateTime             @default(now())
+  reconciled       Boolean              @default(false)
   statement_id     Int?
-  statement        BankStatement? @relation(fields: [statement_id], references: [id])
-  transfer_group   String?        // shared ref linking the paired debit+credit of an inter-bank transfer
+  statement        BankStatement?       @relation(fields: [statement_id], references: [id])
+  transfer_group   String? // shared ref linking the paired debit+credit of an inter-bank transfer
   created_by_id    Int?
-  created_by       User?          @relation("BankTransactionCreator", fields: [created_by_id], references: [id])
+  created_by       User?                @relation("BankTransactionCreator", fields: [created_by_id], references: [id])
   deposit_requests BankDepositRequest[]
-  created_at       DateTime       @default(now())
+  created_at       DateTime             @default(now())
 
   @@index([bank_account_id])
   @@index([statement_id])
@@ -393,31 +394,31 @@ model MonthlyTarget {
 model OfficerTarget {
   id               Int      @id @default(autoincrement())
   officer_id       Int
-  month            String   // format "YYYY-MM"
+  month            String // format "YYYY-MM"
   target_amount    Float
   target_customers Int
   created_at       DateTime @default(now())
   created_by_id    Int?
 
-  officer       User     @relation("OfficerTargets", fields: [officer_id], references: [id], onDelete: Cascade)
-  created_by    User?    @relation("OfficerTargetCreator", fields: [created_by_id], references: [id])
+  officer    User  @relation("OfficerTargets", fields: [officer_id], references: [id], onDelete: Cascade)
+  created_by User? @relation("OfficerTargetCreator", fields: [created_by_id], references: [id])
 
   @@unique([officer_id, month])
   @@map("officer_targets")
 }
 
 model BlacklistAction {
-  id            Int      @id @default(autoincrement())
-  cnic          String
-  action        String   // "blacklist" | "whitelist"
-  category      String?  // "fraud" | "non_payment" | "other" — structured tagging
-  reason        String?
-  status        String   @default("approved") // blacklist = immediate "approved"; whitelist starts "pending" until approved
+  id             Int       @id @default(autoincrement())
+  cnic           String
+  action         String // "blacklist" | "whitelist"
+  category       String? // "fraud" | "non_payment" | "other" — structured tagging
+  reason         String?
+  status         String    @default("approved") // blacklist = immediate "approved"; whitelist starts "pending" until approved
   approved_by_id Int?
-  approved_at   DateTime?
-  created_by_id Int?
-  created_by    User?    @relation("BlacklistActionCreator", fields: [created_by_id], references: [id])
-  created_at    DateTime @default(now())
+  approved_at    DateTime?
+  created_by_id  Int?
+  created_by     User?     @relation("BlacklistActionCreator", fields: [created_by_id], references: [id])
+  created_at     DateTime  @default(now())
 
   @@index([cnic])
   @@index([status])
@@ -426,8 +427,8 @@ model BlacklistAction {
 
 model CashLimit {
   id            Int      @id @default(autoincrement())
-  scope_type    String   // "outlet" | "officer"
-  scope_id      Int      // outlet_id or user_id depending on scope_type
+  scope_type    String // "outlet" | "officer"
+  scope_id      Int // outlet_id or user_id depending on scope_type
   daily_limit   Float
   created_by_id Int?
   created_by    User?    @relation("CashLimitCreator", fields: [created_by_id], references: [id])
@@ -442,7 +443,7 @@ model VendorCashTransaction {
   id            Int      @id @default(autoincrement())
   vendor_id     Int
   vendor        Vendor   @relation(fields: [vendor_id], references: [id])
-  type          String   // "credit" | "debit"
+  type          String // "credit" | "debit"
   amount        Float
   balance_after Float
   description   String?
@@ -475,8 +476,8 @@ model ScheduledPayment {
 
 model ScheduledReportConfig {
   id            Int       @id @default(autoincrement())
-  report_type   String    // "daybook" | "expenses" | "vendor_payables" | "recovery" | "aging"
-  frequency     String    // "daily" | "weekly" | "monthly"
+  report_type   String // "daybook" | "expenses" | "vendor_payables" | "recovery" | "aging"
+  frequency     String // "daily" | "weekly" | "monthly"
   recipients    String    @db.Text // comma-separated emails
   is_active     Boolean   @default(true)
   last_sent_at  DateTime?
@@ -573,25 +574,25 @@ model Vendor {
 }
 
 model VendorPurchase {
-  id             Int                  @id @default(autoincrement())
+  id             Int                         @id @default(autoincrement())
   outlet_id      Int
-  invoice_number String               @unique
+  invoice_number String                      @unique
   vendor_name    String
-  notes          String?              @db.Text
-  total_amount   Float                @default(0)
-  paid_amount    Float                @default(0)
-  balance        Float                @default(0)
-  status         String               @default("Unpaid")
-  purchase_date  DateTime             @default(now())
-  created_at     DateTime             @default(now())
-  updated_at     DateTime             @updatedAt
+  notes          String?                     @db.Text
+  total_amount   Float                       @default(0)
+  paid_amount    Float                       @default(0)
+  balance        Float                       @default(0)
+  status         String                      @default("Unpaid")
+  purchase_date  DateTime                    @default(now())
+  created_at     DateTime                    @default(now())
+  updated_at     DateTime                    @updatedAt
   due_date       DateTime?
   vendor_id      Int?
   payments       VendorPayment[]
   items          VendorPurchaseItem[]
   edit_histories VendorPurchaseEditHistory[]
-  outlet         Outlet               @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
-  vendor         Vendor?              @relation(fields: [vendor_id], references: [id])
+  outlet         Outlet                      @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  vendor         Vendor?                     @relation(fields: [vendor_id], references: [id])
   returns        VendorPurchaseReturn[]
 
   @@index([outlet_id])
@@ -635,22 +636,22 @@ model VendorPurchaseItem {
 }
 
 model VendorPurchaseReturn {
-  id              Int                      @id @default(autoincrement())
-  outlet_id       Int
-  return_number   String                   @unique
-  purchase_id     Int?
-  vendor_id       Int
-  vendor_name     String
-  return_date     DateTime                 @default(now())
-  total_amount    Float                    @default(0)
-  notes           String?                  @db.Text
-  created_at      DateTime                 @default(now())
-  updated_at      DateTime                 @updatedAt
+  id            Int      @id @default(autoincrement())
+  outlet_id     Int
+  return_number String   @unique
+  purchase_id   Int?
+  vendor_id     Int
+  vendor_name   String
+  return_date   DateTime @default(now())
+  total_amount  Float    @default(0)
+  notes         String?  @db.Text
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
 
-  outlet          Outlet                   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
-  purchase        VendorPurchase?          @relation(fields: [purchase_id], references: [id])
-  vendor          Vendor                   @relation(fields: [vendor_id], references: [id], onDelete: Cascade)
-  items           VendorPurchaseReturnItem[]
+  outlet   Outlet                     @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  purchase VendorPurchase?            @relation(fields: [purchase_id], references: [id])
+  vendor   Vendor                     @relation(fields: [vendor_id], references: [id], onDelete: Cascade)
+  items    VendorPurchaseReturnItem[]
 
   @@index([outlet_id])
   @@index([vendor_id])
@@ -659,19 +660,19 @@ model VendorPurchaseReturn {
 }
 
 model VendorPurchaseReturnItem {
-  id                Int                  @id @default(autoincrement())
-  return_id         Int
-  purchase_item_id  Int?
-  product_name      String
-  category          String?
-  color_variant     String?
-  imei_serial       String?
-  quantity          Int
-  unit_price        Float
-  total_price       Float
-  reason            String?              @db.Text
+  id               Int     @id @default(autoincrement())
+  return_id        Int
+  purchase_item_id Int?
+  product_name     String
+  category         String?
+  color_variant    String?
+  imei_serial      String?
+  quantity         Int
+  unit_price       Float
+  total_price      Float
+  reason           String? @db.Text
 
-  return            VendorPurchaseReturn @relation(fields: [return_id], references: [id], onDelete: Cascade)
+  return VendorPurchaseReturn @relation(fields: [return_id], references: [id], onDelete: Cascade)
 
   @@index([return_id])
   @@map("vendor_purchase_return_items")
@@ -713,8 +714,8 @@ model OutletInventory {
   color_variant     String?
   quantity          Int             @default(1)
   installment_plans Json?
-  sale_price        Float?          // API recommended sale price (from qistmarket.pk)
-  api_product_name  String?         // Matched API product name for future sync
+  sale_price        Float? // API recommended sale price (from qistmarket.pk)
+  api_product_name  String? // Matched API product name for future sync
   is_used           Boolean         @default(false)
   outlet            Outlet          @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   stockTransfers    StockTransfer[]
@@ -735,7 +736,7 @@ model StockTransfer {
   created_at           DateTime        @default(now())
   quantity_transferred Int             @default(1)
   status               String          @default("pending")
-  updated_at           DateTime        @updatedAt @default(now())
+  updated_at           DateTime        @default(now()) @updatedAt
   cash_in_hands        CashInHand[]
   inventory            OutletInventory @relation(fields: [inventory_id], references: [id], onDelete: Cascade)
 
@@ -989,11 +990,11 @@ model DeliveryUpload {
 }
 
 model CashInHand {
-  id                Int            @id @default(autoincrement())
+  id                Int     @id @default(autoincrement())
   officer_id        Int
   order_id          Int
   amount            Float
-  status            String         @default("pending")
+  status            String  @default("pending")
   payment_method    String?
   outlet_id         Int?
   otp               String?
@@ -1004,15 +1005,15 @@ model CashInHand {
   stock_transfer_id Int?
 
   // New fields for partial payment support
-  cash_type         String?        @default("Advance amount payment")
-  submitted_amount  Float          @default(0)
+  cash_type        String? @default("Advance amount payment")
+  submitted_amount Float   @default(0)
 
-  created_at        DateTime       @default(now())
-  updated_at        DateTime       @updatedAt
-  officer           User           @relation("OfficerCashInHand", fields: [officer_id], references: [id])
-  order             Order          @relation("OrderCashInHand", fields: [order_id], references: [id])
-  outlet            Outlet?        @relation("OutletCashInHand", fields: [outlet_id], references: [id])
-  stock_transfer    StockTransfer? @relation(fields: [stock_transfer_id], references: [id])
+  created_at         DateTime                @default(now())
+  updated_at         DateTime                @updatedAt
+  officer            User                    @relation("OfficerCashInHand", fields: [officer_id], references: [id])
+  order              Order                   @relation("OrderCashInHand", fields: [order_id], references: [id])
+  outlet             Outlet?                 @relation("OutletCashInHand", fields: [outlet_id], references: [id])
+  stock_transfer     StockTransfer?          @relation(fields: [stock_transfer_id], references: [id])
   submission_history CashSubmissionHistory[]
 
   @@index([officer_id])
@@ -1031,7 +1032,7 @@ model CashSubmissionHistory {
   submission_date  DateTime   @default(now())
   status           String     @default("pending")
   otp              String?
-  submission_ref   String?    // Added to group split submissions
+  submission_ref   String? // Added to group split submissions
   outlet_id        Int?
   cash_in_hand     CashInHand @relation(fields: [cash_in_hand_id], references: [id], onDelete: Cascade)
 
@@ -1089,14 +1090,14 @@ model Notification {
 }
 
 model AccountDeletionRequest {
-  id             Int       @id @default(autoincrement())
-  userId         Int
-  reason         String?   @db.Text
-  status         String    @default("pending") // "pending" | "approved" | "rejected"
-  requestedAt    DateTime  @default(now())
-  reviewedAt     DateTime?
-  reviewedById   Int?
-  reviewRemarks  String?   @db.Text
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  reason        String?   @db.Text
+  status        String    @default("pending") // "pending" | "approved" | "rejected"
+  requestedAt   DateTime  @default(now())
+  reviewedAt    DateTime?
+  reviewedById  Int?
+  reviewRemarks String?   @db.Text
 
   user       User  @relation("DeletionRequestUser", fields: [userId], references: [id], onDelete: Cascade)
   reviewedBy User? @relation("DeletionRequestReviewer", fields: [reviewedById], references: [id])
@@ -1121,20 +1122,20 @@ model OfficerSession {
 }
 
 model OrderPayment {
-  id            Int       @id @default(autoincrement())
-  order_id      Int
-  paymentType   String
-  monthNumber   Int?
-  amount        Float
-  paidAt        DateTime  @default(now())
-  paymentMethod String?
+  id             Int       @id @default(autoincrement())
+  order_id       Int
+  paymentType    String
+  monthNumber    Int?
+  amount         Float
+  paidAt         DateTime  @default(now())
+  paymentMethod  String?
   collectedBy_id Int?
-  collectedBy   User?     @relation("PaymentCollector", fields: [collectedBy_id], references: [id])
-  created_at    DateTime  @default(now())
-  is_submitted  Boolean   @default(false)
-  submitted_at  DateTime?
-  feedback      String?
-  order         Order     @relation(fields: [order_id], references: [id])
+  collectedBy    User?     @relation("PaymentCollector", fields: [collectedBy_id], references: [id])
+  created_at     DateTime  @default(now())
+  is_submitted   Boolean   @default(false)
+  submitted_at   DateTime?
+  feedback       String?
+  order          Order     @relation(fields: [order_id], references: [id])
 
   @@index([order_id])
   @@index([order_id, paymentType])
@@ -1281,8 +1282,8 @@ model PayTriggerDevice {
   created_at        DateTime  @default(now())
   updated_at        DateTime  @updatedAt
 
-  order             Order     @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  delivery          Delivery? @relation(fields: [delivery_id], references: [id])
+  order    Order     @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  delivery Delivery? @relation(fields: [delivery_id], references: [id])
 
   @@index([order_id])
   @@index([enrollment_status])
@@ -1365,12 +1366,12 @@ model OtpLog {
 }
 
 model AppVersion {
-  id            Int      @id @default(autoincrement())
-  version       String   @unique
-  force_update  Boolean  @default(false)
-  message       String?  @db.Text
-  created_at    DateTime @default(now())
-  updated_at    DateTime @updatedAt
+  id           Int      @id @default(autoincrement())
+  version      String   @unique
+  force_update Boolean  @default(false)
+  message      String?  @db.Text
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
 
   @@map("app_versions")
 }
@@ -1381,14 +1382,14 @@ enum EmploymentType {
 }
 
 model Customer {
-  id               Int      @id @default(autoincrement())
-  cnic             String?  @unique
-  mobile           String   @unique
-  name             String
-  is_blacklisted   Boolean  @default(false)
-  created_at       DateTime @default(now())
-  updated_at       DateTime @updatedAt
-  orders           Order[]
+  id             Int      @id @default(autoincrement())
+  cnic           String?  @unique
+  mobile         String   @unique
+  name           String
+  is_blacklisted Boolean  @default(false)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+  orders         Order[]
 
   @@map("customers")
 }
@@ -1413,9 +1414,9 @@ model DiscountRequest {
 model Badge {
   id         Int      @id @default(autoincrement())
   user_id    Int
-  badge_type String   // e.g. "champion", "top_performer"
-  department String   // "csr" | "verification" | "delivery" | "recovery"
-  period     String   // "month"
+  badge_type String // e.g. "champion", "top_performer"
+  department String // "csr" | "verification" | "delivery" | "recovery"
+  period     String // "month"
   month      Int
   year       Int
   awarded_at DateTime @default(now())
@@ -1428,24 +1429,24 @@ model Badge {
 }
 
 model CsrRanking {
-  id                Int      @id @default(autoincrement())
-  csr_id            Int
-  period            String   // "today", "week", "month"
-  month             Int?     // 1-12
-  year              Int?
-  unique_customers  Int      @default(0)
-  delivered_customers Int    @default(0)
-  completed_customers Int    @default(0)
-  repeat_customers    Int    @default(0)
-  cancelled_customers Int    @default(0)
-  expired_customers   Int    @default(0)
-  total_sales       Float    @default(0)
-  score             Float    @default(0)
-  rank              Int      @default(0)
-  trend             Int      @default(0) // -1, 0, 1
-  updated_at        DateTime @updatedAt
+  id                  Int      @id @default(autoincrement())
+  csr_id              Int
+  period              String // "today", "week", "month"
+  month               Int? // 1-12
+  year                Int?
+  unique_customers    Int      @default(0)
+  delivered_customers Int      @default(0)
+  completed_customers Int      @default(0)
+  repeat_customers    Int      @default(0)
+  cancelled_customers Int      @default(0)
+  expired_customers   Int      @default(0)
+  total_sales         Float    @default(0)
+  score               Float    @default(0)
+  rank                Int      @default(0)
+  trend               Int      @default(0) // -1, 0, 1
+  updated_at          DateTime @updatedAt
 
-  user              User     @relation(fields: [csr_id], references: [id])
+  user User @relation(fields: [csr_id], references: [id])
 
   @@unique([csr_id, period, month, year])
   @@map("csr_rankings")
@@ -1458,7 +1459,7 @@ model ConsumerNumber {
   delivery_id         Int?
   user_id             Int?
   type                String    @default("installment") // "installment" or "officer_cash"
-  cash_submission_ref String?   // Used to link with CashSubmissionHistory
+  cash_submission_ref String? // Used to link with CashSubmissionHistory
   customer_name       String
   mobile_number       String
   imei_serial         String?
@@ -1505,7 +1506,7 @@ model OfficerTransaction {
   id               Int      @id @default(autoincrement())
   transaction_id   String   @unique
   officer_id       Int
-  type             String   // 'credit' or 'debit'
+  type             String // 'credit' or 'debit'
   amount           Float
   balance          Float
   status           String
@@ -1515,8 +1516,8 @@ model OfficerTransaction {
   order_ref        String?
   submission_ref   String?
 
-  officer          User     @relation("OfficerTransactions", fields: [officer_id], references: [id])
-  
+  officer User @relation("OfficerTransactions", fields: [officer_id], references: [id])
+
   @@index([officer_id])
   @@index([transaction_date])
   @@index([transaction_id])
@@ -1524,87 +1525,87 @@ model OfficerTransaction {
 }
 
 model SmartPayPaymentLog {
-  id                        Int      @id @default(autoincrement())
-  consumer_number           String
-  transactionId             String
-  amount                    Decimal  @db.Decimal(10, 2)
-  timestamp                 String
-  billnumber                String
-  status                    String?
-  is_duplicate              Boolean  @default(false)
-  created_at                DateTime @default(now())
+  id              Int      @id @default(autoincrement())
+  consumer_number String
+  transactionId   String
+  amount          Decimal  @db.Decimal(10, 2)
+  timestamp       String
+  billnumber      String
+  status          String?
+  is_duplicate    Boolean  @default(false)
+  created_at      DateTime @default(now())
 
   @@index([consumer_number, transactionId, timestamp])
   @@map("smartpay_payment_logs")
 }
 
 model VerificationRanking {
-  id                Int      @id @default(autoincrement())
-  officer_id        Int
-  period            String   // "today", "week", "month"
-  month             Int?     // 1-12
-  year              Int?
-  unique_customers  Int      @default(0)
-  delivered_customers Int    @default(0)
-  completed_customers Int    @default(0)
-  repeat_customers    Int    @default(0)
-  cancelled_customers Int    @default(0)
-  expired_customers   Int    @default(0)
-  total_sales       Float    @default(0)
-  score             Float    @default(0)
-  rank              Int      @default(0)
-  trend             Int      @default(0) // -1, 0, 1
-  updated_at        DateTime @updatedAt
+  id                  Int      @id @default(autoincrement())
+  officer_id          Int
+  period              String // "today", "week", "month"
+  month               Int? // 1-12
+  year                Int?
+  unique_customers    Int      @default(0)
+  delivered_customers Int      @default(0)
+  completed_customers Int      @default(0)
+  repeat_customers    Int      @default(0)
+  cancelled_customers Int      @default(0)
+  expired_customers   Int      @default(0)
+  total_sales         Float    @default(0)
+  score               Float    @default(0)
+  rank                Int      @default(0)
+  trend               Int      @default(0) // -1, 0, 1
+  updated_at          DateTime @updatedAt
 
-  user              User     @relation(fields: [officer_id], references: [id])
+  user User @relation(fields: [officer_id], references: [id])
 
   @@unique([officer_id, period, month, year])
   @@map("verification_rankings")
 }
 
 model DeliveryRanking {
-  id                Int      @id @default(autoincrement())
-  officer_id        Int
-  period            String   // "today", "week", "month"
-  month             Int?     // 1-12
-  year              Int?
-  unique_customers  Int      @default(0)
-  delivered_customers Int    @default(0)
-  completed_customers Int    @default(0)
-  repeat_customers    Int    @default(0)
-  cancelled_customers Int    @default(0)
-  expired_customers   Int    @default(0)
-  total_sales       Float    @default(0)
-  score             Float    @default(0)
-  rank              Int      @default(0)
-  trend             Int      @default(0) // -1, 0, 1
-  updated_at        DateTime @updatedAt
+  id                  Int      @id @default(autoincrement())
+  officer_id          Int
+  period              String // "today", "week", "month"
+  month               Int? // 1-12
+  year                Int?
+  unique_customers    Int      @default(0)
+  delivered_customers Int      @default(0)
+  completed_customers Int      @default(0)
+  repeat_customers    Int      @default(0)
+  cancelled_customers Int      @default(0)
+  expired_customers   Int      @default(0)
+  total_sales         Float    @default(0)
+  score               Float    @default(0)
+  rank                Int      @default(0)
+  trend               Int      @default(0) // -1, 0, 1
+  updated_at          DateTime @updatedAt
 
-  user              User     @relation(fields: [officer_id], references: [id])
+  user User @relation(fields: [officer_id], references: [id])
 
   @@unique([officer_id, period, month, year])
   @@map("delivery_rankings")
 }
 
 model RecoveryRanking {
-  id                Int      @id @default(autoincrement())
-  officer_id        Int
-  period            String   // "today", "week", "month"
-  month             Int?     // 1-12
-  year              Int?
-  unique_customers  Int      @default(0)
-  delivered_customers Int    @default(0)
-  completed_customers Int    @default(0)
-  repeat_customers    Int    @default(0)
-  cancelled_customers Int    @default(0)
-  expired_customers   Int    @default(0)
-  total_sales       Float    @default(0)
-  score             Float    @default(0)
-  rank              Int      @default(0)
-  trend             Int      @default(0) // -1, 0, 1
-  updated_at        DateTime @updatedAt
+  id                  Int      @id @default(autoincrement())
+  officer_id          Int
+  period              String // "today", "week", "month"
+  month               Int? // 1-12
+  year                Int?
+  unique_customers    Int      @default(0)
+  delivered_customers Int      @default(0)
+  completed_customers Int      @default(0)
+  repeat_customers    Int      @default(0)
+  cancelled_customers Int      @default(0)
+  expired_customers   Int      @default(0)
+  total_sales         Float    @default(0)
+  score               Float    @default(0)
+  rank                Int      @default(0)
+  trend               Int      @default(0) // -1, 0, 1
+  updated_at          DateTime @updatedAt
 
-  user              User     @relation(fields: [officer_id], references: [id])
+  user User @relation(fields: [officer_id], references: [id])
 
   @@unique([officer_id, period, month, year])
   @@map("recovery_rankings")
@@ -1613,39 +1614,39 @@ model RecoveryRanking {
 // ========== HR / Employee Portal ==========
 
 model Employee {
-  id                    Int       @id @default(autoincrement())
-  employee_id           String    @unique
+  id                    Int                    @id @default(autoincrement())
+  employee_id           String                 @unique
   full_name             String
-  username              String    @unique
+  username              String                 @unique
   password_hash         String
-  portal_active         Boolean   @default(true)
-  qr_code               String?   @db.Text
+  portal_active         Boolean                @default(true)
+  qr_code               String?                @db.Text
   cnic                  String?
   phone                 String?
   email                 String?
-  address               String?   @db.Text
+  address               String?                @db.Text
   emergency_contact     String?
   emergency_phone       String?
-  qualification         String?   @db.Text
-  experience            String?   @db.Text
+  qualification         String?                @db.Text
+  experience            String?                @db.Text
   date_of_birth         DateTime?
   date_of_joining       DateTime?
   department            String?
   designation           String?
   outlet_id             Int?
-  user_id               Int?      @unique
-  user                  User?     @relation(fields: [user_id], references: [id])
-  annual_leave_total    Float     @default(12)
-  annual_leave_used     Float     @default(0)
-  sick_leave_total      Float     @default(6)
-  sick_leave_used       Float     @default(0)
-  emergency_leave_total Float     @default(3)
-  emergency_leave_used  Float     @default(0)
-  unpaid_leave_used     Float     @default(0)
-  status                String    @default("active")
-  created_at            DateTime  @default(now())
-  updated_at            DateTime  @updatedAt
-  outlet                Outlet?   @relation(fields: [outlet_id], references: [id])
+  user_id               Int?                   @unique
+  user                  User?                  @relation(fields: [user_id], references: [id])
+  annual_leave_total    Float                  @default(12)
+  annual_leave_used     Float                  @default(0)
+  sick_leave_total      Float                  @default(6)
+  sick_leave_used       Float                  @default(0)
+  emergency_leave_total Float                  @default(3)
+  emergency_leave_used  Float                  @default(0)
+  unpaid_leave_used     Float                  @default(0)
+  status                String                 @default("active")
+  created_at            DateTime               @default(now())
+  updated_at            DateTime               @updatedAt
+  outlet                Outlet?                @relation(fields: [outlet_id], references: [id])
   attendances           EmployeeAttendance[]
   leave_requests        LeaveRequest[]
   payroll_slips         PayrollSlip[]
@@ -1810,27 +1811,32 @@ model EmployeePerformance {
 }
 
 model BankDepositRequest {
-  id                Int           @id @default(autoincrement())
-  amount            Float
-  bank_account_id   Int?
-  payment_method    String        // "manual_deposit", "1bill", "qr_payment"
-  receipt_id        String?
-  receipt_photo_url String?
-  description       String?       @db.Text
-  status            String        @default("pending") // "pending", "verified", "rejected"
-  submitted_by_id   Int
-  outlet_id         Int?
-  verified_by_id    Int?
+  id                  Int       @id @default(autoincrement())
+  amount              Float
+  bank_account_id     Int?
+  payment_method      String // "manual_deposit", "1bill", "qr_payment"
+  receipt_id          String?
+  receipt_photo_url   String?
+  description         String?   @db.Text
+  status              String    @default("pending") // "pending", "verified", "rejected"
+  submitted_by_id     Int
+  outlet_id           Int?
+  verified_by_id      Int?
   bank_transaction_id Int?
-  
-  created_at        DateTime      @default(now())
-  updated_at        DateTime      @updatedAt
+  accountant_id       Int?
+  consumer_number     String?
+  qr_image_base64     String?   @db.Text
+  expires_at          DateTime?
 
-  submitted_by      User          @relation("DepositSubmitter", fields: [submitted_by_id], references: [id])
-  verified_by       User?         @relation("DepositVerifier", fields: [verified_by_id], references: [id])
-  bank_account      BankAccount?  @relation("DepositBankAccount", fields: [bank_account_id], references: [id])
-  outlet            Outlet?       @relation("DepositOutlet", fields: [outlet_id], references: [id])
-  bank_transaction  BankTransaction? @relation(fields: [bank_transaction_id], references: [id])
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  submitted_by     User             @relation("DepositSubmitter", fields: [submitted_by_id], references: [id])
+  verified_by      User?            @relation("DepositVerifier", fields: [verified_by_id], references: [id])
+  bank_account     BankAccount?     @relation("DepositBankAccount", fields: [bank_account_id], references: [id])
+  outlet           Outlet?          @relation("DepositOutlet", fields: [outlet_id], references: [id])
+  bank_transaction BankTransaction? @relation(fields: [bank_transaction_id], references: [id])
+  accountant       User?            @relation("DepositAccountant", fields: [accountant_id], references: [id])
 
   @@index([submitted_by_id])
   @@index([outlet_id])
@@ -1840,13 +1846,13 @@ model BankDepositRequest {
 }
 
 model UserLocationHistory {
-  id          Int      @id @default(autoincrement())
-  user_id     Int
-  latitude    Float
-  longitude   Float
-  timestamp   DateTime @default(now())
+  id        Int      @id @default(autoincrement())
+  user_id   Int
+  latitude  Float
+  longitude Float
+  timestamp DateTime @default(now())
 
-  user        User     @relation("UserLocationHistory", fields: [user_id], references: [id], onDelete: Cascade)
+  user User @relation("UserLocationHistory", fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id])
   @@index([timestamp])
@@ -1854,61 +1860,61 @@ model UserLocationHistory {
 }
 
 model ArchivedDelivery {
-  id                 Int                @id @default(autoincrement())
+  id                 Int       @id @default(autoincrement())
   order_id           Int
   delivery_agent_id  Int
-  status             String             @default("pending")
+  status             String    @default("pending")
   start_time         DateTime?
   end_time           DateTime?
   feedback           String?
-  product_imei       String?            @db.VarChar(100)
+  product_imei       String?   @db.VarChar(100)
   selected_plan      Json?
   installment_ledger Json?
-  self_pickup        Boolean            @default(false)
-  archived_at        DateTime           @default(now())
+  self_pickup        Boolean   @default(false)
+  archived_at        DateTime  @default(now())
   created_at         DateTime
 
-  order              Order              @relation("ArchivedOrderDeliveries", fields: [order_id], references: [id], onDelete: Cascade)
-  delivery_agent     User               @relation("ArchivedDeliveryAgent", fields: [delivery_agent_id], references: [id])
-  uploads            ArchivedDeliveryUpload[]
+  order          Order                    @relation("ArchivedOrderDeliveries", fields: [order_id], references: [id], onDelete: Cascade)
+  delivery_agent User                     @relation("ArchivedDeliveryAgent", fields: [delivery_agent_id], references: [id])
+  uploads        ArchivedDeliveryUpload[]
 
   @@index([order_id])
   @@index([delivery_agent_id])
 }
 
 model ArchivedDeliveryUpload {
-  id                  Int      @id @default(autoincrement())
+  id                   Int      @id @default(autoincrement())
   archived_delivery_id Int
-  upload_type         String
-  file_url            String?
-  link                String?
-  tag                 String?
-  uploaded_at         DateTime
+  upload_type          String
+  file_url             String?
+  link                 String?
+  tag                  String?
+  uploaded_at          DateTime
 
-  archived_delivery   ArchivedDelivery @relation(fields: [archived_delivery_id], references: [id], onDelete: Cascade)
+  archived_delivery ArchivedDelivery @relation(fields: [archived_delivery_id], references: [id], onDelete: Cascade)
 
   @@index([archived_delivery_id])
 }
 
 model CashTransferRequest {
-  id                Int       @id @default(autoincrement())
-  amount            Float
-  sender_outlet_id  Int
+  id                 Int     @id @default(autoincrement())
+  amount             Float
+  sender_outlet_id   Int
   receiver_outlet_id Int
-  receipt_id        String?
-  receipt_photo_url String?
-  description       String?   @db.Text
-  status            String    @default("pending") // pending, accepted, rejected
-  submitted_by_id   Int
-  handled_by_id     Int?
-  
-  created_at        DateTime  @default(now())
-  updated_at        DateTime  @updatedAt
+  receipt_id         String?
+  receipt_photo_url  String?
+  description        String? @db.Text
+  status             String  @default("pending") // pending, accepted, rejected
+  submitted_by_id    Int
+  handled_by_id      Int?
 
-  sender_outlet     Outlet    @relation("SenderOutlet", fields: [sender_outlet_id], references: [id])
-  receiver_outlet   Outlet    @relation("ReceiverOutlet", fields: [receiver_outlet_id], references: [id])
-  submitted_by      User      @relation("TransferSubmitter", fields: [submitted_by_id], references: [id])
-  handled_by        User?     @relation("TransferHandler", fields: [handled_by_id], references: [id])
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  sender_outlet   Outlet @relation("SenderOutlet", fields: [sender_outlet_id], references: [id])
+  receiver_outlet Outlet @relation("ReceiverOutlet", fields: [receiver_outlet_id], references: [id])
+  submitted_by    User   @relation("TransferSubmitter", fields: [submitted_by_id], references: [id])
+  handled_by      User?  @relation("TransferHandler", fields: [handled_by_id], references: [id])
 
   @@index([sender_outlet_id])
   @@index([receiver_outlet_id])

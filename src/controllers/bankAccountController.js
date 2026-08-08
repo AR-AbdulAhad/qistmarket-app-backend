@@ -1,5 +1,8 @@
 const prisma = require('../../lib/prisma');
 const { logAction } = require('../utils/auditLogger');
+const { generateDqr } = require('../utils/smartPayGateway');
+
+const now = () => new Date();
 
 const getBankAccounts = async (req, res) => {
     try {
@@ -348,12 +351,88 @@ const createInterBankTransfer = async (req, res) => {
 // ─── Bank Deposit Requests (Outlet / Accounts Office) ───────────────
 
 /**
+ * listAccountantsForDeposit
+ * Accountants an outlet can route a 1Bill/QR deposit to, each flagged
+ * bill_busy/qr_busy if their personal consumer number already has another
+ * request pending against it (each accountant only has ONE of each number,
+ * reused across requests — see docs in the plan / submitBankDeposit below).
+ */
+const listAccountantsForDeposit = async (req, res) => {
+    try {
+        const accountants = await prisma.user.findMany({
+            where: { role: { name: 'Accountant' }, status: 'active' },
+            select: { id: true, full_name: true, bill_consumer_number: true, smart_pay_consumer_number: true },
+            orderBy: { full_name: 'asc' }
+        });
+
+        const consumerNumbers = accountants
+            .flatMap(a => [a.bill_consumer_number, a.smart_pay_consumer_number])
+            .filter(Boolean);
+
+        const busyRows = consumerNumbers.length
+            ? await prisma.consumerNumber.findMany({
+                where: { consumer_number: { in: consumerNumbers }, bill_status: 'U', due_date: { gt: now() } },
+                select: { consumer_number: true }
+            })
+            : [];
+        const busySet = new Set(busyRows.map(r => r.consumer_number));
+
+        const data = accountants.map(a => ({
+            id: a.id,
+            full_name: a.full_name,
+            bill_consumer_number: a.bill_consumer_number,
+            smart_pay_consumer_number: a.smart_pay_consumer_number,
+            bill_busy: a.bill_consumer_number ? busySet.has(a.bill_consumer_number) : true,
+            qr_busy: a.smart_pay_consumer_number ? busySet.has(a.smart_pay_consumer_number) : true
+        }));
+
+        res.json({ success: true, data });
+    } catch (error) {
+        console.error('listAccountantsForDeposit error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+/**
+ * tryReserveConsumerNumber
+ * Atomically claims a consumer_number's ConsumerNumber row for a new
+ * deposit ONLY if it isn't currently marked busy (bill_status 'U' with a
+ * still-future due_date) — a single conditional UPDATE...WHERE, so two
+ * concurrent requests can't both win the same accountant's number.
+ */
+const tryReserveConsumerNumber = async (consumerNumber, amountFloat, expiresAt, placeholderRef) => {
+    const result = await prisma.consumerNumber.updateMany({
+        where: {
+            consumer_number: consumerNumber,
+            OR: [
+                { bill_status: { not: 'U' } },
+                { due_date: { lt: now() } }
+            ]
+        },
+        data: {
+            amount_due: amountFloat,
+            bill_status: 'U',
+            due_date: expiresAt,
+            cash_submission_ref: placeholderRef,
+            updated_at: now()
+        }
+    });
+    return result.count > 0;
+};
+
+/**
  * submitBankDeposit
- * Submit a manual bank deposit or transfer request with proof.
+ * manual_deposit: unchanged — proof-based, reviewed by hand by an Accountant.
+ * 1bill / qr_payment: routed to a chosen Accountant's personal consumer
+ * number (already created for every user at signup — see authController.js),
+ * reusing the same ConsumerNumber row the existing 1LINK TPS / SmartPay
+ * webhooks (tpsController.billPayment / smartPayController.notifyPayment)
+ * already know how to mark paid. No manual verification needed for these —
+ * the webhook flips the BankDepositRequest to "verified" itself.
  */
 const submitBankDeposit = async (req, res) => {
     try {
-        const { amount, bank_account_id, payment_method, description } = req.body;
+        const { amount, bank_account_id, payment_method, description, accountant_id } = req.body;
         const receipt_id = req.body.receipt_id || null;
         let receipt_photo_url = null;
 
@@ -368,52 +447,152 @@ const submitBankDeposit = async (req, res) => {
         const amountFloat = parseFloat(amount);
         const outletId = req.user.outlet_id || null;
 
-        const deposit = await prisma.$transaction(async (tx) => {
-            const newDeposit = await tx.bankDepositRequest.create({
-                data: {
-                    amount: amountFloat,
-                    bank_account_id: bank_account_id ? parseInt(bank_account_id) : null,
-                    payment_method,
-                    receipt_id,
-                    receipt_photo_url,
-                    description,
-                    status: 'pending',
-                    outlet_id: outletId,
-                    submitted_by_id: req.user.id
-                }
+        let deposit;
+
+        if (payment_method === '1bill' || payment_method === 'qr_payment') {
+            if (!accountant_id) {
+                return res.status(400).json({ success: false, message: 'Please select an accountant.' });
+            }
+
+            const accountant = await prisma.user.findFirst({
+                where: { id: parseInt(accountant_id), role: { name: 'Accountant' } },
+                select: { id: true, full_name: true, phone: true, bill_consumer_number: true, smart_pay_consumer_number: true }
             });
+            if (!accountant) {
+                return res.status(404).json({ success: false, message: 'Accountant not found.' });
+            }
 
-            if (outletId) {
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
+            const consumerNumber = payment_method === '1bill' ? accountant.bill_consumer_number : accountant.smart_pay_consumer_number;
+            if (!consumerNumber) {
+                return res.status(400).json({ success: false, message: 'This accountant has no consumer number configured for this method.' });
+            }
 
-                let register = await tx.cashRegister.findFirst({
-                    where: { outlet_id: outletId, date: { gte: today } }
-                });
+            const beforeRow = await prisma.consumerNumber.findUnique({ where: { consumer_number: consumerNumber } });
+            if (!beforeRow) {
+                return res.status(500).json({ success: false, message: 'Consumer number record missing for this accountant. Contact support.' });
+            }
 
-                if (register) {
-                    await tx.cashRegister.update({
-                        where: { id: register.id },
-                        data: {
-                            cash_transferred_out: register.cash_transferred_out + amountFloat,
-                            closing_cash: register.closing_cash - amountFloat
-                        }
-                    });
-                } else {
-                    await tx.cashRegister.create({
-                        data: {
-                            outlet_id: outletId,
-                            date: today,
-                            opening_cash: 0,
-                            cash_transferred_out: amountFloat,
-                            closing_cash: -Math.abs(amountFloat)
-                        }
+            const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+            const placeholderRef = `PENDING-${payment_method.toUpperCase()}-${Date.now()}`;
+
+            const claimed = await tryReserveConsumerNumber(consumerNumber, amountFloat, expiresAt, placeholderRef);
+            if (!claimed) {
+                return res.status(409).json({ success: false, message: 'This accountant already has a pending request. Please pick another accountant or wait for it to clear.' });
+            }
+
+            // Best-effort: the slot we just claimed was free, meaning any earlier
+            // BankDepositRequest tied to it had already expired — mark it rejected
+            // so it stops showing as pending anywhere.
+            if (beforeRow.cash_submission_ref?.startsWith('BDR-')) {
+                const staleId = parseInt(beforeRow.cash_submission_ref.replace('BDR-', ''), 10);
+                if (!isNaN(staleId)) {
+                    await prisma.bankDepositRequest.updateMany({
+                        where: { id: staleId, status: 'pending' },
+                        data: { status: 'rejected', description: 'Auto-expired — superseded by a new request.' }
                     });
                 }
             }
 
-            return newDeposit;
-        });
+            let qrImageBase64 = null;
+            if (payment_method === 'qr_payment') {
+                const dqr = await generateDqr({
+                    consumerNumber,
+                    consumerDetail: accountant.full_name,
+                    amount: amountFloat,
+                    cellNo: accountant.phone,
+                    referenceInfo: `BDR-OUTLET-${outletId || 'HQ'}-${Date.now()}`
+                });
+                if (!dqr.success) {
+                    // Roll back the reservation exactly to its prior state.
+                    await prisma.consumerNumber.update({
+                        where: { consumer_number: consumerNumber },
+                        data: {
+                            amount_due: beforeRow.amount_due,
+                            bill_status: beforeRow.bill_status,
+                            due_date: beforeRow.due_date,
+                            cash_submission_ref: beforeRow.cash_submission_ref
+                        }
+                    });
+                    return res.status(502).json({ success: false, message: dqr.message || 'Failed to generate QR code.' });
+                }
+                qrImageBase64 = dqr.qrImageBase64;
+            }
+
+            deposit = await prisma.bankDepositRequest.create({
+                data: {
+                    amount: amountFloat,
+                    payment_method,
+                    status: 'pending',
+                    outlet_id: outletId,
+                    submitted_by_id: req.user.id,
+                    accountant_id: accountant.id,
+                    consumer_number: consumerNumber,
+                    qr_image_base64: qrImageBase64,
+                    expires_at: expiresAt,
+                    created_at: now()   // ✅ explicit created_at — schema @default(now()) runs DB-side and
+                                        // bypasses the app's PKT Date patch (lib/prisma.js), which would
+                                        // otherwise leave created_at 5 hours behind expires_at/due_date.
+                }
+            });
+
+            await prisma.consumerNumber.update({
+                where: { consumer_number: consumerNumber },
+                data: { cash_submission_ref: `BDR-${deposit.id}` }
+            });
+
+            if (outletId) {
+                await updateCashRegisterOnDeposit(outletId, amountFloat);
+            }
+        } else {
+            // manual_deposit — unchanged.
+            deposit = await prisma.$transaction(async (tx) => {
+                const newDeposit = await tx.bankDepositRequest.create({
+                    data: {
+                        amount: amountFloat,
+                        bank_account_id: bank_account_id ? parseInt(bank_account_id) : null,
+                        payment_method,
+                        receipt_id,
+                        receipt_photo_url,
+                        description,
+                        status: 'pending',
+                        outlet_id: outletId,
+                        submitted_by_id: req.user.id,
+                        created_at: now()   // ✅ explicit created_at — see note in the 1bill/qr branch above
+                    }
+                });
+
+                if (outletId) {
+                    const today = new Date();
+                    today.setHours(0, 0, 0, 0);
+
+                    let register = await tx.cashRegister.findFirst({
+                        where: { outlet_id: outletId, date: { gte: today } }
+                    });
+
+                    if (register) {
+                        await tx.cashRegister.update({
+                            where: { id: register.id },
+                            data: {
+                                cash_transferred_out: register.cash_transferred_out + amountFloat,
+                                closing_cash: register.closing_cash - amountFloat
+                            }
+                        });
+                    } else {
+                        await tx.cashRegister.create({
+                            data: {
+                                outlet_id: outletId,
+                                date: today,
+                                opening_cash: 0,
+                                cash_transferred_out: amountFloat,
+                                closing_cash: -Math.abs(amountFloat)
+                            }
+                        });
+                    }
+                }
+
+                return newDeposit;
+            });
+        }
 
         await logAction(req, 'BANK_DEPOSIT_SUBMITTED', `Deposit request of PKR ${amount} submitted via ${payment_method}.`, deposit.id, 'BankDepositRequest');
 
@@ -421,6 +600,42 @@ const submitBankDeposit = async (req, res) => {
     } catch (error) {
         console.error('submitBankDeposit error:', error);
         res.status(500).json({ success: false, message: 'Error submitting deposit request.', error: error.message });
+    }
+};
+
+/**
+ * updateCashRegisterOnDeposit
+ * Same daybook bump submitBankDeposit already does for manual deposits,
+ * extracted so the 1bill/qr_payment branch (which doesn't otherwise need a
+ * transaction) can apply it too, keeping outlet cash-register behavior
+ * identical across all three payment methods.
+ */
+const updateCashRegisterOnDeposit = async (outletId, amountFloat) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const register = await prisma.cashRegister.findFirst({
+        where: { outlet_id: outletId, date: { gte: today } }
+    });
+
+    if (register) {
+        await prisma.cashRegister.update({
+            where: { id: register.id },
+            data: {
+                cash_transferred_out: register.cash_transferred_out + amountFloat,
+                closing_cash: register.closing_cash - amountFloat
+            }
+        });
+    } else {
+        await prisma.cashRegister.create({
+            data: {
+                outlet_id: outletId,
+                date: today,
+                opening_cash: 0,
+                cash_transferred_out: amountFloat,
+                closing_cash: -Math.abs(amountFloat)
+            }
+        });
     }
 };
 
@@ -446,7 +661,8 @@ const listBankDeposits = async (req, res) => {
                 submitted_by: { select: { id: true, full_name: true, username: true } },
                 verified_by: { select: { id: true, full_name: true, username: true } },
                 bank_account: { select: { id: true, bank_name: true, account_number: true } },
-                outlet: { select: { id: true, name: true, code: true } }
+                outlet: { select: { id: true, name: true, code: true } },
+                accountant: { select: { id: true, full_name: true } }
             },
             orderBy: { created_at: 'desc' }
         });
@@ -552,5 +768,6 @@ module.exports = {
     createInterBankTransfer,
     submitBankDeposit,
     listBankDeposits,
-    verifyBankDeposit
+    verifyBankDeposit,
+    listAccountantsForDeposit
 };
