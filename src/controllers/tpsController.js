@@ -339,6 +339,7 @@ const billPayment = async (req, res) => {
                             where: { id: bdrId },
                             data: {
                                 status: 'verified',
+                                transaction_id: String(tran_auth_id || ''),
                                 description: `Auto-verified via 1Bill (1LINK TPS - ${bank_mnemonic || ''}), tran_auth_id: ${tran_auth_id}`
                             }
                         });

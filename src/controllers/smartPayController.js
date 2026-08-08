@@ -484,6 +484,7 @@ const notifyPayment = async (req, res) => {
                             where: { id: bdrId },
                             data: {
                                 status: 'verified',
+                                transaction_id: String(transactionId || ''),
                                 description: `Auto-verified via SmartPay QR, TxID: ${transactionId}`
                             }
                         });

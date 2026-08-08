@@ -5,7 +5,8 @@ const axios = require('axios');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { logAction } = require('../utils/auditLogger');
 const { sendTemplate, sendOrderStatusNotification } = require('../services/watiService');
-const { sendOtp: sendOTP } = require('../services/otpDispatcher');
+const { sendOtp: sendOTP, isJazzEnabled } = require('../services/otpDispatcher');
+const jazzSmsService = require('../services/jazzSmsService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth } = require('../services/rankingService');
 
@@ -3545,6 +3546,14 @@ const sendIndividualConvertOTP = async (req, res) => {
                 { name: 'name', value: name }
             ]);
             console.log(  "OTP sent to " + phone + "Name" + name + " with template " + template_name + " and broadcast " + broadcast_name);
+            // Jazz CMT SMS — additive, respects the same JAZZ_OTP_ENABLED switch as
+            // every other OTP scenario (otpDispatcher.js), since this grantor branch
+            // uses a named WATI template directly and bypasses the dispatcher.
+            if (isJazzEnabled()) {
+                jazzSmsService.sendOTPSms(phone, otp).catch((err) => {
+                    console.error('[OTP] Jazz send failed (grantor convert-sale):', err?.message || err);
+                });
+            }
         } else {
             await sendOTP(phone, otp);
         }

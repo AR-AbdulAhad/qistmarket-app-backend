@@ -83,11 +83,12 @@ router.get('/outlet/auto-assignment-settings', authenticateJWT, getAutoAssignmen
 router.post('/outlet/auto-assignment-settings', authenticateJWT, updateAutoAssignmentSettings);
 
 // Bank Deposit requests (from outlet users)
-const { submitBankDeposit, listBankDeposits, listAccountantsForDeposit } = require('../controllers/bankAccountController');
+const { submitBankDeposit, listBankDeposits, listAccountantsForDeposit, cancelBankDeposit } = require('../controllers/bankAccountController');
 const upload = require('../middlewares/uploadMiddleware');
 router.post('/outlet/bank-deposits', authenticateJWT, upload.single('receipt_photo'), submitBankDeposit);
 router.get('/outlet/bank-deposits', authenticateJWT, listBankDeposits);
 router.get('/outlet/accountants', authenticateJWT, listAccountantsForDeposit);
+router.patch('/outlet/bank-deposits/:id/cancel', authenticateJWT, cancelBankDeposit);
 
 // Outlet to Outlet Cash Transfers
 router.post('/outlet/cash-transfers', authenticateJWT, upload.single('receipt_photo'), submitCashTransferRequest);

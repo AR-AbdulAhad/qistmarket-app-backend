@@ -1818,7 +1818,7 @@ model BankDepositRequest {
   receipt_id          String?
   receipt_photo_url   String?
   description         String?   @db.Text
-  status              String    @default("pending") // "pending", "verified", "rejected"
+  status              String    @default("pending") // "pending", "verified", "rejected", "cancelled"
   submitted_by_id     Int
   outlet_id           Int?
   verified_by_id      Int?
@@ -1827,6 +1827,7 @@ model BankDepositRequest {
   consumer_number     String?
   qr_image_base64     String?   @db.Text
   expires_at          DateTime?
+  transaction_id      String?
 
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt

@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const crypto = require('crypto');
 const { logAction } = require('../utils/auditLogger');
 const { generateDqr } = require('../utils/smartPayGateway');
 
@@ -544,7 +545,9 @@ const submitBankDeposit = async (req, res) => {
                 await updateCashRegisterOnDeposit(outletId, amountFloat);
             }
         } else {
-            // manual_deposit — unchanged.
+            // manual_deposit — same as before, plus a self-generated transaction_id
+            // (no payment gateway/webhook involved here, so there's nothing to wait on).
+            const manualTransactionId = `MD-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
             deposit = await prisma.$transaction(async (tx) => {
                 const newDeposit = await tx.bankDepositRequest.create({
                     data: {
@@ -557,6 +560,7 @@ const submitBankDeposit = async (req, res) => {
                         status: 'pending',
                         outlet_id: outletId,
                         submitted_by_id: req.user.id,
+                        transaction_id: manualTransactionId,
                         created_at: now()   // ✅ explicit created_at — see note in the 1bill/qr branch above
                     }
                 });
@@ -600,6 +604,45 @@ const submitBankDeposit = async (req, res) => {
     } catch (error) {
         console.error('submitBankDeposit error:', error);
         res.status(500).json({ success: false, message: 'Error submitting deposit request.', error: error.message });
+    }
+};
+
+/**
+ * cancelBankDeposit
+ * The submitting outlet retracts their own still-pending request. For
+ * 1bill/qr_payment, also immediately releases the accountant's reserved
+ * consumer number (bill_status back to 'P'/free) instead of waiting for the
+ * 24h expiry — so another outlet can use that accountant right away.
+ */
+const cancelBankDeposit = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const deposit = await prisma.bankDepositRequest.findUnique({ where: { id: parseInt(id) } });
+        if (!deposit) return res.status(404).json({ success: false, message: 'Deposit request not found.' });
+        if (deposit.submitted_by_id !== req.user.id) {
+            return res.status(403).json({ success: false, message: 'You can only cancel your own requests.' });
+        }
+        if (deposit.status !== 'pending') {
+            return res.status(400).json({ success: false, message: `Cannot cancel a request that is already ${deposit.status}.` });
+        }
+
+        const updated = await prisma.bankDepositRequest.update({
+            where: { id: deposit.id },
+            data: { status: 'cancelled' }
+        });
+
+        if (deposit.consumer_number) {
+            await prisma.consumerNumber.updateMany({
+                where: { consumer_number: deposit.consumer_number, cash_submission_ref: `BDR-${deposit.id}` },
+                data: { bill_status: 'P', amount_due: 0, cash_submission_ref: null, updated_at: now() }
+            });
+        }
+
+        await logAction(req, 'BANK_DEPOSIT_CANCELLED', `Deposit request #${id} cancelled by outlet.`, deposit.id, 'BankDepositRequest');
+        res.json({ success: true, message: 'Deposit request cancelled.', deposit: updated });
+    } catch (error) {
+        console.error('cancelBankDeposit error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 
@@ -769,5 +812,6 @@ module.exports = {
     submitBankDeposit,
     listBankDeposits,
     verifyBankDeposit,
-    listAccountantsForDeposit
+    listAccountantsForDeposit,
+    cancelBankDeposit
 };
