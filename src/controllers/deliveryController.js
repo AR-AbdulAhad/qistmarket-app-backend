@@ -299,7 +299,8 @@ const submitDelivery = async (req, res) => {
       data: {
         status: 'delivered',
         is_delivered: true,
-        updated_at: now()   // ✅ explicit updated_at
+        delivered_at: order.delivered_at || now(),
+        updated_at: order.delivered_at || now()
       }
     });
 
@@ -2146,7 +2147,8 @@ const submitSelfPickupDelivery = async (req, res) => {
         data: {
           status: 'delivered',
           is_delivered: true,
-          updated_at: now()
+          delivered_at: order.delivered_at || now(),
+          updated_at: order.delivered_at || now()
         }
       });
 

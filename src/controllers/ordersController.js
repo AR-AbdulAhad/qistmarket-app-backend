@@ -954,10 +954,20 @@ const getOrders = async (req, res) => {
 
     const total = await prisma.order.count({ where });
 
+    const formattedOrders = orders.map(order => {
+      const isDelivered = order.is_delivered || (order.status || '').toLowerCase() === 'delivered';
+      const frozenDate = isDelivered ? (order.delivered_at || order.updated_at) : order.updated_at;
+      return {
+        ...order,
+        delivered_at: isDelivered ? frozenDate : order.delivered_at,
+        updated_at: isDelivered ? frozenDate : order.updated_at
+      };
+    });
+
     return res.status(200).json({
       success: true,
       data: {
-        orders,
+        orders: formattedOrders,
         pagination: {
           page: Number(page),
           limit: take,
@@ -1083,13 +1093,19 @@ const getOrdersWithPagination = async (req, res) => {
       },
     });
 
-    // Map orders to explicitly include timestamp fields
-    const formattedOrders = orders.map(order => ({
-      ...order,
-      verification_assigned_at: order.verification_assigned_at,
-      delivery_assigned_at: order.delivery_assigned_at,
-      recovery_assigned_at: order.recovery_assigned_at
-    }));
+    // Map orders to explicitly include timestamp fields and freeze dates for delivered orders
+    const formattedOrders = orders.map(order => {
+      const isDelivered = order.is_delivered || (order.status || '').toLowerCase() === 'delivered';
+      const frozenDate = isDelivered ? (order.delivered_at || order.updated_at) : order.updated_at;
+      return {
+        ...order,
+        delivered_at: isDelivered ? frozenDate : order.delivered_at,
+        updated_at: isDelivered ? frozenDate : order.updated_at,
+        verification_assigned_at: order.verification_assigned_at,
+        delivery_assigned_at: order.delivery_assigned_at,
+        recovery_assigned_at: order.recovery_assigned_at
+      };
+    });
 
     let nextLastId = null;
     if (orders.length > 0) {

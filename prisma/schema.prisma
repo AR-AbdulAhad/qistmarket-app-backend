@@ -189,6 +189,7 @@ model Order {
   delivery_assigned_at     DateTime?
   recovery_assigned_at     DateTime?
   verification_assigned_at DateTime?
+  delivered_at             DateTime?
   dummyCustomer            DummyCustomer?        @relation("OrderDummyCustomer")
   delivery                 Delivery?             @relation("OrderDelivery")
   archived_deliveries      ArchivedDelivery[]    @relation("ArchivedOrderDeliveries")
