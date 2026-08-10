@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
+const { computeMetricsForPeriod } = require('./cashRegisterController');
 const { sendInstallmentLedger, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
@@ -281,11 +282,20 @@ const getDashboardStats = async (req, res) => {
         const weeklySales = await getSalesForTimeline(firstDayOfWeek);
         const monthlySales = await getSalesForTimeline(firstDayOfMonth);
 
-        // Financial Overview (using CashRegister table for latest snapshot)
-        const latestRegister = await prisma.cashRegister.findFirst({
-            where: { outlet_id },
-            orderBy: { date: 'desc' }
+        // Financial Overview (Live Today's Cash Register Snapshot)
+        const todayEnd = new Date(todayStart);
+        todayEnd.setHours(23, 59, 59, 999);
+
+        let todayRegister = await prisma.cashRegister.findUnique({
+            where: { outlet_id_date: { outlet_id, date: todayStart } }
         });
+
+        const liveMetrics = await computeMetricsForPeriod(outlet_id, todayStart, todayEnd);
+        const financialsSnapshot = {
+            ...(todayRegister || {}),
+            ...liveMetrics,
+            closing_cash: liveMetrics.closing_cash || liveMetrics.expected_cash || 0
+        };
 
         // ─── Installment Summary (Overall Cumulative Snapshot) ──────────────────────────────────────
         const deliveredOrders = await prisma.order.findMany({
@@ -411,14 +421,7 @@ const getDashboardStats = async (req, res) => {
                     pendingInstallmentCount,
                     ordersWithPendingInstallments
                 },
-                financials: latestRegister || {
-                    down_payments: 0,
-                    installments_received: 0,
-                    cash_from_recovery: 0,
-                    cash_from_delivery: 0,
-                    expenses: 0,
-                    closing_cash: 0
-                },
+                financials: financialsSnapshot,
                 todayIncrement,
                 graphData
             }
@@ -547,8 +550,31 @@ const verifyCashSubmissionOTP = async (req, res) => {
             });
         }
 
-        const totalAmount = histories.reduce((sum, h) => sum + h.amount_submitted, 0);
-        await updateCashRegister(null, outletId, 'cash_from_delivery', totalAmount, 'add');
+        let recoveryTotal = 0;
+        let deliveryTotal = 0;
+
+        for (const h of histories) {
+            const officer = await prisma.user.findUnique({
+                where: { id: h.cash_in_hand.officer_id },
+                include: { role: true }
+            });
+            const roleId = officer?.role_id;
+            const roleName = (officer?.role?.name || '').toLowerCase();
+            if (roleId === 3 || roleName.includes('recovery')) {
+                recoveryTotal += h.amount_submitted;
+            } else {
+                deliveryTotal += h.amount_submitted;
+            }
+        }
+
+        if (recoveryTotal > 0) {
+            await updateCashRegister(null, outletId, 'cash_from_recovery', recoveryTotal, 'add');
+        }
+        if (deliveryTotal > 0) {
+            await updateCashRegister(null, outletId, 'cash_from_delivery', deliveryTotal, 'add');
+        }
+
+        const totalAmount = recoveryTotal + deliveryTotal;
 
         if (histories.length > 0) {
             const officerId = histories[0].cash_in_hand.officer_id;
@@ -1822,6 +1848,20 @@ const verifyInstallmentPayment = async (req, res) => {
             data: {
                 ledger_rows: rows,
                 updated_at: now()   // ✅ explicit updated_at
+            }
+        });
+
+        // ✅ Create OrderPayment record so computeMetricsForPeriod can track it
+        await prisma.orderPayment.create({
+            data: {
+                order_id: order.id,
+                paymentType: 'installment',
+                monthNumber: parseInt(month_number),
+                amount: parseFloat(payingNow),
+                paymentMethod: payment_method,
+                collectedBy_id: req.user.id,
+                created_at: now(),
+                paidAt: now()
             }
         });
 

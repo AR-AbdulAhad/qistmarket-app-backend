@@ -922,9 +922,21 @@ const getOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-
-              where['updated_at'] = range;
-            }
+            // Delivered/completed orders display delivered_at (frozen at delivery
+            // time) instead of updated_at — see getOrders' formattedOrders below
+            // and OrderList.tsx's Activity Date column. Filtering on raw
+            // updated_at alone let rows with a stale delivered_at but a recently
+            // bumped updated_at (or vice versa) slip into the wrong month.
+            const isDeliveredCond = { OR: [{ status: 'delivered' }, { is_delivered: true }] };
+            const dateOr = {
+              OR: [
+                { AND: [isDeliveredCond, { delivered_at: range }] },
+                { AND: [isDeliveredCond, { delivered_at: null }, { updated_at: range }] },
+                { AND: [{ NOT: isDeliveredCond }, { updated_at: range }] },
+              ],
+            };
+            where.AND = [...(where.AND || []), dateOr];
+          }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
         }
@@ -2390,9 +2402,20 @@ const getVerificationOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-
-              where['updated_at'] = range;
-            }
+            // Same delivered_at-vs-updated_at fix as getOrders/getDeliveredOrders —
+            // these completed orders show delivered_at in the Activity Date column.
+            const isDeliveredCond = { OR: [{ status: 'delivered' }, { is_delivered: true }] };
+            where.AND = [
+              ...(where.AND || []),
+              {
+                OR: [
+                  { AND: [isDeliveredCond, { delivered_at: range }] },
+                  { AND: [isDeliveredCond, { delivered_at: null }, { updated_at: range }] },
+                  { AND: [{ NOT: isDeliveredCond }, { updated_at: range }] },
+                ],
+              },
+            ];
+          }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
         }
@@ -2964,9 +2987,15 @@ const getDeliveredOrders = async (req, res) => {
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
           if (range) {
-
-              where['updated_at'] = range;
-            }
+            // Every row here is already status:'delivered', and the UI displays
+            // delivered_at (falling back to updated_at) as the Activity Date —
+            // see OrderList.tsx. Filter on the same field so "Month" only ever
+            // returns rows the UI actually shows as delivered this month.
+            where.AND = [
+              ...(where.AND || []),
+              { OR: [{ delivered_at: range }, { AND: [{ delivered_at: null }, { updated_at: range }] }] },
+            ];
+          }
         } else if (key !== 'startDate' && key !== 'endDate') {
           where[key] = { contains: value };
         }

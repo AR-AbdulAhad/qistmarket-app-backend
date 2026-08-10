@@ -2,6 +2,7 @@ const prisma = require('../../lib/prisma');
 const crypto = require('crypto');
 const { logAction } = require('../utils/auditLogger');
 const { generateDqr } = require('../utils/smartPayGateway');
+const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 
 const now = () => new Date();
 
@@ -451,26 +452,56 @@ const submitBankDeposit = async (req, res) => {
         let deposit;
 
         if (payment_method === '1bill' || payment_method === 'qr_payment') {
-            if (!accountant_id) {
-                return res.status(400).json({ success: false, message: 'Please select an accountant.' });
-            }
-
-            const accountant = await prisma.user.findFirst({
-                where: { id: parseInt(accountant_id), role: { name: 'Accountant' } },
-                select: { id: true, full_name: true, phone: true, bill_consumer_number: true, smart_pay_consumer_number: true }
+            const submittingUser = await prisma.user.findUnique({
+                where: { id: req.user.id },
+                include: { outlet: true }
             });
-            if (!accountant) {
-                return res.status(404).json({ success: false, message: 'Accountant not found.' });
+            if (!submittingUser) {
+                return res.status(404).json({ success: false, message: 'Submitting user not found.' });
             }
 
-            const consumerNumber = payment_method === '1bill' ? accountant.bill_consumer_number : accountant.smart_pay_consumer_number;
+            let billConsumerNumber = submittingUser.bill_consumer_number;
+            let smartPayConsumerNumber = submittingUser.smart_pay_consumer_number;
+
+            if (!billConsumerNumber || !smartPayConsumerNumber) {
+                if (!billConsumerNumber) {
+                    billConsumerNumber = await generateConsumerNumber(null, submittingUser.phone || '03000000000');
+                }
+                if (!smartPayConsumerNumber) {
+                    smartPayConsumerNumber = await generateSmartPayConsumerNumber(null, submittingUser.phone || '03000000000');
+                }
+
+                await prisma.user.update({
+                    where: { id: submittingUser.id },
+                    data: {
+                        bill_consumer_number: billConsumerNumber,
+                        smart_pay_consumer_number: smartPayConsumerNumber
+                    }
+                });
+            }
+
+            const consumerNumber = payment_method === '1bill' ? billConsumerNumber : smartPayConsumerNumber;
             if (!consumerNumber) {
-                return res.status(400).json({ success: false, message: 'This accountant has no consumer number configured for this method.' });
+                return res.status(400).json({ success: false, message: 'Failed to obtain consumer number for this method.' });
             }
 
-            const beforeRow = await prisma.consumerNumber.findUnique({ where: { consumer_number: consumerNumber } });
+            let beforeRow = await prisma.consumerNumber.findUnique({ where: { consumer_number: consumerNumber } });
             if (!beforeRow) {
-                return res.status(500).json({ success: false, message: 'Consumer number record missing for this accountant. Contact support.' });
+                const dueDate = new Date();
+                dueDate.setFullYear(dueDate.getFullYear() + 10);
+                beforeRow = await prisma.consumerNumber.create({
+                    data: {
+                        consumer_number: consumerNumber,
+                        user_id: submittingUser.id,
+                        type: 'officer_cash',
+                        customer_name: submittingUser.full_name,
+                        mobile_number: submittingUser.phone || '03000000000',
+                        amount_due: 0,
+                        billing_month: '2608',
+                        due_date: dueDate,
+                        bill_status: 'P'
+                    }
+                });
             }
 
             const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -478,7 +509,7 @@ const submitBankDeposit = async (req, res) => {
 
             const claimed = await tryReserveConsumerNumber(consumerNumber, amountFloat, expiresAt, placeholderRef);
             if (!claimed) {
-                return res.status(409).json({ success: false, message: 'This accountant already has a pending request. Please pick another accountant or wait for it to clear.' });
+                return res.status(409).json({ success: false, message: 'You already have a pending request for this payment method. Please complete or cancel it before submitting a new one.' });
             }
 
             // Best-effort: the slot we just claimed was free, meaning any earlier
@@ -496,11 +527,12 @@ const submitBankDeposit = async (req, res) => {
 
             let qrImageBase64 = null;
             if (payment_method === 'qr_payment') {
+                const outletDisplayName = submittingUser.outlet?.name ? `${submittingUser.outlet.name} (${submittingUser.full_name})` : submittingUser.full_name;
                 const dqr = await generateDqr({
                     consumerNumber,
-                    consumerDetail: accountant.full_name,
+                    consumerDetail: outletDisplayName,
                     amount: amountFloat,
-                    cellNo: accountant.phone,
+                    cellNo: submittingUser.phone || '03000000000',
                     referenceInfo: `BDR-OUTLET-${outletId || 'HQ'}-${Date.now()}`
                 });
                 if (!dqr.success) {
@@ -519,20 +551,24 @@ const submitBankDeposit = async (req, res) => {
                 qrImageBase64 = dqr.qrImageBase64;
             }
 
+            const methodPrefix = payment_method === '1bill' ? '1B' : 'QR';
+            const generatedVoucherId = `VCH-${methodPrefix}-${Date.now().toString().slice(-6)}`;
+            const generatedTransactionId = `${methodPrefix}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+
             deposit = await prisma.bankDepositRequest.create({
                 data: {
                     amount: amountFloat,
                     payment_method,
+                    receipt_id: receipt_id || generatedVoucherId,
+                    transaction_id: generatedTransactionId,
                     status: 'pending',
                     outlet_id: outletId,
                     submitted_by_id: req.user.id,
-                    accountant_id: accountant.id,
+                    accountant_id: null,
                     consumer_number: consumerNumber,
                     qr_image_base64: qrImageBase64,
                     expires_at: expiresAt,
-                    created_at: now()   // ✅ explicit created_at — schema @default(now()) runs DB-side and
-                                        // bypasses the app's PKT Date patch (lib/prisma.js), which would
-                                        // otherwise leave created_at 5 hours behind expires_at/due_date.
+                    created_at: now()   // ✅ explicit created_at
                 }
             });
 
@@ -546,22 +582,22 @@ const submitBankDeposit = async (req, res) => {
             }
         } else {
             // manual_deposit — same as before, plus a self-generated transaction_id
-            // (no payment gateway/webhook involved here, so there's nothing to wait on).
             const manualTransactionId = `MD-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+            const manualVoucherId = `VCH-MD-${Date.now().toString().slice(-6)}`;
             deposit = await prisma.$transaction(async (tx) => {
                 const newDeposit = await tx.bankDepositRequest.create({
                     data: {
                         amount: amountFloat,
                         bank_account_id: bank_account_id ? parseInt(bank_account_id) : null,
                         payment_method,
-                        receipt_id,
+                        receipt_id: receipt_id || manualVoucherId,
                         receipt_photo_url,
                         description,
                         status: 'pending',
                         outlet_id: outletId,
                         submitted_by_id: req.user.id,
                         transaction_id: manualTransactionId,
-                        created_at: now()   // ✅ explicit created_at — see note in the 1bill/qr branch above
+                        created_at: now()   // ✅ explicit created_at
                     }
                 });
 

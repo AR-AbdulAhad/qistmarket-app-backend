@@ -491,22 +491,36 @@ model ScheduledReportConfig {
 }
 
 model CashRegister {
-  id                    Int      @id @default(autoincrement())
-  outlet_id             Int
-  date                  DateTime
-  opening_cash          Float    @default(0)
-  down_payments         Float    @default(0)
-  installments_received Float    @default(0)
-  cash_from_recovery    Float    @default(0)
-  cash_from_delivery    Float    @default(0)
-  expenses              Float    @default(0)
-  closing_cash          Float    @default(0)
-  created_at            DateTime @default(now())
-  updated_at            DateTime @updatedAt
-  vendor_payments       Float    @default(0)
-  cash_transferred_in   Float    @default(0)
-  cash_transferred_out  Float    @default(0)
-  outlet                Outlet   @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
+  id                      Int       @id @default(autoincrement())
+  outlet_id               Int
+  date                    DateTime
+  opening_cash            Float     @default(0)
+  down_payments           Float     @default(0)
+  installments_received   Float     @default(0)
+  cash_from_recovery      Float     @default(0)
+  cash_from_delivery      Float     @default(0)
+  expenses                Float     @default(0)
+  vendor_payments         Float     @default(0)
+  cash_transferred_in     Float     @default(0)
+  cash_transferred_out    Float     @default(0)
+  closing_cash            Float     @default(0)
+  physical_cash           Float?
+  expected_cash           Float     @default(0)
+  difference              Float     @default(0)
+  difference_reason       String?   @db.Text
+  manager_approval_status String    @default("pending")
+  approved_by_user_id     Int?
+  approved_at             DateTime?
+  register_status         String    @default("open")
+  is_locked               Boolean   @default(false)
+  locked_at               DateTime?
+  settlement_number       String?
+  settlement_status       String?
+  digital_bank_total      Float     @default(0)
+  digital_1bill_total     Float     @default(0)
+  created_at              DateTime  @default(now())
+  updated_at              DateTime  @updatedAt
+  outlet                  Outlet    @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
 
   @@unique([outlet_id, date])
   @@index([outlet_id])
@@ -1340,6 +1354,8 @@ model SecurityLog {
   target_type String?
   ip_address  String?
   device_info String?  @db.Text
+  old_value   Json?
+  new_value   Json?
   created_at  DateTime @default(now())
   outlet      Outlet?  @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   user        User     @relation(fields: [user_id], references: [id])
