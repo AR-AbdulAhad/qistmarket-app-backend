@@ -246,7 +246,7 @@ const getOutletRankings = async (req, res) => {
         const outlets = await prisma.outlet.findMany({ where: { type: { not: 'warehouse' } }, select: { id: true, name: true, code: true } });
         const orders = await prisma.order.findMany({
             where: { outlet_id: { in: outlets.map((o) => o.id) }, status: { notIn: ['Cancelled', 'Rejected'] }, created_at: { gte: startOfMonth } },
-            select: { outlet_id: true, total_amount: true, is_delivered: true, installment_ledger: { select: { ledger_rows: true } } },
+            select: { outlet_id: true, total_amount: true, is_delivered: true, status: true, installment_ledger: { select: { ledger_rows: true } } },
         });
 
         const stats = {};
@@ -255,18 +255,22 @@ const getOutletRankings = async (req, res) => {
         for (const order of orders) {
             const entry = stats[order.outlet_id];
             if (!entry) continue;
-            entry.totalSales += order.total_amount || 0;
-            if (order.is_delivered) {
+
+            // Total Sales must only reflect orders that have actually been delivered —
+            // pending/approved/picked orders haven't generated real sales yet.
+            const isDelivered = order.status === 'delivered' || order.is_delivered;
+            if (isDelivered) {
+                entry.totalSales += order.total_amount || 0;
                 entry.customerCount += 1;
             }
 
             const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
             for (const row of rows) {
                 const amount = parseFloat(row.amount || row.dueAmount || 0);
+                // Count partial payments too, not just fully-paid rows, so recovery % isn't undercounted.
+                const paidAmount = parseFloat(row.paid_amount || (row.status === 'paid' ? amount : 0)) || 0;
                 entry.dueAmount += amount;
-                if (row.status === 'paid') {
-                    entry.recoveredAmount += amount;
-                }
+                entry.recoveredAmount += Math.min(paidAmount, amount);
             }
         }
 

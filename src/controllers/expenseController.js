@@ -5,6 +5,10 @@ const { logAction } = require('../utils/auditLogger');
 // Helper for current timestamp
 const now = () => new Date();
 
+// Edit/Delete are only allowed within 3 days of the voucher's creation
+const EDIT_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const isWithinEditWindow = (voucher) => (now() - new Date(voucher.created_at)) <= EDIT_WINDOW_MS;
+
 // Helper to generate sequential Voucher Number: EV-YYYY-XXXX
 const generateVoucherNumber = async () => {
     const nowDate = new Date();
@@ -111,6 +115,9 @@ const deleteExpenseVoucher = async (req, res) => {
             if (!voucher || voucher.outlet_id !== outlet_id) {
                 throw new Error('Voucher not found');
             }
+            if (!isWithinEditWindow(voucher)) {
+                throw new Error('EDIT_WINDOW_EXPIRED');
+            }
 
             await tx.expenseVoucher.delete({ where: { id: parseInt(id) } });
 
@@ -121,8 +128,8 @@ const deleteExpenseVoucher = async (req, res) => {
         });
 
         await logAction(
-            req, 
-            'EXPENSE_DELETION', 
+            req,
+            'EXPENSE_DELETION',
             `Expense voucher ${result.voucher_number} (PKR ${result.total_amount}) was deleted.`,
             result.id,
             'ExpenseVoucher'
@@ -130,7 +137,104 @@ const deleteExpenseVoucher = async (req, res) => {
 
         res.json({ success: true, message: 'Voucher deleted successfully.' });
     } catch (error) {
+        if (error.message === 'EDIT_WINDOW_EXPIRED') {
+            return res.status(403).json({ success: false, message: 'This voucher is more than 3 days old and can no longer be deleted.' });
+        }
         console.error('deleteExpenseVoucher error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getExpenseById = async (req, res) => {
+    const { id } = req.params;
+    const { outlet_id } = req.user;
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+
+    try {
+        const voucher = await prisma.expenseVoucher.findUnique({
+            where: { id: parseInt(id) },
+            include: { items: true }
+        });
+
+        if (!voucher || voucher.outlet_id !== outlet_id) {
+            return res.status(404).json({ success: false, message: 'Voucher not found.' });
+        }
+
+        res.json({ success: true, voucher, editable: isWithinEditWindow(voucher) });
+    } catch (error) {
+        console.error('getExpenseById error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const updateExpenseVoucher = async (req, res) => {
+    const { id } = req.params;
+    const { outlet_id } = req.user;
+    const { items, payment_method, date, notes } = req.body;
+
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+    if (!items || !items.length) return res.status(400).json({ success: false, message: 'At least one expense item is required.' });
+
+    try {
+        const result = await prisma.$transaction(async (tx) => {
+            const voucher = await tx.expenseVoucher.findUnique({ where: { id: parseInt(id) } });
+            if (!voucher || voucher.outlet_id !== outlet_id) {
+                throw new Error('Voucher not found');
+            }
+            if (!isWithinEditWindow(voucher)) {
+                throw new Error('EDIT_WINDOW_EXPIRED');
+            }
+
+            const oldTotal = voucher.total_amount;
+            const newTotal = items.reduce((sum, item) => sum + parseFloat(item.amount), 0);
+
+            // Replace line items wholesale
+            await tx.expenseItem.deleteMany({ where: { voucher_id: voucher.id } });
+
+            const updated = await tx.expenseVoucher.update({
+                where: { id: voucher.id },
+                data: {
+                    total_amount: newTotal,
+                    payment_method: payment_method || voucher.payment_method,
+                    date: date ? new Date(date) : voucher.date,
+                    notes,
+                    updated_at: now(),
+                    items: {
+                        create: items.map(item => ({
+                            category: item.category || "General",
+                            amount: parseFloat(item.amount),
+                            description: item.description
+                        }))
+                    }
+                },
+                include: { items: true }
+            });
+
+            // Adjust cash register by the delta between old and new totals
+            const delta = newTotal - oldTotal;
+            if (delta > 0) {
+                await updateCashRegister(tx, outlet_id, 'expenses', delta, 'add');
+            } else if (delta < 0) {
+                await updateCashRegister(tx, outlet_id, 'expenses', Math.abs(delta), 'subtract');
+            }
+
+            return updated;
+        });
+
+        await logAction(
+            req,
+            'EXPENSE_UPDATE',
+            `Expense voucher ${result.voucher_number} updated. New total PKR ${result.total_amount}.`,
+            result.id,
+            'ExpenseVoucher'
+        );
+
+        res.json({ success: true, voucher: result });
+    } catch (error) {
+        if (error.message === 'EDIT_WINDOW_EXPIRED') {
+            return res.status(403).json({ success: false, message: 'This voucher is more than 3 days old and can no longer be edited.' });
+        }
+        console.error('updateExpenseVoucher error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -181,7 +285,9 @@ const getExpenseSummary = async (req, res) => {
 
 module.exports = {
     getExpenses,
+    getExpenseById,
     createExpenseVoucher,
+    updateExpenseVoucher,
     deleteExpenseVoucher,
     getExpenseSummary
 };

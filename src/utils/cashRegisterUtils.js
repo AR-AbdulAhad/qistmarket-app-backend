@@ -19,14 +19,14 @@ const updateCashRegister = async (tx, outletId, field, amount, operation) => {
     today.setHours(0, 0, 0, 0);
 
     const val = parseFloat(amount);
-    const validFields = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery', 'expenses', 'vendor_payments'];
-    
+    const validFields = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery', 'expenses', 'vendor_payments', 'vendor_receipts'];
+
     if (!validFields.includes(field)) {
         throw new Error(`Invalid CashRegister field: ${field}`);
     }
 
     // Determine impact on closing_cash.
-    const inflows = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery'];
+    const inflows = ['down_payments', 'installments_received', 'cash_from_recovery', 'cash_from_delivery', 'vendor_receipts'];
     const outflows = ['expenses', 'vendor_payments'];
 
     // We use a find-create logic to ensure the row exists.

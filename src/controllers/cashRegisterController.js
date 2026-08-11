@@ -197,6 +197,27 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
         }
     });
 
+    // 6b. Generic vendor ledger cash transactions (Manage Vendors > Record Payment)
+    // 'debit'  = Payment Out to Vendor (cash leaves the drawer)
+    // 'credit' = Payment In from Vendor (cash enters the drawer)
+    const vendorCashTransactions = await prisma.vendorCashTransaction.findMany({
+        where: {
+            created_at: dateFilter,
+            vendor: { outlet_id: outletId }
+        },
+        select: { type: true, amount: true }
+    });
+
+    let vendorReceiptsCash = 0;
+    vendorCashTransactions.forEach(vt => {
+        const amt = parseFloat(vt.amount || 0);
+        if (vt.type === 'debit') {
+            vendorPaymentsCash += amt;
+        } else if (vt.type === 'credit') {
+            vendorReceiptsCash += amt;
+        }
+    });
+
     // 7. Outflows: Customer Refunds
     const customerRefunds = await prisma.returnExchange.findMany({
         where: {
@@ -228,7 +249,7 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
 
     // Compute Master Formula:
     // Expected Cash = Opening Cash + Cash Inflows - Cash Outflows
-    const totalCashIn = downPaymentsCash + installmentsCash + cashFromRecovery + cashFromDelivery + cashTransferredIn;
+    const totalCashIn = downPaymentsCash + installmentsCash + cashFromRecovery + cashFromDelivery + vendorReceiptsCash + cashTransferredIn;
     const totalCashOut = expensesCash + vendorPaymentsCash + refundsCash + cashTransferredOut;
     const expectedCash = openingCash + totalCashIn - totalCashOut;
 
@@ -240,6 +261,7 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
         cash_from_delivery: cashFromDelivery,
         expenses: expensesCash + refundsCash,
         vendor_payments: vendorPaymentsCash,
+        vendor_receipts: vendorReceiptsCash,
         cash_transferred_in: cashTransferredIn,
         cash_transferred_out: cashTransferredOut,
         closing_cash: expectedCash,

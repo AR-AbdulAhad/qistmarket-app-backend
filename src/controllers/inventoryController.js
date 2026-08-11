@@ -131,7 +131,7 @@ const getInventory = async (req, res) => {
         const productSearchWhere = {
             outlet_id,
             is_used: false,
-            status: { not: 'Used Stock' }, 
+            status: { not: 'Used Stock' },
             OR: search ? [
                 { product_name: { contains: search } },
                 { imei_serial: { contains: search } },
@@ -139,35 +139,47 @@ const getInventory = async (req, res) => {
             ] : undefined
         };
 
-        // Get products ordered by stock count descending for pagination
-        const distinctProducts = await prisma.outletInventory.groupBy({
-            by: ['product_name'],
+        // Fetch every matching row for this outlet — a product's real "quantity" is the
+        // SUM of its rows' `quantity` field, not the row count (a bulk row can hold
+        // quantity > 1 on its own). Sorting/paginating by row count breaks ranking for
+        // those, so instead we group + rank in JS across the FULL set first, then
+        // paginate the already-globally-sorted product groups.
+        const allMatchingRows = await prisma.outletInventory.findMany({
             where: productSearchWhere,
-            _count: { product_name: true },
-            orderBy: { _count: { product_name: 'desc' } },
-            skip,
-            take
-        });
-
-        const totalProductsCount = await prisma.outletInventory.groupBy({
-            by: ['product_name'],
-            where: productSearchWhere,
-            _count: true
-        });
-        const total = totalProductsCount.length;
-
-        const productNames = distinctProducts.map(p => p.product_name);
-
-        // 2. Fetch all records for these product names (excluding Pending Transfer)
-        const inventory = await prisma.outletInventory.findMany({
-            where: {
-                outlet_id,
-                status: { not: 'Used Stock' },
-                is_used: false,
-                product_name: { in: productNames }
-            },
             orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
         });
+
+        const groupMap = new Map();
+        for (const row of allMatchingRows) {
+            let grp = groupMap.get(row.product_name);
+            if (!grp) {
+                grp = { product_name: row.product_name, inStockQty: 0 };
+                groupMap.set(row.product_name, grp);
+            }
+            if (row.status === 'In Stock' || row.status === 'Used Stock') {
+                grp.inStockQty += row.quantity || 0;
+            }
+        }
+
+        // Same ordering rule the UI uses: any in-stock qty first (highest first), zero-stock products last.
+        const sortedGroups = Array.from(groupMap.values()).sort((a, b) => {
+            if (b.inStockQty === 0 && a.inStockQty > 0) return -1;
+            if (a.inStockQty === 0 && b.inStockQty > 0) return 1;
+            return b.inStockQty - a.inStockQty;
+        });
+
+        const total = sortedGroups.length;
+        const productNames = sortedGroups.slice(skip, skip + take).map(g => g.product_name);
+        const productNameSet = new Set(productNames);
+
+        // 2. Rows for just this page's products, preserving the global rank order.
+        const rowsByProduct = new Map();
+        for (const row of allMatchingRows) {
+            if (!productNameSet.has(row.product_name)) continue;
+            if (!rowsByProduct.has(row.product_name)) rowsByProduct.set(row.product_name, []);
+            rowsByProduct.get(row.product_name).push(row);
+        }
+        const inventory = productNames.flatMap(name => rowsByProduct.get(name) || []);
 
         // 3. Calculate Global Stats (Exact total count instead of unique product count)
         const [totalStock, inStock, sold, outOfStock] = await Promise.all([

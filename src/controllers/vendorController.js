@@ -168,26 +168,37 @@ const recordVendorTransaction = async (req, res) => {
         if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
 
         const isPaymentOut = type === 'out';
-        const newBalance = isPaymentOut ? vendor.balance - parseFloat(amount) : vendor.balance + parseFloat(amount);
+        const amtNum = parseFloat(amount);
+        const newBalance = isPaymentOut ? vendor.balance - amtNum : vendor.balance + amtNum;
         const transType = isPaymentOut ? 'debit' : 'credit';
         const description = notes || (isPaymentOut ? 'Payment Out to Vendor' : 'Payment In from Vendor');
 
-        await prisma.$transaction([
-            prisma.vendor.update({
+        await prisma.$transaction(async (tx) => {
+            await tx.vendor.update({
                 where: { id: vendorId },
-                data: { balance: newBalance, updated_at: new Date() }
-            }),
-            prisma.vendorCashTransaction.create({
+                data: { balance: newBalance, updated_at: now() }
+            });
+
+            await tx.vendorCashTransaction.create({
                 data: {
                     vendor_id: vendorId,
                     type: transType,
-                    amount: parseFloat(amount),
+                    amount: amtNum,
                     balance_after: newBalance,
                     description,
                     created_by_id: req.user.id
                 }
-            })
-        ]);
+            });
+
+            // Reflect the real cash movement in the outlet's Cash Register
+            if (vendor.outlet_id) {
+                if (isPaymentOut) {
+                    await updateCashRegister(tx, vendor.outlet_id, 'vendor_payments', amtNum, 'add');
+                } else {
+                    await updateCashRegister(tx, vendor.outlet_id, 'vendor_receipts', amtNum, 'add');
+                }
+            }
+        });
 
         res.json({ success: true, message: `Payment ${type.toUpperCase()} recorded successfully.`, newBalance });
     } catch (error) {
@@ -1046,12 +1057,46 @@ const getVendorSummary = async (req, res) => {
 const getPayments = async (req, res) => {
     const { outlet_id } = req.user;
     try {
-        const payments = await prisma.vendorPayment.findMany({
-            where: { outlet_id },
-            include: { vendor: true },
-            orderBy: { created_at: 'desc' }
-        });
-        res.json({ success: true, payments });
+        const [invoicePayments, ledgerTransactions] = await Promise.all([
+            prisma.vendorPayment.findMany({
+                where: { outlet_id },
+                include: { vendor: true },
+                orderBy: { created_at: 'desc' }
+            }),
+            prisma.vendorCashTransaction.findMany({
+                where: { vendor: { outlet_id } },
+                include: { vendor: true },
+                orderBy: { created_at: 'desc' }
+            })
+        ]);
+
+        // Unify both sources into one chronological feed for the payments history table.
+        const merged = [
+            ...invoicePayments.map((p) => ({
+                id: `p-${p.id}`,
+                vendor_id: p.vendor_id,
+                vendor_name: p.vendor_name,
+                amount: p.amount,
+                payment_method: p.payment_method,
+                notes: p.notes,
+                type: 'out',
+                source: 'invoice',
+                created_at: p.created_at
+            })),
+            ...ledgerTransactions.map((t) => ({
+                id: `t-${t.id}`,
+                vendor_id: t.vendor_id,
+                vendor_name: t.vendor?.name || 'Unknown Vendor',
+                amount: t.amount,
+                payment_method: 'Cash',
+                notes: t.description,
+                type: t.type === 'credit' ? 'in' : 'out',
+                source: 'ledger',
+                created_at: t.created_at
+            }))
+        ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+        res.json({ success: true, payments: merged });
     } catch (error) {
         console.error('getPayments error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });

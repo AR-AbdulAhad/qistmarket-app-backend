@@ -75,34 +75,21 @@ async function sendOrderAssignmentNotification(order, user, type, io = null) {
 }
 
 async function sendOrderTransferNotification(order, outletId, io = null) {
-  const users = await prisma.user.findMany({
-    where: { outlet_id: outletId },
-    select: { id: true }
-  });
-
   const title = 'New Order Transferred';
   const message = `Order ${order.order_ref} has been transferred to your outlet.`;
   const notificationType = 'order_transfer';
 
-  for (const user of users) {
-    // We only send to dashboard (Database + Socket.io), NOT to mobile app FCM
-    await notifyUser(user.id, title, message, notificationType, order.id, io);
-  }
+  // Dashboard (Database + Socket.io) only, scoped to Branch User / Sales Officer roles —
+  // NOT Recovery Officers or other roles at the outlet.
+  await notifyOutlet(outletId, title, message, notificationType, order.id, io);
 }
 
 async function sendOrderUntransferNotification(order, outletId, io = null) {
-  const users = await prisma.user.findMany({
-    where: { outlet_id: outletId },
-    select: { id: true }
-  });
-
   const title = 'Order Taken Back';
   const message = `Order ${order.order_ref} has been taken back from your outlet.`;
   const notificationType = 'order_untransfer';
 
-  for (const user of users) {
-    await notifyUser(user.id, title, message, notificationType, order.id, io);
-  }
+  await notifyOutlet(outletId, title, message, notificationType, order.id, io);
 }
 
 /**

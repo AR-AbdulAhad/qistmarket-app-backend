@@ -501,6 +501,7 @@ model CashRegister {
   cash_from_delivery      Float     @default(0)
   expenses                Float     @default(0)
   vendor_payments         Float     @default(0)
+  vendor_receipts         Float     @default(0)
   cash_transferred_in     Float     @default(0)
   cash_transferred_out    Float     @default(0)
   closing_cash            Float     @default(0)
