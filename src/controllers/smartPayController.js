@@ -68,7 +68,7 @@ const generateSmartPayQr = async (req, res) => {
         const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
         const name = order.verification?.purchaser?.name || order.customer_name;
 
-        let consumerNumber = "6002" + order.id.toString().padStart(4, '0');
+        let consumerNumber = "6500" + order.id.toString().padStart(4, '0');
         try {
             // Find the delivery's installment ledger
             const delivery = await prisma.delivery.findUnique({
@@ -79,7 +79,7 @@ const generateSmartPayQr = async (req, res) => {
                 const smartPayConsumer = await prisma.consumerNumber.findFirst({
                     where: {
                         ledger_id: delivery.installment_ledger.id,
-                        consumer_number: { startsWith: '6002' }
+                        consumer_number: { startsWith: '6500' }
                     }
                 });
                 if (smartPayConsumer) {

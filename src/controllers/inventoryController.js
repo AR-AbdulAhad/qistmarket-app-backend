@@ -8,9 +8,6 @@ const admin = require('firebase-admin');
 
 // ─── Firebase Init ────────────────────────────────────────────────
 if (!admin.apps.length) {
-  const _realDate = global._OriginalDate; // prisma.js ne set kiya hua hai
-  global.Date = _realDate;               // Firebase ke liye original date
-
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
@@ -18,8 +15,6 @@ if (!admin.apps.length) {
       privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
     }),
   });
-
-  global.Date = global._PKTDate;         // PKT date wapas
 }
 // ─────────────────────────────────────────────────────────────────
 
@@ -40,7 +35,6 @@ async function sendStockTransferOTPNotification(user, otp, recipientType, io = n
 
     if (!user?.fcm_token) return;
 
-    global.Date = global._OriginalDate;
     try {
         await admin.messaging().send({
             token: user.fcm_token,
@@ -53,10 +47,7 @@ async function sendStockTransferOTPNotification(user, otp, recipientType, io = n
         });
     } catch (fcmError) {
         console.error('FCM send failed for transfer OTP:', fcmError);
-    } finally {
-    // ─── PKT date wapas lagao ───────────────────────
-    global.Date = global._PKTDate;
-  }
+    }
 }
 
 

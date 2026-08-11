@@ -1629,7 +1629,7 @@ const getOutletInstallments = async (req, res) => {
             const totalMonths = installmentLedger.length || plan?.months || plan?.duration || order.months || 0;
             const allConsumers = ledgerModel?.consumer_numbers || [];
             const consumerNum = allConsumers.find(c => c.consumer_number?.startsWith('1017'))?.consumer_number || allConsumers[0]?.consumer_number || null;
-            const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6002'))?.consumer_number || null;
+            const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6500'))?.consumer_number || null;
 
             return {
                 order_id: order.id,
@@ -2532,7 +2532,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
 
                 const allConsumers = ledgerModel?.consumer_numbers || [];
                 const consumerNum = allConsumers.find(c => c.consumer_number?.startsWith('1017'))?.consumer_number || allConsumers[0]?.consumer_number || null;
-                const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6002'))?.consumer_number || null;
+                const smartpayConsumerNum = allConsumers.find(c => c.consumer_number?.startsWith('6500'))?.consumer_number || null;
 
                 const deviceStatus = device?.status || ledgerModel?.paytrigger_status || null;
                 allInstallments.push({

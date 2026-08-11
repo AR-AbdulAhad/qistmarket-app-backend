@@ -45,7 +45,7 @@ async function generateConsumerNumber(imei, mobile) {
     return candidate;
 }
 
-const SMARTPAY_PREFIX = '6002';
+const SMARTPAY_PREFIX = '6500';
 
 /**
  * Generate a unique SmartPay consumer number.

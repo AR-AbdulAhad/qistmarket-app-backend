@@ -17,9 +17,6 @@ const pt = require('../services/paytriggerService');
 
 // ─── Firebase Init ────────────────────────────────────────────────
 if (!admin.apps.length) {
-  const _realDate = global._OriginalDate; // prisma.js ne set kiya hua hai
-  global.Date = _realDate;               // Firebase ke liye original date
-
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
@@ -27,8 +24,6 @@ if (!admin.apps.length) {
       privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
     }),
   });
-
-  global.Date = global._PKTDate;         // PKT date wapas
 }
 // ─────────────────────────────────────────────────────────────────
 // Helper for current timestamp
@@ -47,7 +42,6 @@ async function sendCashSubmissionOTPNotification(user, otp, io = null) {
   }
 
   if (!user?.fcm_token) return;
-  global.Date = global._OriginalDate;
   try {
     await admin.messaging().send({
       token: user.fcm_token,
@@ -59,9 +53,6 @@ async function sendCashSubmissionOTPNotification(user, otp, io = null) {
     });
   } catch (fcmError) {
     console.error('FCM send failed for cash submission OTP:', fcmError);
-  } finally {
-    // ─── PKT date wapas lagao ───────────────────────
-    global.Date = global._PKTDate;
   }
 }
 
