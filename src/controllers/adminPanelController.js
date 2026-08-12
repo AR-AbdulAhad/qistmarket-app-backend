@@ -241,12 +241,30 @@ const getUnifiedRankings = async (req, res) => {
 const getOutletRankings = async (req, res) => {
     try {
         const now = new Date();
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        // `month` is 1-indexed from the client (1 = January), defaulting to the current month/year.
+        const year = parseInt(req.query.year) || now.getFullYear();
+        const month = req.query.month ? parseInt(req.query.month) : now.getMonth() + 1;
+        const startOfMonth = new Date(year, month - 1, 1);
+        const startOfNextMonth = new Date(year, month, 1);
 
         const outlets = await prisma.outlet.findMany({ where: { type: { not: 'warehouse' } }, select: { id: true, name: true, code: true } });
+
+        // The selected month must be scoped by DELIVERY activity (delivered_at, falling
+        // back to updated_at when null), not order creation date — this is the exact
+        // same rule the "Delivered Orders" list page uses (see getDeliveredOrders) so
+        // the ranking's counts/sales always agree with what that page shows for the month.
+        // An order created in a different month but delivered in the selected month must
+        // still count here; an order merely created in the selected month must not.
         const orders = await prisma.order.findMany({
-            where: { outlet_id: { in: outlets.map((o) => o.id) }, status: { notIn: ['Cancelled', 'Rejected'] }, created_at: { gte: startOfMonth } },
-            select: { outlet_id: true, total_amount: true, is_delivered: true, status: true, installment_ledger: { select: { ledger_rows: true } } },
+            where: {
+                outlet_id: { in: outlets.map((o) => o.id) },
+                status: 'delivered',
+                OR: [
+                    { delivered_at: { gte: startOfMonth, lt: startOfNextMonth } },
+                    { AND: [{ delivered_at: null }, { updated_at: { gte: startOfMonth, lt: startOfNextMonth } }] },
+                ],
+            },
+            select: { outlet_id: true, total_amount: true, installment_ledger: { select: { ledger_rows: true } } },
         });
 
         const stats = {};
@@ -256,13 +274,8 @@ const getOutletRankings = async (req, res) => {
             const entry = stats[order.outlet_id];
             if (!entry) continue;
 
-            // Total Sales must only reflect orders that have actually been delivered —
-            // pending/approved/picked orders haven't generated real sales yet.
-            const isDelivered = order.status === 'delivered' || order.is_delivered;
-            if (isDelivered) {
-                entry.totalSales += order.total_amount || 0;
-                entry.customerCount += 1;
-            }
+            entry.totalSales += order.total_amount || 0;
+            entry.customerCount += 1;
 
             const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
             for (const row of rows) {
@@ -282,7 +295,7 @@ const getOutletRankings = async (req, res) => {
         }).sort((a, b) => b.score - a.score)
           .map((s, idx) => ({ ...s, rank: idx + 1, tier: tierFor(s.score) }));
 
-        res.json({ success: true, data: ranked });
+        res.json({ success: true, data: ranked, month, year });
     } catch (error) {
         console.error('getOutletRankings error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });

@@ -3128,30 +3128,33 @@ const getReturnedOrders = async (req, res) => {
 
 const assignRecovery = async (req, res) => {
   const { id } = req.params;
-  const { user_id } = req.body;
+  const { user_id, action } = req.body;
 
   try {
+    const isUnassign = action === 'unassign';
+    if (!isUnassign && !user_id) {
+      return res.status(400).json({ success: false, message: 'user_id is required to assign a recovery officer.' });
+    }
+
     const updatedOrder = await prisma.order.update({
       where: { id: parseInt(id) },
-      data: {
-        recovery_officer_id: parseInt(user_id),
-        recovery_assigned_at: new Date(),
-        updated_at: new Date(),
-      },
+      data: isUnassign
+        ? { recovery_officer_id: null, recovery_assigned_at: null }
+        : { recovery_officer_id: parseInt(user_id), recovery_assigned_at: new Date() },
       include: {
         recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
       }
     });
 
-    // Send notification
+    // Send notification (assign only)
     const io = req.app.get('io');
-    if (updatedOrder.recovery_officer) {
+    if (!isUnassign && updatedOrder.recovery_officer) {
       await sendOrderAssignmentNotification(updatedOrder, updatedOrder.recovery_officer, 'recovery', io);
     }
 
     return res.status(200).json({
       success: true,
-      message: 'Recovery officer assigned successfully',
+      message: isUnassign ? 'Recovery officer unassigned successfully' : 'Recovery officer assigned successfully',
       data: { order: updatedOrder },
     });
   } catch (error) {
@@ -3161,34 +3164,39 @@ const assignRecovery = async (req, res) => {
 };
 
 const assignBulkRecovery = async (req, res) => {
-  const { order_ids, user_id } = req.body;
+  const { order_ids, user_id, action } = req.body;
 
   try {
+    const isUnassign = action === 'unassign';
+    if (!isUnassign && !user_id) {
+      return res.status(400).json({ success: false, message: 'user_id is required to assign a recovery officer.' });
+    }
+
     await prisma.order.updateMany({
       where: { id: { in: order_ids.map(Number) } },
-      data: {
-        recovery_officer_id: parseInt(user_id),
-        recovery_assigned_at: new Date(),
-        updated_at: new Date(),
-      },
+      data: isUnassign
+        ? { recovery_officer_id: null, recovery_assigned_at: null }
+        : { recovery_officer_id: parseInt(user_id), recovery_assigned_at: new Date() },
     });
 
-    // Send notifications for bulk recovery assignment
-    const io = req.app.get('io');
-    const updatedOrders = await prisma.order.findMany({
-      where: { id: { in: order_ids.map(Number) } },
-      include: { recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } } }
-    });
+    if (!isUnassign) {
+      // Send notifications for bulk recovery assignment
+      const io = req.app.get('io');
+      const updatedOrders = await prisma.order.findMany({
+        where: { id: { in: order_ids.map(Number) } },
+        include: { recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } } }
+      });
 
-    for (const order of updatedOrders) {
-      if (order.recovery_officer) {
-        await sendOrderAssignmentNotification(order, order.recovery_officer, 'recovery', io);
+      for (const order of updatedOrders) {
+        if (order.recovery_officer) {
+          await sendOrderAssignmentNotification(order, order.recovery_officer, 'recovery', io);
+        }
       }
     }
 
     return res.status(200).json({
       success: true,
-      message: `${order_ids.length} orders assigned for recovery`,
+      message: isUnassign ? `${order_ids.length} orders unassigned from recovery` : `${order_ids.length} orders assigned for recovery`,
     });
   } catch (error) {
     console.error('Assign bulk recovery error:', error);

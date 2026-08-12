@@ -395,37 +395,6 @@ const signup = async (req, res) => {
   const normalizedEmail = email ? email.toLowerCase().trim() : null;
 
   try {
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { username: normalizedUsername },
-          { cnic: normalizedCnic },
-          { phone: normalizedPhone },
-          ...(normalizedEmail ? [{ email: normalizedEmail }] : []),
-        ],
-      },
-    });
-
-    if (existingUser) {
-      if (existingUser.username === normalizedUsername) {
-        return res.status(409).json({ success: false, error: { code: 409, message: 'Username already exists.' } });
-      }
-      if (existingUser.cnic === normalizedCnic) {
-        return res.status(409).json({ success: false, error: { code: 409, message: 'CNIC already registered.' } });
-      }
-      if (existingUser.phone === normalizedPhone) {
-        return res.status(409).json({ success: false, error: { code: 409, message: 'Phone already registered.' } });
-      }
-      if (normalizedEmail && existingUser.email === normalizedEmail) {
-        return res.status(409).json({ success: false, error: { code: 409, message: 'Email already registered.' } });
-      }
-    }
-
-    const role = await prisma.role.findUnique({ where: { id: parseInt(role_id) } });
-    if (!role) {
-      return res.status(404).json({ success: false, error: { code: 404, message: 'Invalid role selected.' } });
-    }
-
     let hashedPassword = null;
     if (password) {
       const bcrypt = require('bcryptjs');
@@ -434,23 +403,63 @@ const signup = async (req, res) => {
 
     let user;
     try {
-      user = await prisma.user.create({
-        data: {
-          full_name,
-          username: normalizedUsername,
-          role_id: parseInt(role_id),
-          cnic: normalizedCnic,
-          phone: normalizedPhone,
-          email: normalizedEmail,
-          password_hash: hashedPassword,
-          outlet_id: outlet_id ? parseInt(outlet_id) : null,
-          status: 'active',
-          created_at: now(),
-          updated_at: now()
-        },
-        include: { role: true, outlet: true },
-      });
+      // Duplicate check + create run inside one Serializable transaction so two
+      // near-simultaneous signups for the same phone/CNIC/username can't both
+      // pass the check before either finishes creating — MySQL forces one of
+      // them to fail instead of silently letting the duplicate through. This
+      // matters because `phone`/`cnic` have no DB-level unique constraint (only
+      // `username`/`email` do), so without this the check-then-create sequence
+      // is a plain race condition.
+      user = await prisma.$transaction(async (tx) => {
+        const existingUser = await tx.user.findFirst({
+          where: {
+            OR: [
+              { username: normalizedUsername },
+              { cnic: normalizedCnic },
+              { phone: normalizedPhone },
+              ...(normalizedEmail ? [{ email: normalizedEmail }] : []),
+            ],
+          },
+        });
+
+        if (existingUser) {
+          let message = null;
+          if (existingUser.username === normalizedUsername) message = 'Username already exists.';
+          else if (existingUser.cnic === normalizedCnic) message = 'CNIC already registered.';
+          else if (existingUser.phone === normalizedPhone) message = 'Phone already registered.';
+          else if (normalizedEmail && existingUser.email === normalizedEmail) message = 'Email already registered.';
+
+          if (message) {
+            throw Object.assign(new Error(message), { httpStatus: 409 });
+          }
+        }
+
+        const role = await tx.role.findUnique({ where: { id: parseInt(role_id) } });
+        if (!role) {
+          throw Object.assign(new Error('Invalid role selected.'), { httpStatus: 404 });
+        }
+
+        return tx.user.create({
+          data: {
+            full_name,
+            username: normalizedUsername,
+            role_id: parseInt(role_id),
+            cnic: normalizedCnic,
+            phone: normalizedPhone,
+            email: normalizedEmail,
+            password_hash: hashedPassword,
+            outlet_id: outlet_id ? parseInt(outlet_id) : null,
+            status: 'active',
+            created_at: now(),
+            updated_at: now()
+          },
+          include: { role: true, outlet: true },
+        });
+      }, { isolationLevel: 'Serializable' });
     } catch (createError) {
+      if (createError.httpStatus) {
+        return res.status(createError.httpStatus).json({ success: false, error: { code: createError.httpStatus, message: createError.message } });
+      }
       if (createError.code === 'P2002') {
         const target = createError.meta?.target;
         const rawField = Array.isArray(target) ? target[0] : String(target || '');
