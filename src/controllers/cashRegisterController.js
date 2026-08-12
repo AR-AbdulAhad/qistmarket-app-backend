@@ -27,15 +27,27 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
         lte: endDate
     };
 
-    // 1. Fetch Previous Business Day's Closing Cash as Opening Cash
-    const previousRegister = await prisma.cashRegister.findFirst({
-        where: {
-            outlet_id: outletId,
-            date: { lt: startDate }
-        },
-        orderBy: { date: 'desc' }
-    });
-    const openingCash = previousRegister ? (previousRegister.closing_cash || 0) : 0;
+    // 1. Opening Cash = the TRUE cumulative net cash flow of every order/
+    // expense/payment strictly before `startDate`, computed live from source
+    // data — not a single persisted CashRegister row's `closing_cash` (which
+    // can be missing or stale if "Sync Daily Ledger" wasn't run every day).
+    // This is what makes "Expected Cash" correct for every filter: Today
+    // still carries everything before today, Week/Month carry everything
+    // before that window, and Custom carries everything before the chosen
+    // start date — not just the flow inside the selected window.
+    // Recursion bottoms out in exactly one extra call: the recursive
+    // invocation is given `startDate = EPOCH`, so its own `startDate > EPOCH`
+    // check is false and it returns 0 immediately without recursing further.
+    const EPOCH = new Date(0);
+    let openingCash = 0;
+    if (startDate > EPOCH) {
+        const priorPeriod = await computeMetricsForPeriod(
+            outletId,
+            EPOCH,
+            new Date(startDate.getTime() - 1)
+        );
+        openingCash = priorPeriod.expected_cash;
+    }
 
     // 2. Down Payments (Cash In)
     const downPaymentOrders = await prisma.order.findMany({
@@ -266,6 +278,10 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
         cash_transferred_out: cashTransferredOut,
         closing_cash: expectedCash,
         expected_cash: expectedCash,
+        // Net cash movement inside THIS selected window only (excludes opening
+        // cash carried over from before it) — shown alongside expected_cash so
+        // the UI can display both "moved during this period" and "overall".
+        period_net_change: totalCashIn - totalCashOut,
         digital_bank_total: downPaymentsBank + installmentsBank,
         digital_1bill_total: downPayments1Bill + installments1Bill
     };
@@ -302,13 +318,14 @@ const getCashRegister = async (req, res) => {
             end.setHours(23, 59, 59, 999);
         }
 
-        // Fetch registers history for Archives table
+        // Register Archives is a full history log, independent of the Master
+        // Ledger Cards' active date filter above — it must not collapse to a
+        // single row just because "Today" is selected. Capped to the most
+        // recent year of daily entries as a sane upper bound.
         const registers = await prisma.cashRegister.findMany({
-            where: {
-                outlet_id,
-                date: { gte: start, lte: end }
-            },
-            orderBy: { date: 'desc' }
+            where: { outlet_id },
+            orderBy: { date: 'desc' },
+            take: 365
         });
 
         // Compute metrics for the active filter range
@@ -615,8 +632,229 @@ const reopenRegister = async (req, res) => {
     }
 };
 
+/**
+ * GET /api/outlet/cash-register/history
+ * Register Archives, reshaped: one entry per CATEGORY (Down Payments,
+ * Installments, Recovery, Delivery, Cash from Vendor, Expenses, Vendor
+ * Payments), each carrying its own list of individual transactions
+ * (with real date+time) so the UI can render "category row → expand →
+ * full transaction history" instead of one wide row per calendar day.
+ * Always the outlet's full history (capped at the most recent 200
+ * transactions per category) — independent of any date filter, same as
+ * the previous Register Archives table.
+ */
+const MAX_HISTORY_PER_CATEGORY = 200;
+
+const getCashRegisterHistory = async (req, res) => {
+    const { outlet_id } = req.user;
+    if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
+
+    try {
+        // ── Down Payments (Cash channel only) ──────────────────────────
+        const downPaymentOrders = await prisma.order.findMany({
+            where: {
+                outlet_id,
+                advance_amount: { gt: 0 },
+            },
+            select: { id: true, order_ref: true, customer_name: true, advance_amount: true, channel: true, created_at: true },
+            orderBy: { created_at: 'desc' },
+            take: MAX_HISTORY_PER_CATEGORY
+        });
+        const downPayments = downPaymentOrders
+            .filter(o => {
+                const ch = (o.channel || 'Cash').toLowerCase();
+                return !ch.includes('bank') && !ch.includes('transfer') && !ch.includes('1bill') && !ch.includes('1link');
+            })
+            .map(o => ({
+                id: `dp-${o.id}`,
+                date: o.created_at,
+                title: o.customer_name || 'Customer',
+                subtitle: `Order ${o.order_ref} — Down Payment`,
+                amount: parseFloat(o.advance_amount || 0)
+            }));
+
+        // ── Installments Received (Cash-ish methods only) ──────────────
+        const installmentPayments = await prisma.orderPayment.findMany({
+            where: {
+                paymentType: 'installment',
+                order: { outlet_id }
+            },
+            select: {
+                id: true, amount: true, paymentMethod: true, paidAt: true, monthNumber: true,
+                order: { select: { order_ref: true, customer_name: true } }
+            },
+            orderBy: { paidAt: 'desc' },
+            take: MAX_HISTORY_PER_CATEGORY
+        });
+        const installmentsReceived = installmentPayments
+            .filter(p => {
+                const pm = (p.paymentMethod || 'Cash').toLowerCase();
+                return pm === 'cash' || pm === 'manual_deposit' || pm === 'recovery_cash' || pm === 'recovery cash' || !p.paymentMethod;
+            })
+            .map(p => ({
+                id: `inst-${p.id}`,
+                date: p.paidAt,
+                title: p.order?.customer_name || 'Customer',
+                subtitle: `Order ${p.order?.order_ref || 'N/A'} — Month ${p.monthNumber ?? '-'}`,
+                amount: parseFloat(p.amount || 0)
+            }));
+
+        // ── Cash from Recovery / Delivery Officers ─────────────────────
+        const verifiedSubmissions = await prisma.cashSubmissionHistory.findMany({
+            where: { outlet_id, status: 'paid' },
+            include: {
+                cash_in_hand: {
+                    include: { officer: { select: { full_name: true, username: true, role_id: true, role: { select: { name: true } } } } }
+                }
+            },
+            orderBy: { submission_date: 'desc' },
+            take: MAX_HISTORY_PER_CATEGORY
+        });
+
+        let recoverySource = verifiedSubmissions;
+        let usingFallback = false;
+        if (verifiedSubmissions.length === 0) {
+            usingFallback = true;
+        }
+
+        const cashFromRecovery = [];
+        const cashFromDelivery = [];
+
+        recoverySource.forEach(sub => {
+            const officer = sub.cash_in_hand?.officer;
+            const roleId = officer?.role_id;
+            const roleName = (officer?.role?.name || '').toLowerCase();
+            const entry = {
+                id: `sub-${sub.id}`,
+                date: sub.submission_date,
+                title: officer?.full_name || officer?.username || 'Officer',
+                subtitle: 'Cash Submission',
+                amount: parseFloat(sub.amount_submitted || 0)
+            };
+            if (roleId === 3 || roleName.includes('recovery')) cashFromRecovery.push(entry);
+            else cashFromDelivery.push(entry);
+        });
+
+        if (usingFallback) {
+            const cashInHandRecords = await prisma.cashInHand.findMany({
+                where: { outlet_id, status: { in: ['paid', 'accepted', 'approved', 'submitted', 'completed'] } },
+                include: { officer: { select: { full_name: true, username: true, role_id: true, role: { select: { name: true } } } } },
+                orderBy: { updated_at: 'desc' },
+                take: MAX_HISTORY_PER_CATEGORY
+            });
+            cashInHandRecords.forEach(c => {
+                const roleId = c.officer?.role_id;
+                const roleName = (c.officer?.role?.name || '').toLowerCase();
+                const entry = {
+                    id: `cih-${c.id}`,
+                    date: c.updated_at,
+                    title: c.officer?.full_name || c.officer?.username || 'Officer',
+                    subtitle: 'Cash in Hand',
+                    amount: parseFloat(c.submitted_amount || c.amount || 0)
+                };
+                if (roleId === 3 || roleName.includes('recovery')) cashFromRecovery.push(entry);
+                else cashFromDelivery.push(entry);
+            });
+        }
+
+        // ── Expenses ────────────────────────────────────────────────────
+        const expenseVouchers = await prisma.expenseVoucher.findMany({
+            where: { outlet_id, status: { in: ['approved', 'paid'] } },
+            select: { id: true, voucher_number: true, total_amount: true, payment_method: true, notes: true, created_at: true },
+            orderBy: { created_at: 'desc' },
+            take: MAX_HISTORY_PER_CATEGORY
+        });
+        const expenses = expenseVouchers
+            .filter(ev => {
+                const pm = (ev.payment_method || 'Cash').toLowerCase();
+                return pm === 'cash' || !ev.payment_method;
+            })
+            .map(ev => ({
+                id: `exp-${ev.id}`,
+                date: ev.created_at,
+                title: ev.voucher_number,
+                subtitle: ev.notes || 'Outlet Expense',
+                amount: parseFloat(ev.total_amount || 0)
+            }));
+
+        // ── Vendor Payments (out): VendorPayment + debit VendorCashTransaction ──
+        const vendorPaymentsRaw = await prisma.vendorPayment.findMany({
+            where: { outlet_id },
+            select: { id: true, amount: true, payment_method: true, vendor_name: true, created_at: true },
+            orderBy: { created_at: 'desc' },
+            take: MAX_HISTORY_PER_CATEGORY
+        });
+        const vendorCashTransactions = await prisma.vendorCashTransaction.findMany({
+            where: { vendor: { outlet_id } },
+            select: { id: true, type: true, amount: true, description: true, created_at: true, vendor: { select: { name: true } } },
+            orderBy: { created_at: 'desc' },
+            take: MAX_HISTORY_PER_CATEGORY
+        });
+
+        const vendorPayments = [
+            ...vendorPaymentsRaw
+                .filter(vp => {
+                    const pm = (vp.payment_method || 'Cash').toLowerCase();
+                    return pm === 'cash' || !vp.payment_method;
+                })
+                .map(vp => ({
+                    id: `vp-${vp.id}`,
+                    date: vp.created_at,
+                    title: vp.vendor_name || 'Vendor',
+                    subtitle: 'Invoice Settlement',
+                    amount: parseFloat(vp.amount || 0)
+                })),
+            ...vendorCashTransactions
+                .filter(vt => vt.type === 'debit')
+                .map(vt => ({
+                    id: `vct-out-${vt.id}`,
+                    date: vt.created_at,
+                    title: vt.vendor?.name || 'Vendor',
+                    subtitle: vt.description || 'Payment Out',
+                    amount: parseFloat(vt.amount || 0)
+                }))
+        ].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+        // ── Cash from Vendor (in): credit VendorCashTransaction ────────
+        const cashFromVendor = vendorCashTransactions
+            .filter(vt => vt.type === 'credit')
+            .map(vt => ({
+                id: `vct-in-${vt.id}`,
+                date: vt.created_at,
+                title: vt.vendor?.name || 'Vendor',
+                subtitle: vt.description || 'Payment In',
+                amount: parseFloat(vt.amount || 0)
+            }));
+
+        const buildCategory = (label, key, transactions) => ({
+            label,
+            key,
+            count: transactions.length,
+            total: transactions.reduce((s, t) => s + t.amount, 0),
+            transactions
+        });
+
+        res.json({
+            success: true,
+            categories: [
+                buildCategory('Down Payments', 'down_payments', downPayments),
+                buildCategory('Installments Received', 'installments_received', installmentsReceived),
+                buildCategory('Cash from Recovery', 'cash_from_recovery', cashFromRecovery),
+                buildCategory('Cash from Delivery', 'cash_from_delivery', cashFromDelivery),
+                buildCategory('Cash from Vendor', 'cash_from_vendor', cashFromVendor),
+                buildCategory('Expenses', 'expenses', expenses),
+                buildCategory('Vendor Payments', 'vendor_payments', vendorPayments),
+            ]
+        });
+    } catch (error) {
+        console.error('getCashRegisterHistory error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getCashRegister,
+    getCashRegisterHistory,
     calculateDailyCash,
     submitReconciliation,
     approveRegister,
