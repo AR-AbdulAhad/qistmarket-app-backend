@@ -12,12 +12,34 @@ const {
 } = require('../services/watiService');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { logAction } = require('../utils/auditLogger');
-const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
+const { getNormalizedLedger, normalizeLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 const { updateRecoveryRanking } = require('../services/recoveryRankingService');
 const { notifyAdmins, notifyOutlet, notifyUser } = require('../utils/notificationUtils');
 
 const now = () => new Date();
+
+// working_hours_start/end are free-text VarChar columns — some rows hold a
+// clean "HH:MM" time, others (set via an older form) hold a full datetime
+// string like "2026-08-10 20:14:44". This normalizes either shape down to a
+// readable 12-hour clock time instead of dumping the raw string on screen.
+const formatWorkTime = (raw, fallback) => {
+  if (!raw) return fallback;
+  let hours, minutes;
+  const simpleMatch = /^(d{1,2}):(d{2})$/.exec(raw.trim());
+  if (simpleMatch) {
+    hours = Number(simpleMatch[1]);
+    minutes = Number(simpleMatch[2]);
+  } else {
+    const parsed = new Date(raw);
+    if (isNaN(parsed.getTime())) return fallback;
+    hours = parsed.getHours();
+    minutes = parsed.getMinutes();
+  }
+  const period = hours >= 12 ? 'PM' : 'AM';
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, '0')} ${period}`;
+};
 
 const getExpectedWorkMinutes = (startStr, endStr) => {
   if (!startStr || !endStr) return 480; // 8h default
@@ -1910,7 +1932,9 @@ const getRecoveryDashboardStats = async (req, res) => {
             orderId, orderRef, customerName, cnicNumber, itemName,
             overdueMonths: overdueRows.length,
             overdueAmount: totalOverdue,
-            totalRemaining: normalized.summary.totalInstallmentRemaining
+            totalRemaining: normalized.summary.totalInstallmentRemaining,
+            dueAmount: totalOverdue,
+            currentAmount: Math.max(0, normalized.summary.totalInstallmentRemaining - totalOverdue)
           });
         } else if (overdueRows.length >= 2) {
           const totalOverdue = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
@@ -1918,7 +1942,9 @@ const getRecoveryDashboardStats = async (req, res) => {
             orderId, orderRef, customerName, cnicNumber, itemName,
             overdueMonths: overdueRows.length,
             overdueAmount: totalOverdue,
-            totalRemaining: normalized.summary.totalInstallmentRemaining
+            totalRemaining: normalized.summary.totalInstallmentRemaining,
+            dueAmount: totalOverdue,
+            currentAmount: Math.max(0, normalized.summary.totalInstallmentRemaining - totalOverdue)
           });
         }
 
@@ -1932,11 +1958,14 @@ const getRecoveryDashboardStats = async (req, res) => {
         if (last3Rows.length >= 3) {
           const totalPaidInPeriod = last3Rows.reduce((s, r) => s + (r.paidAmount || 0), 0);
           if (totalPaidInPeriod === 0) {
+            const missedAmount = last3Rows.reduce((s, r) => s + (r.dueAmount || 0), 0);
             defaulterAccounts.push({
               orderId, orderRef, customerName, cnicNumber, itemName,
               missedMonths: last3Rows.length,
-              missedAmount: last3Rows.reduce((s, r) => s + (r.dueAmount || 0), 0),
-              totalRemaining: normalized.summary.totalInstallmentRemaining
+              missedAmount,
+              totalRemaining: normalized.summary.totalInstallmentRemaining,
+              dueAmount: missedAmount,
+              currentAmount: Math.max(0, normalized.summary.totalInstallmentRemaining - missedAmount)
             });
           }
         }
@@ -2006,7 +2035,7 @@ const getRecoveryDashboardStats = async (req, res) => {
           rejected: rejectedCount,
         },
         bikeRange: officerInfo?.bike_km_range || 0,
-        workingHours: `${officerInfo?.working_hours_start || '09:00'} - ${officerInfo?.working_hours_end || '18:00'}`,
+        workingHours: `${formatWorkTime(officerInfo?.working_hours_start, '9:00 AM')} - ${formatWorkTime(officerInfo?.working_hours_end, '6:00 PM')}`,
         cashInHand: totalCashInHand,
         collectedAmount: achievedAmount,
         topVisitDeadlineOrders,
@@ -2018,15 +2047,21 @@ const getRecoveryDashboardStats = async (req, res) => {
         },
         regular: {
           count: regularAccounts.length,
-          accounts: regularAccounts
+          accounts: regularAccounts,
+          dueAmount: regularAccounts.reduce((s, a) => s + (a.dueAmount || 0), 0),
+          currentAmount: regularAccounts.reduce((s, a) => s + (a.currentAmount || 0), 0)
         },
         overdue: {
           count: overdueAccounts.length,
-          accounts: overdueAccounts
+          accounts: overdueAccounts,
+          dueAmount: overdueAccounts.reduce((s, a) => s + (a.dueAmount || 0), 0),
+          currentAmount: overdueAccounts.reduce((s, a) => s + (a.currentAmount || 0), 0)
         },
         defaulter: {
           count: defaulterAccounts.length,
-          accounts: defaulterAccounts
+          accounts: defaulterAccounts,
+          dueAmount: defaulterAccounts.reduce((s, a) => s + (a.dueAmount || 0), 0),
+          currentAmount: defaulterAccounts.reduce((s, a) => s + (a.currentAmount || 0), 0)
         },
         blacklist: {
           count: blacklistAccounts.length,
@@ -2515,7 +2550,7 @@ const getRecoveryPtpList = async (req, res) => {
     // Pulls the next unpaid installment (amount/date) + overall remaining
     // balance for an order, so the mobile app can sort PTP accounts by them.
     const getOrderLedgerBrief = (order) => {
-      const empty = { installmentAmount: 0, remainingBalance: 0, totalRemaining: 0, nextInstallmentDate: null };
+      const empty = { installmentAmount: 0, remainingBalance: 0, totalRemaining: 0, nextInstallmentDate: null, dueAmount: 0, currentAmount: 0 };
       try {
         let rawRows = order?.installment_ledger?.ledger_rows;
         if (!rawRows) return empty;
@@ -2524,19 +2559,22 @@ const getRecoveryPtpList = async (req, res) => {
 
         const normalized = getNormalizedLedger(rawRows);
         const nextUnpaid = normalized.installment_ledger.find(r => r.status !== 'paid');
+        const { due, current } = computeDueAndCurrent(normalized.installment_ledger);
 
         return {
           installmentAmount: nextUnpaid?.dueAmount || 0,
           remainingBalance: nextUnpaid?.remainingAmount || 0,
           totalRemaining: normalized.summary?.totalInstallmentRemaining || 0,
           nextInstallmentDate: nextUnpaid?.dueDate || null,
+          dueAmount: due,
+          currentAmount: current,
         };
       } catch (e) {
         return empty;
       }
     };
 
-    const summary = { active: 0, fulfilled: 0, broken: 0 };
+    const summary = { active: 0, fulfilled: 0, broken: 0, dueAmount: 0, currentAmount: 0 };
     const nowDt2 = new Date();
     const ptpList = [];
     for (const visit of latestVisits) {
@@ -2550,6 +2588,10 @@ const getRecoveryPtpList = async (req, res) => {
 
       const status = visit.promised_date < nowDt2 ? 'broken' : 'active';
       summary[status]++;
+      if (status === 'active') {
+        summary.dueAmount += ledgerBrief.dueAmount;
+        summary.currentAmount += ledgerBrief.currentAmount;
+      }
 
       ptpList.push({
         id: visit.id,

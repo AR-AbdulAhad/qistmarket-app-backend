@@ -760,7 +760,10 @@ const getCashRegisterHistory = async (req, res) => {
         // ── Expenses ────────────────────────────────────────────────────
         const expenseVouchers = await prisma.expenseVoucher.findMany({
             where: { outlet_id, status: { in: ['approved', 'paid'] } },
-            select: { id: true, voucher_number: true, total_amount: true, payment_method: true, notes: true, created_at: true },
+            select: {
+                id: true, voucher_number: true, total_amount: true, payment_method: true, notes: true, created_at: true,
+                items: { select: { category: true } }
+            },
             orderBy: { created_at: 'desc' },
             take: MAX_HISTORY_PER_CATEGORY
         });
@@ -769,13 +772,16 @@ const getCashRegisterHistory = async (req, res) => {
                 const pm = (ev.payment_method || 'Cash').toLowerCase();
                 return pm === 'cash' || !ev.payment_method;
             })
-            .map(ev => ({
-                id: `exp-${ev.id}`,
-                date: ev.created_at,
-                title: ev.voucher_number,
-                subtitle: ev.notes || 'Outlet Expense',
-                amount: parseFloat(ev.total_amount || 0)
-            }));
+            .map(ev => {
+                const categories = [...new Set((ev.items || []).map(i => i.category || 'General'))];
+                return {
+                    id: `exp-${ev.id}`,
+                    date: ev.created_at,
+                    title: ev.voucher_number,
+                    subtitle: categories.length > 0 ? categories.join(', ') : (ev.notes || 'Outlet Expense'),
+                    amount: parseFloat(ev.total_amount || 0)
+                };
+            });
 
         // ── Vendor Payments (out): VendorPayment + debit VendorCashTransaction ──
         const vendorPaymentsRaw = await prisma.vendorPayment.findMany({

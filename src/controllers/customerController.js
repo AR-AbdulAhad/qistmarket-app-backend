@@ -1,6 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { syncBlacklistStatus } = require('../utils/blacklistUtils');
-const { getNormalizedLedger } = require('../utils/ledgerUtils');
+const { getNormalizedLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
 
 const getCustomers = async (req, res) => {
   const {
@@ -362,6 +362,8 @@ const getBlacklistedCustomers = async (req, res) => {
             totalAdvanceReceived: 0,
             totalPaid: 0,
             totalRemaining: 0,
+            totalDue: 0,
+            totalCurrent: 0,
           },
         });
       }
@@ -400,10 +402,14 @@ const getBlacklistedCustomers = async (req, res) => {
         },
       });
 
+      const { due: orderDue, current: orderCurrent } = computeDueAndCurrent(installmentLedger);
+
       group.ledgerSummary.totalOrders += 1;
       group.ledgerSummary.totalAdvanceReceived += advanceAmount;
       group.ledgerSummary.totalPaid += grandTotalPaid;
       group.ledgerSummary.totalRemaining += grandTotalRemaining;
+      group.ledgerSummary.totalDue += orderDue;
+      group.ledgerSummary.totalCurrent += orderCurrent;
     }
 
     const allBlacklisted = Array.from(customerMap.values()).sort((a, b) =>
@@ -439,6 +445,8 @@ const getBlacklistedCustomers = async (req, res) => {
       data: {
         customers: allBlacklisted,
         total: allBlacklisted.length,
+        totalDueAmount: allBlacklisted.reduce((s, c) => s + (c.ledgerSummary.totalDue || 0), 0),
+        totalCurrentAmount: allBlacklisted.reduce((s, c) => s + (c.ledgerSummary.totalCurrent || 0), 0),
       },
     });
   } catch (error) {

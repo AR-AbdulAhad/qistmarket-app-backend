@@ -138,7 +138,41 @@ function getNormalizedLedger(rows) {
     };
 }
 
+/**
+ * Splits an already-normalized installment_ledger array (from
+ * getNormalizedLedger) into:
+ * - due: overdue (due date already passed) and still unpaid — genuine
+ *   arrears, not the full outstanding balance.
+ * - current: the single nearest not-yet-overdue unpaid row (the
+ *   installment currently expected to be paid), never future months
+ *   beyond that.
+ */
+function computeDueAndCurrent(installmentLedgerRows) {
+    const rows = Array.isArray(installmentLedgerRows) ? installmentLedgerRows : [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    let due = 0;
+    let nearestUpcoming = null;
+
+    for (const row of rows) {
+        if ((row.status || '').toLowerCase() === 'paid') continue;
+        const dueDate = row.dueDate ? new Date(row.dueDate) : null;
+        if (!dueDate || isNaN(dueDate.getTime())) continue;
+
+        if (dueDate < today) {
+            due += Number(row.remainingAmount || 0);
+        } else if (!nearestUpcoming || dueDate < new Date(nearestUpcoming.dueDate)) {
+            nearestUpcoming = row;
+        }
+    }
+
+    const current = nearestUpcoming ? Number(nearestUpcoming.remainingAmount || 0) : 0;
+    return { due, current };
+}
+
 module.exports = {
     normalizeLedger,
-    getNormalizedLedger
+    getNormalizedLedger,
+    computeDueAndCurrent
 };
