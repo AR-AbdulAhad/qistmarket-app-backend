@@ -1,5 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { logAction } = require('../utils/auditLogger');
+const { clearUserSessionCache } = require('../middlewares/authMiddleware');
 
 /**
  * requestAccountDeletion
@@ -129,6 +130,7 @@ const reviewDeletionRequest = async (req, res) => {
 
         if (action === 'approve') {
             await prisma.user.update({ where: { id: request.userId }, data: { status: 'inactive', session_token: null } });
+            clearUserSessionCache(request.userId);
         }
 
         await logAction(req, `ACCOUNT_DELETION_${action.toUpperCase()}D`, `Account deletion request #${request.id} (user #${request.userId}) ${action}d.${remarks ? ` Remarks: ${remarks}` : ''}${action === 'approve' ? ' Account deactivated.' : ''}`, request.id, 'AccountDeletionRequest');

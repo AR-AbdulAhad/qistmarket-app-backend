@@ -6,6 +6,7 @@ const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { getOTPEmailTemplate } = require('../utils/emailTemplates');
 const { logAction, logLoginAction } = require('../utils/auditLogger');
+const { clearUserSessionCache } = require('../middlewares/authMiddleware');
 
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 
@@ -285,6 +286,14 @@ const verifyLoginOTP = async (req, res) => {
       where: { id: user.id },
       data: updateData
     });
+
+    // authMiddleware caches the active session_token per user for up to 60s
+    // to avoid a DB hit on every request. Without this, the very next
+    // authenticated request from THIS newly-logged-in device could still see
+    // the stale pre-login cache entry, get a false "Session expired" 401, and
+    // (client-side) trigger an immediate self-inflicted logout — the classic
+    // "logs in then immediately gets logged out" bug.
+    clearUserSessionCache(user.id);
 
     const payload = {
       id: user.id,
@@ -1200,6 +1209,7 @@ const getDeviceLoginRequest = async (req, res) => {
         },
         include: { role: true }
       });
+      clearUserSessionCache(user.id);
 
       await prisma.deviceLoginRequest.update({
         where: { id: request.id },
@@ -1334,6 +1344,7 @@ const logoutUser = async (req, res) => {
         updated_at: new Date()
       }
     });
+    clearUserSessionCache(userId);
 
     return res.json({ success: true, message: 'Logged out successfully.' });
   } catch (error) {

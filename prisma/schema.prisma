@@ -982,6 +982,7 @@ model Delivery {
   product_imei       String?            @db.VarChar(100)
   selected_plan      Json?
   self_pickup        Boolean            @default(false)
+  pending_payload    Json?
   delivery_agent     User               @relation("delivery_agent", fields: [delivery_agent_id], references: [id])
   order              Order              @relation("OrderDelivery", fields: [order_id], references: [id], onDelete: Cascade)
   uploads            DeliveryUpload[]

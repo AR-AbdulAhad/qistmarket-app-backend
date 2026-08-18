@@ -6,6 +6,7 @@ const { checkBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { getOrCreateCustomer, updateCsrRanking } = require('../services/rankingService');
 const { updateVerificationRanking } = require('../services/verificationRankingService');
+const customerNotify = require('../services/customerNotificationService');
 
 // Helper for current timestamp
 const now = () => new Date();
@@ -48,7 +49,7 @@ const startVerification = async (req, res) => {
       },
       include: {
         order: { select: { order_ref: true } },
-        verification_officer: { select: { full_name: true, username: true } }
+        verification_officer: { select: { full_name: true, username: true, phone: true } }
       }
     });
 
@@ -174,6 +175,9 @@ const startVerification = async (req, res) => {
         io
       );
     }
+
+    // Customer-facing WhatsApp update (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+    await customerNotify.notifyVerificationStarted(order, verification.verification_officer, verification.start_time);
 
     // Emit real-time update for officer's current verification assignment
     if (io) {
@@ -1236,6 +1240,10 @@ const completeVerification = async (req, res) => {
       );
     }
 
+    // Customer-facing WhatsApp update (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+    const orderForNotification = await prisma.order.findUnique({ where: { id: updatedVerification.order_id } });
+    await customerNotify.notifyVerificationCompleted(orderForNotification);
+
     io?.to(`officer_${updatedVerification.verification_officer_id}`).emit('verification_data_updated', { reason: 'verification_completed', orderId: updatedVerification.order_id });
 
     return res.status(200).json({
@@ -1506,6 +1514,15 @@ const submitVerificationReview = async (req, res) => {
         parseInt(verification_id),
         io
       );
+    }
+
+    // Customer-facing WhatsApp update on final decision only (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+    if (orderStatusUpdate) {
+      const orderForNotification = await prisma.order.findUnique({ where: { id: verification.order.id } });
+      await customerNotify.notifyFinalDecision(orderForNotification, {
+        decision: orderStatusUpdate,
+        reviews: updated.reviews,
+      });
     }
 
     return res.status(200).json({

@@ -3,6 +3,7 @@ const pt = require('../services/paytriggerService');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones } = require('../services/watiService');
+const { completePendingPaytriggerDelivery } = require('../services/deliveryCompletionService');
 
 const now = () => new Date();
 
@@ -321,7 +322,7 @@ async function handleCallback(req, res) {
     updateData.last_sync_at = now();
     updateData.raw_state = payload;
 
-    await prisma.payTriggerDevice.update({ where: { id: device.id }, data: updateData });
+    const updatedDevice = await prisma.payTriggerDevice.update({ where: { id: device.id }, data: updateData });
 
     if (notifyType === 1000) {
       // Activation callback - device is now active
@@ -332,6 +333,32 @@ async function handleCallback(req, res) {
     } else if (notifyType === 4000) {
       // Strong limit warning
       console.warn(`[PayTrigger] Strong limit warning for device ${imei || deviceTag}: ${payload.tip}`);
+    }
+
+    // ── Complete a delivery that was gated on this device's enrollment ──────
+    // Triggers whenever this callback reports the device as ACTIVE, however that
+    // was signalled (explicit notifyType, or state/serverState reaching 3000).
+    // completePendingPaytriggerDelivery is idempotent: a duplicate/retried webhook
+    // for an already-completed delivery is a no-op (guarded by an atomic status
+    // transition on the Delivery row), so it's safe to call unconditionally here.
+    const becameActive = notifyType === 1000
+      || updatedDevice.enrollment_status === 'active'
+      || state === 3000
+      || serverState === 3000;
+
+    if (becameActive && updatedDevice.delivery_id) {
+      const io = req.app.get('io');
+      completePendingPaytriggerDelivery(updatedDevice, io)
+        .then((outcome) => {
+          if (outcome?.completed) {
+            console.log(`[PayTrigger] Delivery ${updatedDevice.delivery_id} completed via webhook for device ${imei || deviceTag}`);
+          } else if (outcome?.skipped) {
+            console.log(`[PayTrigger] Delivery completion skipped for device ${imei || deviceTag}: ${outcome.reason}`);
+          }
+        })
+        .catch((err) => {
+          console.error(`[PayTrigger] Failed to complete pending delivery for device ${imei || deviceTag}:`, err.message);
+        });
     }
 
     return res.json({ code: 200, message: 'Success' });

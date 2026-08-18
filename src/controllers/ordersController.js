@@ -4,10 +4,10 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { logAction } = require('../utils/auditLogger');
-const { sendTemplate, sendOrderStatusNotification } = require('../services/watiService');
-const { sendOtp: sendOTP, isJazzEnabled } = require('../services/otpDispatcher');
-const jazzSmsService = require('../services/jazzSmsService');
+const { sendOrderStatusNotification } = require('../services/watiService');
+const { sendOtp: sendOTP, sendGuarantorOtp } = require('../services/otpDispatcher');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
+const customerNotify = require('../services/customerNotificationService');
 const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth } = require('../services/rankingService');
 
 const admin = require('firebase-admin');
@@ -546,6 +546,9 @@ const createOrder = async (req, res) => {
       order.id,
       io
     );
+
+    // Customer-facing WhatsApp confirmation (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+    await customerNotify.notifyOrderBooked(order);
 
     if (req.user.outlet_id) {
       await logAction(
@@ -2046,6 +2049,9 @@ const assignOrder = async (req, res) => {
     await sendOrderAssignmentNotification(updatedOrder, updatedOrder.assigned_to, 'verification', io);
     io?.to(`officer_${user_id}`).emit('verification_data_updated', { reason: 'order_assigned', orderId: updatedOrder.id });
 
+    // Customer-facing WhatsApp update (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+    await customerNotify.notifyVerificationOfficerAssigned(updatedOrder, user);
+
     return res.status(200).json({
       success: true,
       message: 'Order assigned successfully',
@@ -2158,6 +2164,8 @@ const assignBulk = async (req, res) => {
     for (const order of updatedOrders) {
       if (order.assigned_to) {
         await sendOrderAssignmentNotification(order, order.assigned_to, 'verification', io);
+        // Customer-facing WhatsApp update (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+        await customerNotify.notifyVerificationOfficerAssigned(order, user);
       }
     }
 
@@ -2254,6 +2262,8 @@ const transferOrder = async (req, res) => {
     const io = req.app.get('io');
     await sendOrderTransferNotification(updatedOrder, parseInt(outlet_id), io);
 
+    // Customer-facing WhatsApp update (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+    await customerNotify.notifyOrderTransferred(updatedOrder);
 
     return res.status(200).json({
       success: true,
@@ -2784,6 +2794,13 @@ const cancelOrder = async (req, res) => {
         io
       );
     }
+
+    // Customer-facing WhatsApp update (WATI, gated by WATI_ORDER_NOTIFICATIONS_ENABLED)
+    await customerNotify.notifyOrderCancelled(updatedOrder, {
+      cancelledByName: req.user.full_name,
+      cancelledByRole: req.user.role,
+      reason: reason || 'Cancelled by admin',
+    });
 
     return res.status(200).json({
       success: true,
@@ -3564,29 +3581,9 @@ const sendIndividualConvertOTP = async (req, res) => {
 
   try {
     const otp = await saveOTP(phone, 'convert_sale');
-    
+
     if (type === 'grantor' && name) {
-        // Use the specialized grantor template if name is provided
-        const template_name = process.env.WATI_GRANTORS_OTP_TEMPLATE_NAME;
-        const broadcast_name = process.env.WATI_GRANTORS_OTP_BROADCAST_NAME;
-        
-        if (template_name && broadcast_name) {
-            await sendTemplate(phone, template_name, broadcast_name, [
-                { name: '1', value: otp },
-                { name: 'name', value: name }
-            ]);
-            console.log(  "OTP sent to " + phone + "Name" + name + " with template " + template_name + " and broadcast " + broadcast_name);
-            // Jazz CMT SMS — additive, respects the same JAZZ_OTP_ENABLED switch as
-            // every other OTP scenario (otpDispatcher.js), since this grantor branch
-            // uses a named WATI template directly and bypasses the dispatcher.
-            if (isJazzEnabled()) {
-                jazzSmsService.sendOTPSms(phone, otp).catch((err) => {
-                    console.error('[OTP] Jazz send failed (grantor convert-sale):', err?.message || err);
-                });
-            }
-        } else {
-            await sendOTP(phone, otp);
-        }
+        await sendGuarantorOtp(phone, name, otp);
     } else {
         await sendOTP(phone, otp);
     }

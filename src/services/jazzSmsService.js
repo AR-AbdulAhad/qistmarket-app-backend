@@ -76,8 +76,18 @@ const sendOTPSms = async (phone, otp) => {
   return sendSMS(phone, `Your Qist Market verification code is ${otp}. Do not share this code with anyone.`);
 };
 
+/** Guarantor OTP wrapper — mirrors the wording of the WATI "Guarantor OTP Confirmation" WhatsApp template. `name` is the purchaser's name (the person being guaranteed for), not the guarantor's own name — matches how the caller already passes it. */
+const sendGuarantorOTPSms = async (phone, name, otp) => {
+  const purchaserName = name || 'is customer';
+  return sendSMS(
+    phone,
+    `Qist Market\nAssalam o Alaikum,\nAgar raqam receive na ho to item aur poori raqam ki zimmedari guarantee lene wale par hi hogi.\nAgar aap ${purchaserName} ki taraf se guarantee de rahe hain, to baraye meharbani yeh ${otp} foran hamare representative ko bata dein.\n\nShukriya Qist Market`
+  );
+};
+
 module.exports = {
   sendSMS,
   sendOTPSms,
+  sendGuarantorOTPSms,
   isEnabled: () => JAZZ_CMT_ENABLED,
 };

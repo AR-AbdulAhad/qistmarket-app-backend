@@ -13,6 +13,7 @@ const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../u
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 const qrcode = require('qrcode');
 const pt = require('../services/paytriggerService');
+const deliveryCompletionService = require('../services/deliveryCompletionService');
 
 
 // ─── Firebase Init ────────────────────────────────────────────────
@@ -99,8 +100,8 @@ const submitDelivery = async (req, res) => {
         _sum: { amount: true, submitted_amount: true },
       });
 
-      const cashPending = cashPendingGroup.length 
-        ? (cashPendingGroup[0]._sum.amount || 0) - (cashPendingGroup[0]._sum.submitted_amount || 0) 
+      const cashPending = cashPendingGroup.length
+        ? (cashPendingGroup[0]._sum.amount || 0) - (cashPendingGroup[0]._sum.submitted_amount || 0)
         : 0;
 
       if (cashPending >= limitRecord.daily_limit) {
@@ -131,6 +132,9 @@ const submitDelivery = async (req, res) => {
     }
 
     if (order.delivery) {
+      // Also covers the PayTrigger-gated case: a placeholder Delivery row already
+      // exists (status = awaiting_paytrigger_enrollment), so re-submission is blocked
+      // the same way a completed delivery blocks re-submission.
       return res.status(400).json({
         success: false,
         error: { code: 400, message: 'Delivery already submitted for this order' }
@@ -165,555 +169,79 @@ const submitDelivery = async (req, res) => {
       });
     }
 
-    // Create delivery with explicit timestamps
-    const delivery = await prisma.delivery.create({
-      data: {
-        order_id: parseInt(order_id),
-        delivery_agent_id: req.user.id,
-        status: 'completed',
-        start_time: now(),
-        end_time: now(),
-        verified: true,
-        product_imei: product_imei || null,
-        selected_plan: selected_plan || null,
-        feedback: feedback || null,
-        created_at: now(),   // ✅ explicit created_at
-        updated_at: now()    // ✅ explicit updated_at
-      }
-    });
-
-    // Snapshot variables for Cash In Hand
-    let colorVariant = null;
+    // Read-only inventory snapshot — used both for PayTrigger gating and as the
+    // product name/category passed down to the completion logic.
     let productNameSnapshot = null;
-    let stockTransferId = null;
     let inventoryCategory = null;
-
-    // Update Inventory Status and Transfer History if IMEI provided
     if (product_imei) {
-      const inventory = await prisma.outletInventory.findFirst({
-        where: { imei_serial: product_imei }
-      });
-
-      if (inventory) {
-        // Mark inventory as Sold since it has been successfully delivered
-        await prisma.outletInventory.update({
-          where: { id: inventory.id },
-          data: {
-            status: 'Sold',
-            updated_at: now()   // ✅ explicit updated_at
-          }
-        });
-
-        inventoryCategory = inventory.category;
-        colorVariant = inventory.color_variant || null;
-        productNameSnapshot = inventory.product_name;
-
-        // Mark transfer as delivered
-        const transfer = await prisma.stockTransfer.findFirst({
-          where: {
-            inventory_id: inventory.id,
-            to_id: req.user.id,
-            to_type: 'Delivery Officer',
-            status: 'transferred'
-          }
-        });
-
-        if (transfer) {
-          stockTransferId = transfer.id;
-          await prisma.stockTransfer.update({
-            where: { id: transfer.id },
-            data: {
-              status: 'delivered',
-              updated_at: now()   // ✅ explicit updated_at
-            }
-          });
-        }
-      }
+      const inventory = await prisma.outletInventory.findFirst({ where: { imei_serial: product_imei } });
+      productNameSnapshot = inventory?.product_name || null;
+      inventoryCategory = inventory?.category || null;
     }
 
-    // Create uploads
-    const uploadsData = [];
-
-    // Face photos
-    facePhotos.forEach((file, index) => {
-      uploadsData.push({
-        delivery_id: delivery.id,
-        upload_type: 'face_photo',
-        file_url: file.url,
-        tag: faceTags[index] || null,
-        uploaded_at: now()
-      });
-    });
-
-    // Location photos
-    locationPhotos.forEach((file, index) => {
-      uploadsData.push({
-        delivery_id: delivery.id,
-        upload_type: 'location_photo',
-        file_url: file.url,
-        tag: locationTags[index] || null,
-        uploaded_at: now()
-      });
-    });
-
-    // House photos
-    housePhotos.forEach((file, index) => {
-      uploadsData.push({
-        delivery_id: delivery.id,
-        upload_type: 'house_photo',
-        file_url: file.url,
-        tag: houseTags[index] || null,
-        uploaded_at: now()
-      });
-    });
-
-    // Location links
-    locationLinks.forEach((link, index) => {
-      uploadsData.push({
-        delivery_id: delivery.id,
-        upload_type: 'location_link',
-        link: link,
-        tag: linkTags[index] || null,
-        uploaded_at: now()
-      });
-    });
-
-    if (uploadsData.length > 0) {
-      await prisma.deliveryUpload.createMany({
-        data: uploadsData
-      });
-    }
-
-    // Update order status with updated_at
-    await prisma.order.update({
-      where: { id: parseInt(order_id) },
-      data: {
-        status: 'delivered',
-        is_delivered: true,
-        delivered_at: order.delivered_at || now(),
-        updated_at: order.delivered_at || now()
-      }
-    });
-
-    await logOrderStatusChange(parseInt(order_id), order.status, 'delivered', req.user);
-
-    // Determine advance amount STRICTLY from delivery context (selected_plan)
-    let advanceAmount = 0.0;
-    let planObj = null;
-
-    if (selected_plan) {
-      try {
-        planObj = typeof selected_plan === 'string' ? JSON.parse(selected_plan) : selected_plan;
-        if (planObj && (planObj.advance !== undefined || planObj.advance_amount !== undefined)) {
-          advanceAmount = parseFloat(planObj.advance || planObj.advance_amount);
-        }
-      } catch (e) {
-        console.error('Error parsing selected_plan:', e);
-      }
-    }
-
-    // Get confirmed purchaser name from verification if available
-    const purchaser = order.verification?.purchaser;
-    const confirmedCustomerName = purchaser?.name || purchaser?.full_name || order.customer_name;
-
-    // Create Cash In Hand entry for advance amount using delivery snapshots
-    if (advanceAmount > 0) {
-      await prisma.cashInHand.create({
-        data: {
-          officer_id: req.user.id,
-          order_id: parseInt(order_id),
-          amount: advanceAmount,
-          status: 'pending',
-          customer_name: confirmedCustomerName,
-          product_name: productNameSnapshot,
-          imei_serial: product_imei || null,
-          color_variant: colorVariant || null,
-          stock_transfer_id: stockTransferId,
-          payment_method: 'Cash',
-          created_at: now(),   // ✅ explicit created_at
-          updated_at: now()    // ✅ explicit updated_at
-        }
-      });
-
-      // Create Officer Transaction for this credit (helper should handle timestamps)
-      await createOfficerTransaction({
-        officer_id: req.user.id,
-        type: 'credit',
-        amount: advanceAmount,
-        status: 'pending',
-        description: `Advance payment collected from ${confirmedCustomerName}`,
-        payment_method: 'Cash',
-        order_ref: order.order_ref
-      });
-    }
-
-    // ─── Build Installment Ledger ────────────────────────────────────────────
-    let installmentLedger = null;
-    let ledgerUrl = null;
-    let firstInstallmentDueDate = null;
-    try {
-      // Parse plan for installment data
-      const monthlyAmt = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
-      const totalMonths = planObj?.months || planObj?.duration || order.months || 0;
-      const deliveryDate = now();
-
-      if (totalMonths > 0 && monthlyAmt > 0) {
-        let ledgerRows = [];
-
-        // Use custom ledger from frontend if provided (user edited dates/amounts)
-        let customLedger = null;
-        try {
-          const raw = req.body.custom_ledger;
-          if (raw) customLedger = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        } catch (e) { /* ignore parse errors */ }
-
-        // 1. Advance Payment row (always month 0, always auto)
-        ledgerRows.push({
-          month: 0,
-          label: 'Advance Payment',
-          due_date: deliveryDate,
-          amount: parseFloat(advanceAmount || 0),
-          status: 'paid',
-          paid_at: deliveryDate,
-          payment_method: 'Cash',
-          feedback: 'Collected at Delivery'
-        });
-
-        if (customLedger && Array.isArray(customLedger) && customLedger.length === totalMonths) {
-          // 2a. Use edited installment rows from the UI
-          customLedger.forEach((row, i) => {
-            ledgerRows.push({
-              month: i + 1,
-              label: `Month ${i + 1}`,
-              due_date: row.date ? new Date(row.date) : addMonths(deliveryDate, i + 1),
-              amount: parseFloat(row.amount) || parseFloat(monthlyAmt),
-              status: 'pending',
-              paid_at: null,
-            });
-          });
-        } else {
-          // 2b. Auto-generate installment rows
-          for (let i = 0; i < totalMonths; i++) {
-            ledgerRows.push({
-              month: i + 1,
-              label: `Month ${i + 1}`,
-              due_date: addMonths(deliveryDate, i + 1),
-              amount: parseFloat(monthlyAmt),
-              status: 'pending',
-              paid_at: null,
-            });
-          }
-        }
-
-        // Capture first installment due date for PayTrigger expiration
-        if (ledgerRows.length > 1 && ledgerRows[1].due_date) {
-          firstInstallmentDueDate = ledgerRows[1].due_date;
-        }
-
-        // Sign a long-lived token (2 years) — kept for backward compat
-        const ledgerToken = jwt.sign(
-          { order_id: parseInt(order_id), delivery_id: delivery.id },
-          LEDGER_TOKEN_SECRET,
-          { expiresIn: '730d' }
-        );
-
-        // Short unique ID for the link (last 6 digits of IMEI)
-        const imeiStr = product_imei ? String(product_imei).replace(/\D/g, '') : '';
-        const shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
-        ledgerUrl = `${shortId}`;
-
-        // Upsert ledger with explicit timestamps
-        installmentLedger = await prisma.installmentLedger.upsert({
-          where: { order_id: parseInt(order_id) },
-          create: {
-            order_id: parseInt(order_id),
-            delivery_id: delivery.id,
-            token: ledgerToken,
-            short_id: shortId,
-            ledger_rows: ledgerRows,
-            created_at: now(),   // ✅ explicit created_at
-            updated_at: now()    // ✅ explicit updated_at
-          },
-          update: {
-            token: ledgerToken,
-            short_id: shortId,
-            ledger_rows: ledgerRows,
-            updated_at: now()    // ✅ explicit updated_at
-          },
-        });
-
-        const mobile = purchaser?.telephone_number || order.whatsapp_number;
-        const consumerNo = await generateConsumerNumber(product_imei, mobile);
-        const smartPayConsumerNo = await generateSmartPayConsumerNumber(product_imei, mobile);
-
-        // Save the consumer_numbers record 
-        // using the new table as specified by 1Bill TPS spec
-        let firstMonthDue = 0;
-        let dueDate = new Date();
-        let billingMonthStr = "0000";
-
-        if (Array.isArray(ledgerRows) && ledgerRows.length > 1) {
-          // Row 1 is Month 1 since Row 0 is Advance Payment
-          firstMonthDue = ledgerRows[1].amount || 0;
-          if (ledgerRows[1].due_date) {
-            const d = new Date(ledgerRows[1].due_date);
-            if (!isNaN(d.getTime())) {
-              dueDate = d;
-              billingMonthStr = String(d.getFullYear()).slice(-2) + String(d.getMonth() + 1).padStart(2, '0');
-            }
-          }
-        }
-
-        try {
-          await prisma.consumerNumber.createMany({
-            data: [
-              {
-                consumer_number: consumerNo,
-                ledger_id: installmentLedger.id,
-                delivery_id: delivery.id,
-                customer_name: purchaser?.name || order.customer_name || 'N/A',
-                mobile_number: mobile || 'N/A',
-                imei_serial: product_imei || null,
-                amount_due: firstMonthDue,
-                billing_month: billingMonthStr,
-                due_date: dueDate,
-                bill_status: 'U', // Unpaid
-                created_at: now(),   // ✅ explicit created_at
-                updated_at: now()    // ✅ explicit updated_at
-              },
-              {
-                consumer_number: smartPayConsumerNo,
-                ledger_id: installmentLedger.id,
-                delivery_id: delivery.id,
-                customer_name: purchaser?.name || order.customer_name || 'N/A',
-                mobile_number: mobile || 'N/A',
-                imei_serial: product_imei || null,
-                amount_due: firstMonthDue,
-                billing_month: billingMonthStr,
-                due_date: dueDate,
-                bill_status: 'U', // Unpaid
-                created_at: now(),   // ✅ explicit created_at
-                updated_at: now()    // ✅ explicit updated_at
-              }
-            ]
-          });
-        } catch (consumerErr) {
-          console.error('[submitDelivery] Failed to create ConsumerNumbers (Non-fatal):', consumerErr);
-        }
-
-      }
-    } catch (ledgerErr) {
-      // Non-fatal — log and continue
-      console.error('[submitDelivery] Ledger creation error:', ledgerErr);
-    }
-
-
-    // ─── WATI Messages ───────────────────────────────────────────────────────
-    const customerPhone = purchaser?.telephone_number;
-    const deliveryDateStr = formatDatePK(now());
-    const colorVariantStr = colorVariant || 'N/A';
-
-    if (customerPhone) {
-      // Template 1: Delivery Confirmation
-      sendDeliveryConfirmation(customerPhone, {
-        customerName: confirmedCustomerName,
-        productName: productNameSnapshot,
-        imei: product_imei || 'N/A',
-        colorVariant: colorVariantStr,
-        advanceAmount,
-        deliveryDate: deliveryDateStr,
-        orderRef: order.order_ref,
-        orderStatus: 'Delivered',
-      }).then(r => console.log('[WATI] Delivery confirmation:', r.success ? 'sent ✓' : r.error))
-        .catch(e => console.error('[WATI] Delivery confirmation error:', e));
-
-      // Template 2: Installment Ledger (only if ledger was created)
-      if (installmentLedger && ledgerUrl) {
-        const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
-        const firstRow = rows[1];
-        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-
-        sendInstallmentLedger(customerPhone, {
-          customerName: confirmedCustomerName,
-          productName: productNameSnapshot,
-          orderRef: order.order_ref,
-          nextMonthLabel: 'Mahina 1',
-          monthlyAmount: firstRow?.amount || 0,
-          dueDate: firstRow ? formatDatePK(firstRow.due_date) : 'N/A',
-          totalRemaining: totalRemain,
-          ledgerUrl,
-        }).then(r => console.log('[WATI] Ledger template:', r.success ? 'sent ✓' : r.error))
-          .catch(e => console.error('[WATI] Ledger template error:', e));
-      }
-      // Send to alternate phone as well
-      const altPhone = purchaser?.alternate_phone_number;
-      if (altPhone) {
-        if (installmentLedger && ledgerUrl) {
-          const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
-          const firstRow = rows[1];
-          const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-          sendInstallmentLedger(altPhone, {
-            customerName: confirmedCustomerName,
-            productName: productNameSnapshot,
-            orderRef: order.order_ref,
-            nextMonthLabel: 'Mahina 1',
-            monthlyAmount: firstRow?.amount || 0,
-            dueDate: firstRow ? formatDatePK(firstRow.due_date) : 'N/A',
-            totalRemaining: totalRemain,
-            ledgerUrl,
-          }).catch(e => console.error('[WATI] Ledger alt phone error:', e));
-        }
-      }
-    } else {
-      console.warn('[submitDelivery] No customer phone — WATI messages skipped for order', order.order_ref);
-    }
-
-    // Fetch updated delivery
-    const updatedDelivery = await prisma.delivery.findUnique({
-      where: { id: delivery.id },
-      include: {
-        delivery_agent: {
-          select: { full_name: true, username: true }
-        },
-        uploads: true,
-        order: { select: { order_ref: true } }
-      }
+    const { gateRequired } = deliveryCompletionService.resolvePaytriggerGate({
+      enrollPaytriggerFlag: enroll_paytrigger,
+      product_imei,
+      productNameSnapshot,
+      inventoryCategory,
     });
 
     const io = req.app.get('io');
-    await notifyAdmins(
-      'Delivery Submitted',
-      `Delivery completed for Order #${updatedDelivery.order.order_ref} by ${updatedDelivery.delivery_agent.full_name}`,
-      'delivery_complete',
-      updatedDelivery.id,
-      io
-    );
-
-    if (order.outlet_id) {
-      await notifyOutlet(
-        order.outlet_id,
-        'Delivery Completed',
-        `Delivery has been successfully completed for Order #${updatedDelivery.order.order_ref}.`,
-        'delivery_complete',
-        updatedDelivery.id,
-        io
-      );
-    }
-
-    io?.to(`officer_${req.user.id}`).emit('delivery_data_updated', { reason: 'delivery_submitted', orderId: order.id });
-
-    // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
-    const enrollPaytrigger = enroll_paytrigger === true || enroll_paytrigger === 'true';
-    const paytriggerBrand = pt.detectBrand(productNameSnapshot);
-    const refinedProductNameSnapshot = paytriggerBrand;
-    const paytriggerDebug = {
-      enabled: pt.ENABLED(),
-      hasImei: Boolean(updatedDelivery.product_imei),
-      hasOrder: Boolean(order),
-      orderId: order?.id,
-      orderRef: order?.order_ref,
-      productName: refinedProductNameSnapshot,
-      paytriggerBrand,
-      inventoryCategory,
-      eligible: Boolean(refinedProductNameSnapshot && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)),
-      firstInstallmentDueDate: firstInstallmentDueDate,
-      deliveryId: updatedDelivery.id,
-      imei: updatedDelivery.product_imei,
+    const payload = {
+      order_id: order.id,
+      product_imei: product_imei || null,
+      selected_plan: selected_plan || null,
+      feedback: feedback || null,
+      custom_ledger: req.body.custom_ledger || null,
+      uploads: {
+        facePhotos: facePhotos.map((f, i) => ({ url: f.url, tag: faceTags[i] || null })),
+        locationPhotos: locationPhotos.map((f, i) => ({ url: f.url, tag: locationTags[i] || null })),
+        housePhotos: housePhotos.map((f, i) => ({ url: f.url, tag: houseTags[i] || null })),
+        locationLinks: locationLinks.map((link, i) => ({ link, tag: linkTags[i] || null })),
+      },
+      user: {
+        id: req.user.id,
+        full_name: req.user.full_name,
+        username: req.user.username,
+        role: req.user.role,
+        role_id: req.user.role_id,
+      },
     };
 
-    console.log('[PayTrigger] submitDelivery debug:', paytriggerDebug);
+    if (gateRequired) {
+      let gateResult;
+      try {
+        gateResult = await deliveryCompletionService.initiateGatedDelivery({
+          mode: 'agent', order, payload, io, productNameSnapshot, inventoryCategory,
+        });
+      } catch (gateErr) {
+        console.error('[PayTrigger] initiateGatedDelivery failed:', gateErr.message);
+        return res.status(502).json({
+          success: false,
+          error: { code: 502, message: 'PayTrigger enrollment could not be started. Please retry.' },
+          paytrigger_error: gateErr.paytriggerResult || gateErr.message,
+        });
+      }
 
-    if (enrollPaytrigger && pt.ENABLED() && updatedDelivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
-      const expiration = firstInstallmentDueDate;
-      console.log('[PayTrigger] calling preEnrollImei with:', {
-        imei: updatedDelivery.product_imei,
-        orderRef: order.order_ref,
-        productName: refinedProductNameSnapshot,
-        detectedBrand: paytriggerBrand,
-        expiration,
-      });
+      if (gateResult.completedImmediately) {
+        return res.status(201).json({
+          success: true,
+          message: 'Delivery submitted successfully',
+          data: { delivery: gateResult.delivery, ledger_url: null },
+        });
+      }
 
-      pt.preEnrollImei(
-        updatedDelivery.product_imei,
-        order.order_ref,
-        productNameSnapshot,
-        expiration
-      ).then(async (result) => {
-        console.log('[PayTrigger] preEnrollImei result:', result);
-        if (result?.code === 200 || result?.code === 50015) {
-          let deviceTag = null;
-          let serverState = 500;
-          let enrollmentStatus = 'pre_enrolled';
-
-          if (result?.code === 50015) {
-            try {
-              const dRes = await pt.getDeviceTag(updatedDelivery.product_imei);
-              if (dRes?.code === 200 && dRes.data) {
-                deviceTag = dRes.data.deviceTag || null;
-                serverState = dRes.data.serverState || 500;
-                const stateMap = { 500: 'pre_enrolled', 1000: 'registered', 2000: 'ready_to_activate', 3000: 'active', 4000: 'locked', 5000: 'removable' };
-                enrollmentStatus = stateMap[serverState] || 'pre_enrolled';
-              }
-            } catch (err) {
-              console.error('[PayTrigger] Failed to recover device tag:', err.message);
-            }
-          }
-
-          await prisma.payTriggerDevice.upsert({
-            where: { imei: updatedDelivery.product_imei },
-            update: {
-              order_id: order.id,
-              order_ref: order.order_ref,
-              delivery_id: updatedDelivery.id,
-              product_model: productNameSnapshot,
-              device_tag: deviceTag,
-              server_state: serverState,
-              enrollment_status: enrollmentStatus,
-              expiration,
-              last_sync_at: new Date(),
-              raw_state: result,
-            },
-            create: {
-              imei: updatedDelivery.product_imei,
-              order_id: order.id,
-              order_ref: order.order_ref,
-              delivery_id: updatedDelivery.id,
-              product_model: productNameSnapshot,
-              device_tag: deviceTag,
-              enrollment_status: enrollmentStatus,
-              server_state: serverState,
-              expiration,
-              last_sync_at: new Date(),
-              raw_state: result,
-            },
-          }).then(() => {
-            const io = req.app.get('io');
-            if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'success', title: 'PayTrigger', message: 'Device successfully enrolled.' });
-          }).catch(e => console.error('[PayTrigger] create/update device failed:', e.message));
-        } else {
-          console.warn('[PayTrigger] pre-enroll returned non-200:', {
-            code: result?.code,
-            message: result?.message,
-            result,
-          });
-          const io = req.app.get('io');
-          if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${result?.message}` });
-        }
-      }).catch(e => {
-        console.error('[PayTrigger] pre-enroll failed:', e.message);
-        const io = req.app.get('io');
-        if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${e.message}` });
-      });
-    } else {
-      console.warn('[PayTrigger] block skipped because condition failed:', {
-        enabled: pt.ENABLED(),
-        hasImei: Boolean(updatedDelivery.product_imei),
-        hasOrder: Boolean(order),
-        productName: productNameSnapshot,
-        inventoryCategory,
-        eligible: Boolean(productNameSnapshot && pt.isEligible(productNameSnapshot, inventoryCategory)),
+      return res.status(202).json({
+        success: true,
+        status: deliveryCompletionService.PENDING_STATUS,
+        message: 'Delivery initiated. Waiting for PayTrigger device enrollment confirmation.',
+        data: { delivery: gateResult.delivery, paytrigger: gateResult.paytriggerDevice },
       });
     }
+
+    const { delivery: updatedDelivery, ledgerUrl } = await deliveryCompletionService.completeAgentDelivery({
+      order, payload, io, productNameSnapshot, inventoryCategory,
+    });
 
     return res.status(201).json({
       success: true,
@@ -740,7 +268,22 @@ const getDeliveryByOrderId = async (req, res) => {
         delivery_agent: {
           select: { full_name: true, username: true }
         },
-        uploads: true
+        uploads: true,
+        // Surfaces enrollment/device state so the frontend can render the
+        // PayTrigger processing screen without a separate request.
+        paytrigger_devices: {
+          orderBy: { updated_at: 'desc' },
+          take: 1,
+          select: {
+            imei: true,
+            device_tag: true,
+            enrollment_status: true,
+            server_state: true,
+            lock_status: true,
+            product_model: true,
+            last_sync_at: true,
+          }
+        }
       }
     });
 
@@ -751,9 +294,13 @@ const getDeliveryByOrderId = async (req, res) => {
       });
     }
 
+    // pending_payload is an internal implementation detail (raw request snapshot
+    // used to finish a PayTrigger-gated delivery) — never expose it to clients.
+    const { pending_payload, ...deliverySafe } = delivery;
+
     return res.status(200).json({
       success: true,
-      data: { delivery }
+      data: { delivery: deliverySafe }
     });
   } catch (error) {
     console.error('Get delivery by order error:', error);
@@ -2029,6 +1576,9 @@ const submitSelfPickupDelivery = async (req, res) => {
     }
 
     if (order.delivery) {
+      // Also covers the PayTrigger-gated case: a placeholder Delivery row already
+      // exists (status = awaiting_paytrigger_enrollment), so re-submission is blocked
+      // the same way a completed delivery blocks re-submission.
       return res.status(400).json({ success: false, message: 'Delivery already submitted for this order' });
     }
 
@@ -2044,475 +1594,79 @@ const submitSelfPickupDelivery = async (req, res) => {
     // 2.1 Process face photo
     const facePhotos = req.files['face_photo'] || [];
 
-    // 3. Process Plan & Advance
-    let advanceAmount = 0.0;
-    let planObj = null;
-
-    if (selected_plan) {
-      try {
-        planObj = typeof selected_plan === 'string' ? JSON.parse(selected_plan) : selected_plan;
-        if (planObj && (planObj.advance !== undefined || planObj.advance_amount !== undefined)) {
-          advanceAmount = parseFloat(planObj.advance || planObj.advance_amount);
-        }
-      } catch (e) {
-        console.error('Error parsing selected_plan:', e);
+    // Read-only inventory snapshot — used both for PayTrigger gating and as the
+    // product name/category passed down to the completion logic.
+    let productNameSnapshot = order.product_name;
+    let inventoryCategory = null;
+    if (product_imei) {
+      const inventory = await prisma.outletInventory.findFirst({ where: { imei_serial: product_imei, outlet_id } });
+      if (inventory) {
+        productNameSnapshot = inventory.product_name;
+        inventoryCategory = inventory.category;
       }
     }
 
-    const purchaser = order.verification?.purchaser;
-    const confirmedCustomerName = purchaser?.name || purchaser?.full_name || order.customer_name;
-    let inventoryCategory = null;
-    // 4. Start Transaction for Inventory, Delivery, Order and Financials
-    const result = await prisma.$transaction(async (tx) => {
-      let colorVariant = null;
-      let productNameSnapshot = order.product_name;
-
-      // Update Inventory if IMEI provided
-      if (product_imei) {
-        const inventory = await tx.outletInventory.findFirst({
-          where: { imei_serial: product_imei, outlet_id }
-        });
-
-        if (inventory) {
-          await tx.outletInventory.update({
-            where: { id: inventory.id },
-            data: {
-              status: 'Sold',
-              updated_at: now()
-            }
-          });
-          inventoryCategory = inventory.category;
-          colorVariant = inventory.color_variant || null;
-          productNameSnapshot = inventory.product_name;
-
-          // Log Stock Transfer from Outlet to Customer with explicit timestamps
-          await tx.stockTransfer.create({
-            data: {
-              inventory_id: inventory.id,
-              from_type: 'Outlet',
-              from_id: outlet_id,
-              to_type: 'Customer',
-              to_id: order.id,
-              status: 'completed',
-              quantity_transferred: 1,
-              created_at: now(),
-              updated_at: now()
-            }
-          });
-        }
-      }
-
-      // Create delivery record with explicit timestamps
-      const delivery = await tx.delivery.create({
-        data: {
-          order_id: parseInt(order_id),
-          delivery_agent_id: req.user.id, // The branch user who processed the self-pickup
-          status: 'completed',
-          start_time: now(),
-          end_time: now(),
-          verified: true,
-          product_imei: product_imei || null,
-          selected_plan: selected_plan || null,
-          self_pickup: true,
-          feedback: feedback || null,
-          created_at: now(),
-          updated_at: now()
-        }
-      });
-
-      // Create uploads if any
-      if (facePhotos.length > 0) {
-        await tx.deliveryUpload.createMany({
-          data: facePhotos.map(file => ({
-            delivery_id: delivery.id,
-            upload_type: 'face_photo',
-            file_url: file.url || file.path,
-            uploaded_at: now()
-          }))
-        });
-      }
-
-      // Update order status with updated_at
-      await tx.order.update({
-        where: { id: parseInt(order_id) },
-        data: {
-          status: 'delivered',
-          is_delivered: true,
-          delivered_at: order.delivered_at || now(),
-          updated_at: order.delivered_at || now()
-        }
-      });
-
-      // Create Cash In Hand entry for advance (marked as paid since it's collected at branch)
-      if (advanceAmount > 0) {
-        await tx.cashInHand.create({
-          data: {
-            officer_id: req.user.id,
-            outlet_id: outlet_id,
-            order_id: parseInt(order_id),
-            amount: advanceAmount,
-            submitted_amount: advanceAmount,
-            status: 'paid',
-            customer_name: confirmedCustomerName,
-            product_name: productNameSnapshot,
-            imei_serial: product_imei || null,
-            color_variant: colorVariant || null,
-            payment_method: 'Cash',
-            cash_type: 'Down payment (Self Pickup)',
-            created_at: now(),
-            updated_at: now()
-          }
-        });
-
-        // Update Cash Register - Down Payments
-        await updateCashRegister(tx, outlet_id, 'down_payments', advanceAmount, 'add');
-      }
-
-      return { delivery, productNameSnapshot, colorVariant };
-    }, {
-      maxWait: 5000,
-      timeout: 20000
+    const { gateRequired } = deliveryCompletionService.resolvePaytriggerGate({
+      enrollPaytriggerFlag: enroll_paytrigger,
+      product_imei,
+      productNameSnapshot,
+      inventoryCategory,
     });
 
-    const { delivery, productNameSnapshot, colorVariant } = result;
-
-    await logOrderStatusChange(parseInt(order_id), order.status, 'delivered', req.user);
-
-    // 5. Build Installment Ledger
-    let installmentLedger = null;
-    let ledgerUrl = null;
-    let firstInstallmentDueDate = null;
-    try {
-      const monthlyAmt = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
-      const totalMonths = planObj?.months || planObj?.duration || order.months || 0;
-      const deliveryDate = now();
-
-      if (totalMonths > 0 && monthlyAmt > 0) {
-        let ledgerRows = [];
-
-        // Use custom ledger from frontend if provided (user edited dates/amounts)
-        let customLedger = null;
-        try {
-          const raw = req.body.custom_ledger;
-          if (raw) customLedger = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        } catch (e) { /* ignore parse errors */ }
-
-        // Advance row always first
-        ledgerRows.push({
-          month: 0,
-          label: 'Advance Payment',
-          due_date: deliveryDate,
-          amount: parseFloat(advanceAmount || 0),
-          status: 'paid',
-          paid_at: deliveryDate,
-          payment_method: 'Cash',
-          feedback: 'Self Pickup at Branch'
-        });
-
-        if (customLedger && Array.isArray(customLedger) && customLedger.length === totalMonths) {
-          // Use edited installment rows from the UI
-          customLedger.forEach((row, i) => {
-            ledgerRows.push({
-              month: i + 1,
-              label: `Month ${i + 1}`,
-              due_date: row.date ? new Date(row.date) : addMonths(deliveryDate, i + 1),
-              amount: parseFloat(row.amount) || parseFloat(monthlyAmt),
-              status: 'pending',
-              paid_at: null,
-            });
-          });
-        } else {
-          // Auto-generate installment rows
-          for (let i = 0; i < totalMonths; i++) {
-            ledgerRows.push({
-              month: i + 1,
-              label: `Month ${i + 1}`,
-              due_date: addMonths(deliveryDate, i + 1),
-              amount: parseFloat(monthlyAmt),
-              status: 'pending',
-              paid_at: null,
-            });
-          }
-        }
-
-        // Capture first installment due date for PayTrigger expiration
-        if (ledgerRows.length > 1 && ledgerRows[1].due_date) {
-          firstInstallmentDueDate = ledgerRows[1].due_date;
-        }
-
-        const ledgerToken = jwt.sign(
-          { order_id: parseInt(order_id), delivery_id: delivery.id },
-          LEDGER_TOKEN_SECRET,
-          { expiresIn: '730d' }
-        );
-        
-        // Short unique ID for the link (last 6 digits of IMEI)
-        const imeiStr = product_imei ? String(product_imei).replace(/\D/g, '') : '';
-        const shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
-        ledgerUrl = `${shortId}`;
-
-        installmentLedger = await prisma.installmentLedger.create({
-          data: {
-            order_id: parseInt(order_id),
-            delivery_id: delivery.id,
-            token: ledgerToken,
-            short_id: shortId,
-            ledger_rows: ledgerRows,
-            created_at: now(),
-            updated_at: now()
-          }
-        });
-
-        // -------------------------------------------------------------
-        // TPS / 1BILL CONSUMER NUMBER GENERATION FOR SELF PICKUP
-        // -------------------------------------------------------------
-        const mobile = purchaser?.telephone_number || order.whatsapp_number;
-        const consumerNo = await generateConsumerNumber(product_imei, mobile);
-        const smartPayConsumerNo = await generateSmartPayConsumerNumber(product_imei, mobile);
-
-        let firstMonthDue = 0;
-        let dueDate = new Date();
-        let billingMonthStr = "0000";
-
-        if (Array.isArray(ledgerRows) && ledgerRows.length > 1) {
-          // Row 1 is Month 1 since Row 0 is Advance Payment
-          firstMonthDue = ledgerRows[1].amount || 0;
-          if (ledgerRows[1].due_date) {
-            const d = new Date(ledgerRows[1].due_date);
-            if (!isNaN(d.getTime())) {
-              dueDate = d;
-              billingMonthStr = String(d.getFullYear()).slice(-2) + String(d.getMonth() + 1).padStart(2, '0');
-            }
-          }
-        }
-
-        try {
-          await prisma.consumerNumber.createMany({
-            data: [
-              {
-                consumer_number: consumerNo,
-                ledger_id: installmentLedger.id,
-                delivery_id: delivery.id,
-                customer_name: confirmedCustomerName || order.customer_name || 'N/A',
-                mobile_number: mobile || 'N/A',
-                imei_serial: product_imei || null,
-                amount_due: firstMonthDue,
-                billing_month: billingMonthStr,
-                due_date: dueDate,
-                bill_status: 'U', // Unpaid
-                created_at: now(),
-                updated_at: now()
-              },
-              {
-                consumer_number: smartPayConsumerNo,
-                ledger_id: installmentLedger.id,
-                delivery_id: delivery.id,
-                customer_name: confirmedCustomerName || order.customer_name || 'N/A',
-                mobile_number: mobile || 'N/A',
-                imei_serial: product_imei || null,
-                amount_due: firstMonthDue,
-                billing_month: billingMonthStr,
-                due_date: dueDate,
-                bill_status: 'U', // Unpaid
-                created_at: now(),
-                updated_at: now()
-              }
-            ]
-          });
-        } catch (consumerErr) {
-          console.error('[submitSelfPickupDelivery] Failed to create ConsumerNumbers (Non-fatal):', consumerErr);
-        }
-
-      }
-
-    } catch (ledgerErr) {
-      console.error('[submitSelfPickupDelivery] Ledger creation error:', ledgerErr);
-    }
-
-    // 6. WATI Messages
-    const customerPhone = purchaser?.telephone_number;
-    const deliveryDateStr = formatDatePK(now());
-    if (customerPhone) {
-      sendDeliveryConfirmation(customerPhone, {
-        customerName: confirmedCustomerName,
-        productName: productNameSnapshot,
-        imei: product_imei || 'N/A',
-        colorVariant: colorVariant || 'N/A',
-        advanceAmount,
-        deliveryDate: deliveryDateStr,
-        orderRef: order.order_ref,
-        orderStatus: 'Delivered (Self Pickup)',
-      }).catch(e => console.error('[WATI] Delivery confirmation error:', e));
-
-      if (installmentLedger && ledgerUrl) {
-        const rows = installmentLedger.ledger_rows;
-        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-        sendInstallmentLedger(customerPhone, {
-          customerName: confirmedCustomerName,
-          productName: productNameSnapshot,
-          orderRef: order.order_ref,
-          nextMonthLabel: 'Mahina 1',
-          monthlyAmount: rows[1]?.amount || 0,
-          dueDate: rows[1] ? formatDatePK(rows[1].due_date) : 'N/A',
-          totalRemaining: totalRemain,
-          ledgerUrl,
-        }).catch(e => console.error('[WATI] Ledger template error:', e));
-      }
-
-      // Send to alternate phone as well
-      const altPhone = purchaser?.alternate_phone_number;
-      if (altPhone) {
-        if (installmentLedger && ledgerUrl) {
-          const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
-          const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-          sendInstallmentLedger(altPhone, {
-            customerName: confirmedCustomerName,
-            productName: productNameSnapshot,
-            orderRef: order.order_ref,
-            nextMonthLabel: 'Mahina 1',
-            monthlyAmount: rows[1]?.amount || 0,
-            dueDate: rows[1] ? formatDatePK(rows[1].due_date) : 'N/A',
-            totalRemaining: totalRemain,
-            ledgerUrl,
-          }).catch(e => console.error('[WATI] Ledger alt phone error:', e));
-        }
-      }
-    } else {
-      console.warn('[completeDeliveryFromApp] No customer phone — WATI messages skipped for order', order.order_ref);
-    }
-
-    // 7. Success Response
     const io = req.app.get('io');
-    await notifyAdmins(
-      'Self Pickup Completed',
-      `Order #${order.order_ref} picked up at Branch (Outlet ID: ${outlet_id}) by ${req.user.full_name}`,
-      'delivery_complete',
-      delivery.id,
-      io
-    );
-
-    await notifyOutlet(
+    const payload = {
+      order_id: order.id,
       outlet_id,
-      'Self Pickup Completed',
-      `Order #${order.order_ref} has been picked up by the customer at your branch.`,
-      'delivery_complete',
-      delivery.id,
-      io
-    );
-
-    // ── PayTrigger: Enroll device only for supported models (non-blocking) ───
-    const enrollPaytrigger = enroll_paytrigger === true || enroll_paytrigger === 'true';
-    const paytriggerBrand = pt.detectBrand(productNameSnapshot);
-    const refinedProductNameSnapshot = paytriggerBrand;
-    const paytriggerDebug = {
-      enabled: pt.ENABLED(),
-      hasImei: Boolean(delivery.product_imei),
-      hasOrder: Boolean(order),
-      orderId: order?.id,
-      orderRef: order?.order_ref,
-      productName: refinedProductNameSnapshot,
-      paytriggerBrand,
-      inventoryCategory,
-      eligible: Boolean(refinedProductNameSnapshot && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)),
-      firstInstallmentDueDate: firstInstallmentDueDate,
-      deliveryId: delivery.id,
-      imei: delivery.product_imei,
+      product_imei: product_imei || null,
+      selected_plan: selected_plan || null,
+      feedback: feedback || null,
+      custom_ledger: req.body.custom_ledger || null,
+      uploads: {
+        facePhotos: facePhotos.map((f) => ({ url: f.url || f.path })),
+      },
+      user: {
+        id: req.user.id,
+        full_name: req.user.full_name,
+        username: req.user.username,
+        role: req.user.role,
+        role_id: req.user.role_id,
+      },
     };
 
-    console.log('[PayTrigger] submitDelivery debug:', paytriggerDebug);
+    if (gateRequired) {
+      let gateResult;
+      try {
+        gateResult = await deliveryCompletionService.initiateGatedDelivery({
+          mode: 'self_pickup', order, payload, io, productNameSnapshot, inventoryCategory,
+        });
+      } catch (gateErr) {
+        console.error('[PayTrigger] initiateGatedDelivery failed:', gateErr.message);
+        return res.status(502).json({
+          success: false,
+          message: 'PayTrigger enrollment could not be started. Please retry.',
+          paytrigger_error: gateErr.paytriggerResult || gateErr.message,
+        });
+      }
 
-    if (enrollPaytrigger && pt.ENABLED() && delivery.product_imei && order && paytriggerBrand && pt.isEligible(refinedProductNameSnapshot, inventoryCategory)) {
-      const expiration = firstInstallmentDueDate;
-      console.log('[PayTrigger] calling preEnrollImei with:', {
-        imei: delivery.product_imei,
-        orderRef: order.order_ref,
-        productName: refinedProductNameSnapshot,
-        detectedBrand: paytriggerBrand,
-        expiration,
-      });
+      if (gateResult.completedImmediately) {
+        return res.status(201).json({
+          success: true,
+          message: 'Self Pickup processed successfully',
+          data: { delivery: gateResult.delivery, ledger_url: null },
+        });
+      }
 
-      pt.preEnrollImei(
-        delivery.product_imei,
-        order.order_ref,
-        productNameSnapshot,
-        expiration
-      ).then(async (result) => {
-        console.log('[PayTrigger] preEnrollImei result:', result);
-        if (result?.code === 200 || result?.code === 50015) {
-          let deviceTag = null;
-          let serverState = 500;
-          let enrollmentStatus = 'pre_enrolled';
-
-          if (result?.code === 50015) {
-            try {
-              const dRes = await pt.getDeviceTag(delivery.product_imei);
-              if (dRes?.code === 200 && dRes.data) {
-                deviceTag = dRes.data.deviceTag || null;
-                serverState = dRes.data.serverState || 500;
-                const stateMap = { 500: 'pre_enrolled', 1000: 'registered', 2000: 'ready_to_activate', 3000: 'active', 4000: 'locked', 5000: 'removable' };
-                enrollmentStatus = stateMap[serverState] || 'pre_enrolled';
-              }
-            } catch (err) {
-              console.error('[PayTrigger] Failed to recover device tag:', err.message);
-            }
-          }
-
-          await prisma.payTriggerDevice.upsert({
-            where: { imei: delivery.product_imei },
-            update: {
-              order_id: order.id,
-              order_ref: order.order_ref,
-              delivery_id: delivery.id,
-              product_model: productNameSnapshot,
-              device_tag: deviceTag,
-              server_state: serverState,
-              enrollment_status: enrollmentStatus,
-              expiration,
-              last_sync_at: new Date(),
-              raw_state: result,
-            },
-            create: {
-              imei: delivery.product_imei,
-              order_id: order.id,
-              order_ref: order.order_ref,
-              delivery_id: delivery.id,
-              product_model: productNameSnapshot,
-              device_tag: deviceTag,
-              enrollment_status: enrollmentStatus,
-              server_state: serverState,
-              expiration,
-              last_sync_at: new Date(),
-              raw_state: result,
-            },
-          }).then(() => {
-            const io = req.app.get('io');
-            if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'success', title: 'PayTrigger', message: 'Device successfully enrolled.' });
-          }).catch(e => console.error('[PayTrigger] create/update device failed:', e.message));
-        } else {
-          console.warn('[PayTrigger] pre-enroll returned non-200:', {
-            code: result?.code,
-            message: result?.message,
-            result,
-          });
-          const io = req.app.get('io');
-          if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${result?.message}` });
-        }
-      }).catch(e => {
-        console.error('[PayTrigger] pre-enroll failed:', e.message);
-        const io = req.app.get('io');
-        if (io) io.to(`user_${req.user.id}`).emit('notification', { type: 'error', title: 'PayTrigger Error', message: `Pre-enrollment failed: ${e.message}` });
-      });
-    } else {
-      console.warn('[PayTrigger] block skipped because condition failed:', {
-        enabled: pt.ENABLED(),
-        hasImei: Boolean(delivery.product_imei),
-        hasOrder: Boolean(order),
-        productName: productNameSnapshot,
-        inventoryCategory,
-        eligible: Boolean(productNameSnapshot && pt.isEligible(productNameSnapshot, inventoryCategory)),
+      return res.status(202).json({
+        success: true,
+        status: deliveryCompletionService.PENDING_STATUS,
+        message: 'Self Pickup initiated. Waiting for PayTrigger device enrollment confirmation.',
+        data: { delivery: gateResult.delivery, paytrigger: gateResult.paytriggerDevice },
       });
     }
 
+    const { delivery, ledgerUrl } = await deliveryCompletionService.completeSelfPickupDelivery({
+      order, payload, io, productNameSnapshot, inventoryCategory,
+    });
 
     return res.status(201).json({
       success: true,

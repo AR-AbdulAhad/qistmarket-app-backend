@@ -20,33 +20,67 @@ const isJazzEnabled = () => process.env.JAZZ_OTP_ENABLED === 'true';
 
 /**
  * Sends an OTP via whichever channel(s) are enabled in .env. Never throws —
- * each channel's failure is logged and does not affect the other.
+ * each channel's failure is logged and does not affect the other. Resolves to
+ * { success, wati, jazz } so a caller that needs to know whether the OTP
+ * actually went out (e.g. an HTTP endpoint reporting failure to the app) can
+ * check it; fire-and-forget callers can simply ignore the return value.
  */
 const sendOtp = async (phone, otp) => {
-  const jobs = [];
+  const result = { success: false, wati: null, jazz: null };
 
   if (isWatiEnabled()) {
-    jobs.push(
-      Promise.resolve(watiService.sendOTP(phone, otp)).catch((err) => {
-        console.error('[OTP] WATI send failed:', err?.message || err);
-      })
-    );
+    result.wati = await Promise.resolve(watiService.sendOTP(phone, otp)).catch((err) => {
+      console.error('[OTP] WATI send failed:', err?.message || err);
+      return { success: false, error: err?.message || String(err) };
+    });
   }
 
   if (isJazzEnabled()) {
-    jobs.push(
-      jazzSmsService.sendOTPSms(phone, otp).catch((err) => {
-        console.error('[OTP] Jazz send failed:', err?.message || err);
-      })
-    );
+    result.jazz = await jazzSmsService.sendOTPSms(phone, otp).catch((err) => {
+      console.error('[OTP] Jazz send failed:', err?.message || err);
+      return { success: false, error: err?.message || String(err) };
+    });
   }
 
-  if (jobs.length === 0) {
+  if (!result.wati && !result.jazz) {
     console.error('[OTP] No channel enabled — set WATI_OTP_ENABLED and/or JAZZ_OTP_ENABLED in .env');
-    return;
+    return result;
   }
 
-  await Promise.all(jobs);
+  result.success = Boolean(result.wati?.success || result.jazz?.success);
+  return result;
 };
 
-module.exports = { sendOtp, isWatiEnabled, isJazzEnabled };
+/**
+ * Same as sendOtp, but for the named "guarantor" OTP flow — uses the WATI
+ * grantor-specific template (with the guarantor's name) and, on Jazz, a
+ * condensed guarantor-worded SMS. Gated by the same WATI_OTP_ENABLED /
+ * JAZZ_OTP_ENABLED flags as the generic OTP so both flows switch together.
+ */
+const sendGuarantorOtp = async (phone, name, otp) => {
+  const result = { success: false, wati: null, jazz: null };
+
+  if (isWatiEnabled()) {
+    result.wati = await Promise.resolve(watiService.sendGrantorOTP(phone, name, otp)).catch((err) => {
+      console.error('[OTP] WATI guarantor send failed:', err?.message || err);
+      return { success: false, error: err?.message || String(err) };
+    });
+  }
+
+  if (isJazzEnabled()) {
+    result.jazz = await jazzSmsService.sendGuarantorOTPSms(phone, name, otp).catch((err) => {
+      console.error('[OTP] Jazz guarantor send failed:', err?.message || err);
+      return { success: false, error: err?.message || String(err) };
+    });
+  }
+
+  if (!result.wati && !result.jazz) {
+    console.error('[OTP] No channel enabled — set WATI_OTP_ENABLED and/or JAZZ_OTP_ENABLED in .env');
+    return result;
+  }
+
+  result.success = Boolean(result.wati?.success || result.jazz?.success);
+  return result;
+};
+
+module.exports = { sendOtp, sendGuarantorOtp, isWatiEnabled, isJazzEnabled };

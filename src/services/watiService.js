@@ -56,6 +56,19 @@ const sendOTPWhatsApp = async (phone, otp) => {
 
 const sendOTP = async (phone, otp) => sendOTPWhatsApp(phone, otp);
 
+// Grantor (guarantor) OTP — named template with the guarantor's name inserted,
+// consolidated from what used to be duplicated inline in appVerificationOtp.js
+// and ordersController.js's convert-sale grantor branch.
+const WATI_GRANTORS_OTP_TEMPLATE = process.env.WATI_GRANTORS_OTP_TEMPLATE_NAME || 'grantors_otp';
+const WATI_GRANTORS_OTP_BROADCAST = process.env.WATI_GRANTORS_OTP_BROADCAST_NAME || 'grantors_otp';
+
+const sendGrantorOTP = async (phone, name, otp) => {
+  return sendTemplate(phone, WATI_GRANTORS_OTP_TEMPLATE, WATI_GRANTORS_OTP_BROADCAST, [
+    { name: '1', value: otp },
+    { name: 'name', value: name || '' },
+  ]);
+};
+
 // ─── Template 1: Delivery Confirmation ─────────────────────────────────────
 // Params: customer_name, product_name, imei, color_variant, advance_amount,
 //         delivery_date, order_ref, order_status
@@ -268,6 +281,281 @@ const sendPtpConfirmation = async (phone, {
   return sendTemplate(phone, WATI_PTP_TEMPLATE, WATI_PTP_BROADCAST, parameters);
 };
 
+// ─── Template 9: Order Booking Confirmation ────────────────────────────────
+const WATI_ORDER_BOOKING_TEMPLATE = process.env.WATI_ORDER_BOOKING_TEMPLATE || 'order_booking_confirmation';
+const WATI_ORDER_BOOKING_BROADCAST = process.env.WATI_ORDER_BOOKING_TEMPLATE || 'order_booking_confirmation';
+
+const sendOrderBookingConfirmation = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  orderBookerName,
+  orderBookerNumber,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: orderBookerName || 'Qist Market' },
+    { name: '8', value: orderBookerNumber || 'N/A' },
+  ];
+  // Note: the "Complaint Register Karein" link is a STATIC website button
+  // configured in the WATI template itself, not a body variable — don't add
+  // COMPLAINT_URL here, it would push the parameter count past the body's
+  // {{1}}..{{8}} and cause WATI/Meta to reject the send.
+  return sendTemplate(phone, WATI_ORDER_BOOKING_TEMPLATE, WATI_ORDER_BOOKING_BROADCAST, parameters);
+};
+
+// ─── Template 10: Order Transferred to Outlet ──────────────────────────────
+const WATI_ORDER_TRANSFER_TEMPLATE = process.env.WATI_ORDER_TRANSFER_TEMPLATE || 'order_transfer_update';
+const WATI_ORDER_TRANSFER_BROADCAST = process.env.WATI_ORDER_TRANSFER_TEMPLATE || 'order_transfer_update';
+
+const sendOrderTransferUpdate = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+  frontDeskOfficerName,
+  frontDeskOfficerNumber,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: outletName || 'N/A' },
+    { name: '8', value: frontDeskOfficerName || 'N/A' },
+    { name: '9', value: frontDeskOfficerNumber || 'N/A' },
+  ];
+  // Complaint link is a static website button on the template — no body variable for it.
+  return sendTemplate(phone, WATI_ORDER_TRANSFER_TEMPLATE, WATI_ORDER_TRANSFER_BROADCAST, parameters);
+};
+
+// ─── Template 11: Verification Officer Assigned ────────────────────────────
+const WATI_VERIFICATION_OFFICER_ASSIGNED_TEMPLATE = process.env.WATI_VERIFICATION_OFFICER_ASSIGNED_TEMPLATE || 'verification_officer_assigned';
+const WATI_VERIFICATION_OFFICER_ASSIGNED_BROADCAST = process.env.WATI_VERIFICATION_OFFICER_ASSIGNED_TEMPLATE || 'verification_officer_assigned';
+
+const sendVerificationOfficerAssigned = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+  verificationOfficerName,
+  verificationOfficerNumber,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: outletName || 'N/A' },
+    { name: '8', value: verificationOfficerName || 'N/A' },
+    { name: '9', value: verificationOfficerNumber || 'N/A' },
+  ];
+  // Complaint link is a static website button on the template — no body variable for it.
+  return sendTemplate(phone, WATI_VERIFICATION_OFFICER_ASSIGNED_TEMPLATE, WATI_VERIFICATION_OFFICER_ASSIGNED_BROADCAST, parameters);
+};
+
+// ─── Template 12: Verification Started ─────────────────────────────────────
+const WATI_VERIFICATION_STARTED_TEMPLATE = process.env.WATI_VERIFICATION_STARTED_TEMPLATE || 'verification_started';
+const WATI_VERIFICATION_STARTED_BROADCAST = process.env.WATI_VERIFICATION_STARTED_TEMPLATE || 'verification_started';
+
+const sendVerificationStarted = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+  verificationOfficerName,
+  verificationOfficerNumber,
+  verificationStartDateTime,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: outletName || 'N/A' },
+    { name: '8', value: verificationOfficerName || 'N/A' },
+    { name: '9', value: verificationOfficerNumber || 'N/A' },
+    { name: '10', value: verificationStartDateTime || new Date().toString() },
+  ];
+  // Complaint link is a static website button on the template — no body variable for it.
+  return sendTemplate(phone, WATI_VERIFICATION_STARTED_TEMPLATE, WATI_VERIFICATION_STARTED_BROADCAST, parameters);
+};
+
+// ─── Template 13: Verification Completed ───────────────────────────────────
+const WATI_VERIFICATION_COMPLETED_TEMPLATE = process.env.WATI_VERIFICATION_COMPLETED_TEMPLATE || 'verification_completed';
+const WATI_VERIFICATION_COMPLETED_BROADCAST = process.env.WATI_VERIFICATION_COMPLETED_TEMPLATE || 'verification_completed';
+
+const sendVerificationCompleted = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: outletName || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_VERIFICATION_COMPLETED_TEMPLATE, WATI_VERIFICATION_COMPLETED_BROADCAST, parameters);
+};
+
+// ─── Template 14: Order Cancellation ───────────────────────────────────────
+const WATI_ORDER_CANCELLATION_TEMPLATE = process.env.WATI_ORDER_CANCELLATION_TEMPLATE || 'order_cancellation_update';
+const WATI_ORDER_CANCELLATION_BROADCAST = process.env.WATI_ORDER_CANCELLATION_TEMPLATE || 'order_cancellation_update';
+
+const sendOrderCancellation = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+  cancelledByName,
+  cancelledByRole,
+  cancellationReason,
+  cancellationDateTime,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: outletName || 'N/A' },
+    { name: '8', value: cancelledByName || 'Qist Market' },
+    { name: '9', value: cancelledByRole || 'N/A' },
+    { name: '10', value: cancellationReason || 'N/A' },
+    { name: '11', value: cancellationDateTime || new Date().toString() },
+  ];
+  return sendTemplate(phone, WATI_ORDER_CANCELLATION_TEMPLATE, WATI_ORDER_CANCELLATION_BROADCAST, parameters);
+};
+
+// ─── Template 15: Final Order Approval ──────────────────────────────────────
+const WATI_FINAL_APPROVAL_TEMPLATE = process.env.WATI_FINAL_APPROVAL_TEMPLATE || 'final_order_approval';
+const WATI_FINAL_APPROVAL_BROADCAST = process.env.WATI_FINAL_APPROVAL_TEMPLATE || 'final_order_approval';
+
+const sendFinalOrderApproval = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+  decisionDateTime,
+  analyzer1Name,
+  analyzer1Decision,
+  analyzer1Feedback,
+  analyzer2Name,
+  analyzer2Decision,
+  analyzer2Feedback,
+  thirdAnalyzerSection,
+  frontDeskOfficerName,
+  frontDeskOfficerNumber,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: outletName || 'N/A' },
+    { name: '8', value: decisionDateTime || new Date().toString() },
+    { name: '9', value: analyzer1Name || 'N/A' },
+    { name: '10', value: analyzer1Decision || 'N/A' },
+    { name: '11', value: analyzer1Feedback || 'N/A' },
+    { name: '12', value: analyzer2Name || 'N/A' },
+    { name: '13', value: analyzer2Decision || 'N/A' },
+    { name: '14', value: analyzer2Feedback || 'N/A' },
+    { name: '15', value: thirdAnalyzerSection || 'N/A' },
+    { name: '16', value: frontDeskOfficerName || 'N/A' },
+    { name: '17', value: frontDeskOfficerNumber || 'N/A' },
+  ];
+  // Complaint link is a static website button on the template — no body variable for it.
+  return sendTemplate(phone, WATI_FINAL_APPROVAL_TEMPLATE, WATI_FINAL_APPROVAL_BROADCAST, parameters);
+};
+
+// ─── Template 16: Final Order Rejection ─────────────────────────────────────
+const WATI_FINAL_REJECTION_TEMPLATE = process.env.WATI_FINAL_REJECTION_TEMPLATE || 'final_order_rejection';
+const WATI_FINAL_REJECTION_BROADCAST = process.env.WATI_FINAL_REJECTION_TEMPLATE || 'final_order_rejection';
+
+const sendFinalOrderRejection = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+  decisionDateTime,
+  analyzer1Name,
+  analyzer1Decision,
+  analyzer1Feedback,
+  analyzer2Name,
+  analyzer2Decision,
+  analyzer2Feedback,
+  thirdAnalyzerSection,
+  finalRejectionReason,
+  frontDeskOfficerName,
+  frontDeskOfficerNumber,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: String(installmentDuration || 'N/A') },
+    { name: '6', value: String(monthlyInstallment || 0) },
+    { name: '7', value: outletName || 'N/A' },
+    { name: '8', value: decisionDateTime || new Date().toString() },
+    { name: '9', value: analyzer1Name || 'N/A' },
+    { name: '10', value: analyzer1Decision || 'N/A' },
+    { name: '11', value: analyzer1Feedback || 'N/A' },
+    { name: '12', value: analyzer2Name || 'N/A' },
+    { name: '13', value: analyzer2Decision || 'N/A' },
+    { name: '14', value: analyzer2Feedback || 'N/A' },
+    { name: '15', value: thirdAnalyzerSection || 'N/A' },
+    { name: '16', value: finalRejectionReason || 'N/A' },
+    { name: '17', value: frontDeskOfficerName || 'N/A' },
+    { name: '18', value: frontDeskOfficerNumber || 'N/A' },
+  ];
+  // Complaint link is a static website button on the template — no body variable for it.
+  return sendTemplate(phone, WATI_FINAL_REJECTION_TEMPLATE, WATI_FINAL_REJECTION_BROADCAST, parameters);
+};
+
 // ─── Broadcast helper — same template to multiple numbers ─────────────────
 // Dedupes normalized numbers so the same WhatsApp doesn't get double messages.
 const sendToMany = async (phones, sendFn) => {
@@ -292,6 +580,7 @@ const getCompanyNotifyPhones = () =>
 module.exports = {
   sendTemplate,
   sendOTP,
+  sendGrantorOTP,
   sendDeliveryConfirmation,
   sendReturnConfirmation,
   sendInstallmentLedger,
@@ -302,6 +591,14 @@ module.exports = {
   sendComplaintResolved,
   sendOrderStatusNotification,
   sendPtpConfirmation,
+  sendOrderBookingConfirmation,
+  sendOrderTransferUpdate,
+  sendVerificationOfficerAssigned,
+  sendVerificationStarted,
+  sendVerificationCompleted,
+  sendOrderCancellation,
+  sendFinalOrderApproval,
+  sendFinalOrderRejection,
   sendToMany,
   getCompanyNotifyPhones,
 };
