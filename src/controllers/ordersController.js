@@ -893,11 +893,24 @@ const getOrders = async (req, res) => {
         } else if (key === 'recovery_officer') {
           where.recovery_officer = { username: { contains: value } };
         } else if (key === 'status') {
-          const statusList = value.split(',').map(s => s.trim());
+          let statusList = value.split(',').map(s => s.trim());
+          // 'transferred' (sent to an outlet, not yet actioned there) is a
+          // shared in-between state that the two portals bucket differently:
+          //  - Branch User (outlet inbox, already scoped to outlet_id above):
+          //    it's new work for them, so it belongs in their "New Orders".
+          //  - Everyone else (CSR/admin/etc., the origin-side pipeline view):
+          //    it has left their desk, so it belongs in "Pending Orders", not
+          //    "New Orders", alongside orders already assigned to a
+          //    verification officer (status 'pending').
+          if (userRole === 'branch user' && statusList.length === 1 && statusList[0] === 'new') {
+            statusList = ['new', 'transferred'];
+          } else if (userRole !== 'branch user' && statusList.length === 1 && statusList[0] === 'pending') {
+            statusList = ['pending', 'transferred'];
+          }
           if (statusList.length > 1) {
             where.status = { in: statusList };
           } else {
-            where.status = { contains: value };
+            where.status = { contains: statusList[0] };
           }
         } else if (key === 'dateRange') {
           const range = getDateRangeFilter(value, filters.startDate, filters.endDate);
@@ -933,7 +946,17 @@ const getOrders = async (req, res) => {
           changed_by: { select: { username: true, full_name: true } }
         },
         orderBy: { changed_at: 'desc' }
-  }
+  },
+      // Verified purchaser name (from the verification step) is the source
+      // of truth for who the customer actually is — order.customer_name is
+      // whatever was typed at order-creation time and is often a placeholder.
+      // Kept minimal (just the name) since this list doesn't need the rest
+      // of the purchaser record.
+      verification: {
+        select: {
+          purchaser: { select: { name: true } }
+        }
+      }
 };
 
     const orders = await prisma.order.findMany({
@@ -2201,11 +2224,16 @@ const transferOrder = async (req, res) => {
           outlet_id: null,
           assigned_to_user_id: null,
           verification_assigned_at: null,
+          // Always back to 'new' regardless of how far the order had
+          // progressed at the outlet (still un-actioned = 'transferred', or
+          // already assigned to a verification officer = 'pending') — a
+          // take-back means CSR owns it again from scratch.
+          status: 'new',
           updated_at: new Date(),
         }
       });
 
-      await logOrderStatusChange(updatedOrder.id, 'transferred', 'untransferred', req.user);
+      await logOrderStatusChange(updatedOrder.id, order.status, 'untransferred', req.user);
 
       if (prevOutletId) {
         const io = req.app.get('io');
@@ -2248,6 +2276,11 @@ const transferOrder = async (req, res) => {
         outlet_id: parseInt(outlet_id),
         assigned_to_user_id: null,
         verification_assigned_at: null,
+        // Must actually leave 'new' so it drops out of the origin desk's New
+        // Orders list — previously only the audit log recorded "transferred"
+        // while the real status silently stayed 'new', so a just-transferred
+        // order kept showing up as brand new even after being sent out.
+        status: 'transferred',
         updated_at: new Date(),
       },
       include: {
@@ -2293,13 +2326,14 @@ const transferBulk = async (req, res) => {
           outlet_id: null,
           assigned_to_user_id: null,
           verification_assigned_at: null,
+          status: 'new',
           updated_at: new Date(),
         }
       });
 
       const io = req.app.get('io');
       for (const order of orders) {
-        await logOrderStatusChange(order.id, 'transferred', 'untransferred', req.user);
+        await logOrderStatusChange(order.id, order.status, 'untransferred', req.user);
         if (order.outlet_id) {
           await sendOrderUntransferNotification(order, order.outlet_id, io);
         }
@@ -2326,6 +2360,7 @@ const transferBulk = async (req, res) => {
         outlet_id: parseInt(outlet_id),
         assigned_to_user_id: null,
         verification_assigned_at: null,
+        status: 'transferred',
         updated_at: new Date(),
       }
     });
@@ -3008,6 +3043,10 @@ const getDeliveredOrders = async (req, res) => {
         recovery_officer: { select: { username: true, full_name: true } },
         delivery: true,
         cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
+        // Verified purchaser name takes priority over order.customer_name
+        // (see OrderList.tsx's Customer Name column) — customer_name is
+        // whatever was typed at order-creation time and often a placeholder.
+        verification: { select: { purchaser: { select: { name: true } } } },
       },
     });
 
@@ -3111,6 +3150,7 @@ const getReturnedOrders = async (req, res) => {
         recovery_officer: { select: { username: true, full_name: true } },
         delivery: true,
         cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
+        verification: { select: { purchaser: { select: { name: true } } } },
       },
     });
 

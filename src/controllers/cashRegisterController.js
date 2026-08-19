@@ -209,6 +209,13 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
         }
     });
 
+    // 5b. Cash Sale (walk-in outright/non-installment sales against outlet stock)
+    const cashSales = await prisma.cashSale.findMany({
+        where: { outlet_id: outletId, created_at: dateFilter },
+        select: { final_price: true }
+    });
+    const cashSaleTotal = cashSales.reduce((sum, s) => sum + parseFloat(s.final_price || 0), 0);
+
     // 6b. Generic vendor ledger cash transactions (Manage Vendors > Record Payment)
     // 'debit'  = Payment Out to Vendor (cash leaves the drawer)
     // 'credit' = Payment In from Vendor (cash enters the drawer)
@@ -261,7 +268,7 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
 
     // Compute Master Formula:
     // Expected Cash = Opening Cash + Cash Inflows - Cash Outflows
-    const totalCashIn = downPaymentsCash + installmentsCash + cashFromRecovery + cashFromDelivery + vendorReceiptsCash + cashTransferredIn;
+    const totalCashIn = downPaymentsCash + installmentsCash + cashFromRecovery + cashFromDelivery + vendorReceiptsCash + cashSaleTotal + cashTransferredIn;
     const totalCashOut = expensesCash + vendorPaymentsCash + refundsCash + cashTransferredOut;
     const expectedCash = openingCash + totalCashIn - totalCashOut;
 
@@ -274,6 +281,7 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
         expenses: expensesCash + refundsCash,
         vendor_payments: vendorPaymentsCash,
         vendor_receipts: vendorReceiptsCash,
+        cash_sale: cashSaleTotal,
         cash_transferred_in: cashTransferredIn,
         cash_transferred_out: cashTransferredOut,
         closing_cash: expectedCash,
@@ -832,6 +840,21 @@ const getCashRegisterHistory = async (req, res) => {
                 amount: parseFloat(vt.amount || 0)
             }));
 
+        // ── Cash Sale (walk-in outright sales against outlet stock) ────
+        const cashSaleRecords = await prisma.cashSale.findMany({
+            where: { outlet_id },
+            select: { id: true, product_name: true, imei_serial: true, customer_name: true, final_price: true, created_at: true },
+            orderBy: { created_at: 'desc' },
+            take: MAX_HISTORY_PER_CATEGORY
+        });
+        const cashSale = cashSaleRecords.map(cs => ({
+            id: `cs-${cs.id}`,
+            date: cs.created_at,
+            title: cs.customer_name || 'Walk-in Customer',
+            subtitle: `${cs.product_name}${cs.imei_serial ? ` — ${cs.imei_serial}` : ''}`,
+            amount: parseFloat(cs.final_price || 0)
+        }));
+
         const buildCategory = (label, key, transactions) => ({
             label,
             key,
@@ -848,6 +871,7 @@ const getCashRegisterHistory = async (req, res) => {
                 buildCategory('Cash from Recovery', 'cash_from_recovery', cashFromRecovery),
                 buildCategory('Cash from Delivery', 'cash_from_delivery', cashFromDelivery),
                 buildCategory('Cash from Vendor', 'cash_from_vendor', cashFromVendor),
+                buildCategory('Cash Sale', 'cash_sale', cashSale),
                 buildCategory('Expenses', 'expenses', expenses),
                 buildCategory('Vendor Payments', 'vendor_payments', vendorPayments),
             ]

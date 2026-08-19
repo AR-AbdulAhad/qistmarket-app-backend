@@ -106,11 +106,16 @@ function getNormalizedLedger(rows) {
     // row, counted once each.
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const totalArrears = installmentLedger.reduce((sum, r) => {
+    let totalArrears = 0;
+    let overdueInstallments = 0;
+    for (const r of installmentLedger) {
         const d = r.dueDate ? new Date(r.dueDate) : null;
         const isOverdueUnpaid = d && !isNaN(d.getTime()) && d < today && r.status !== 'paid';
-        return isOverdueUnpaid ? sum + r.remainingAmount : sum;
-    }, 0);
+        if (isOverdueUnpaid) {
+            totalArrears += r.remainingAmount;
+            overdueInstallments += 1;
+        }
+    }
 
     const grandTotalDue = advancePayment.amount + totalInstallmentDue;
     const grandTotalPaid = (advancePayment.paid ? advancePayment.amount : 0) + totalInstallmentPaid;
@@ -125,7 +130,13 @@ function getNormalizedLedger(rows) {
         grandTotalPaid,
         grandTotalRemaining,
         paidInstallments: installmentLedger.filter(r => r.status === 'paid').length,
+        // pendingInstallments = every unpaid row regardless of due date (used
+        // elsewhere for the full payment-plan status). overdueInstallments is
+        // the "actually needs collecting now" count — only rows whose due date
+        // has already passed — needed for recovery/collections dashboards so
+        // future not-yet-due installments aren't counted as overdue.
         pendingInstallments: installmentLedger.filter(r => r.status !== 'paid').length,
+        overdueInstallments,
         installmentsStarted: updatedRows.some(r => r.month > 0),
         firstInstallmentDate: installmentLedger[0]?.dueDate || null,
     };

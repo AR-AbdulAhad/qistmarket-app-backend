@@ -64,6 +64,7 @@ model User {
   deletion_reviews                 AccountDeletionRequest[]    @relation("DeletionRequestReviewer")
   deliveries                       Delivery[]                  @relation("delivery_agent")
   archived_deliveries              ArchivedDelivery[]          @relation("ArchivedDeliveryAgent")
+  cash_sales                       CashSale[]                  @relation("CashSaleSoldBy")
   officerAssignments               OfficerAreaAssignment[]     @relation("OfficerAssignments")
   officerSessions                  OfficerSession[]
   assigned_orders                  Order[]                     @relation("assignedOrders")
@@ -310,6 +311,7 @@ model Outlet {
   deposit_requests       BankDepositRequest[]   @relation("DepositOutlet")
   transfers_sent         CashTransferRequest[]  @relation("SenderOutlet")
   transfers_received     CashTransferRequest[]  @relation("ReceiverOutlet")
+  cash_sales             CashSale[]
 
   @@map("outlets")
 }
@@ -502,6 +504,7 @@ model CashRegister {
   expenses                Float     @default(0)
   vendor_payments         Float     @default(0)
   vendor_receipts         Float     @default(0)
+  cash_sale               Float     @default(0)
   cash_transferred_in     Float     @default(0)
   cash_transferred_out    Float     @default(0)
   closing_cash            Float     @default(0)
@@ -735,11 +738,46 @@ model OutletInventory {
   is_used           Boolean         @default(false)
   outlet            Outlet          @relation(fields: [outlet_id], references: [id], onDelete: Cascade)
   stockTransfers    StockTransfer[]
+  cash_sales        CashSale[]
 
   @@index([outlet_id])
   @@index([status])
   @@index([api_product_name])
   @@map("outlet_inventories")
+}
+
+/// A walk-in, outright (non-installment) cash purchase processed directly at
+/// an outlet — e.g. a customer just buying a phone for cash rather than on a
+/// qist plan. Distinct from Order/Delivery (which model the full installment
+/// verification+delivery pipeline); this is a single-step sale against
+/// existing outlet stock, feeding straight into the outlet's Cash Register.
+model CashSale {
+  id              Int             @id @default(autoincrement())
+  outlet_id       Int
+  inventory_id    Int
+  // Snapshot fields so this record stays meaningful even if the inventory
+  // item is later edited/removed — matches the snapshot pattern already used
+  // by CashInHand (product_name/imei_serial/color_variant).
+  product_name    String
+  category        String?
+  imei_serial     String?
+  color_variant   String?
+  customer_name   String
+  customer_phone  String?
+  customer_cnic   String?
+  quoted_price    Float // suggested price shown when the product was selected
+  final_price     Float // actual amount collected (may have been edited)
+  sold_by_user_id Int
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  outlet    Outlet          @relation(fields: [outlet_id], references: [id])
+  inventory OutletInventory @relation(fields: [inventory_id], references: [id])
+  sold_by   User            @relation("CashSaleSoldBy", fields: [sold_by_user_id], references: [id])
+
+  @@index([outlet_id])
+  @@index([created_at])
+  @@map("cash_sales")
 }
 
 model StockTransfer {

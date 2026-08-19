@@ -329,9 +329,14 @@ const getDashboardStats = async (req, res) => {
             totalInstallmentDue += summary.totalInstallmentDue;
             totalInstallmentPaid += summary.totalInstallmentPaid;
             totalArrears += summary.totalArrears;
-            pendingInstallmentCount += summary.pendingInstallments;
+            // "Pending Collections" / "Impacted Customers" on the Installment
+            // Recovery card mean installments actually overdue right now — not
+            // every future installment still left on the plan — so this must
+            // use overdueInstallments, not the broader pendingInstallments
+            // (which also counts not-yet-due future months).
+            pendingInstallmentCount += summary.overdueInstallments;
 
-            if (summary.pendingInstallments > 0) {
+            if (summary.overdueInstallments > 0) {
                 ordersWithPendingInstallments += 1;
             }
         }
