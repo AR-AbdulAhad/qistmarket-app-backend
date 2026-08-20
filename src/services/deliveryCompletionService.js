@@ -18,6 +18,8 @@ const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
+const { getNormalizedLedger } = require('../utils/ledgerUtils');
+const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const pt = require('../services/paytriggerService');
 
 const now = () => new Date();
@@ -242,7 +244,7 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
   return { installmentLedger, ledgerUrl };
 }
 
-function sendCompletionWatiMessages({ purchaser, order, productNameSnapshot, colorVariant, advanceAmount, orderStatusLabel, installmentLedger, ledgerUrl, product_imei, confirmedCustomerName }) {
+function sendCompletionWatiMessages({ purchaser, order, productNameSnapshot, colorVariant, advanceAmount, orderStatusLabel, installmentLedger, ledgerUrl, product_imei, confirmedCustomerName, deliveredByName, deliveredByNumber }) {
   const customerPhone = purchaser?.telephone_number;
   const deliveryDateStr = formatDatePK(now());
 
@@ -251,17 +253,46 @@ function sendCompletionWatiMessages({ purchaser, order, productNameSnapshot, col
     return;
   }
 
+  // Installment summary for the delivery-confirmation message — same normalized
+  // ledger math used everywhere else (getNormalizedLedger), so these figures stay
+  // consistent with the customer's ledger page.
+  let totalInstallmentPrice = 0;
+  let installmentDuration = 0;
+  let monthlyInstallment = 0;
+  let nextDueDateStr = 'N/A';
+  let remainingAmountVal = 0;
+  if (installmentLedger?.ledger_rows) {
+    const normalized = getNormalizedLedger(installmentLedger.ledger_rows);
+    installmentDuration = normalized.installment_ledger.length;
+    monthlyInstallment = normalized.installment_ledger[0]?.dueAmount || 0;
+    totalInstallmentPrice = normalized.summary.grandTotalDue;
+    remainingAmountVal = normalized.summary.grandTotalRemaining;
+    const nextRow = normalized.installment_ledger.find(r => r.status !== 'paid');
+    nextDueDateStr = nextRow ? formatDatePK(nextRow.dueDate) : 'N/A';
+  }
+
   sendDeliveryConfirmation(customerPhone, {
     customerName: confirmedCustomerName,
     productName: productNameSnapshot,
     imei: product_imei || 'N/A',
-    colorVariant: colorVariant || 'N/A',
     advanceAmount,
     deliveryDate: deliveryDateStr,
     orderRef: order.order_ref,
     orderStatus: orderStatusLabel,
+    deliveredByName: deliveredByName || 'N/A',
+    deliveredByNumber: deliveredByNumber || 'N/A',
+    branchName: order.outlet?.name || 'N/A',
+    branchCode: order.outlet?.code || 'N/A',
+    totalInstallmentPrice,
+    installmentDuration,
+    monthlyInstallment,
+    nextDueDate: nextDueDateStr,
+    remainingAmount: remainingAmountVal,
+    ledgerUrl,
   }).then(r => console.log('[WATI] Delivery confirmation:', r?.success ? 'sent ✓' : r?.error))
     .catch(e => console.error('[WATI] Delivery confirmation error:', e));
+
+  sendAccountAwarenessForOrder(order.id, customerPhone, { itemName: productNameSnapshot });
 
   const sendLedgerTo = (phone) => {
     if (!installmentLedger || !ledgerUrl) return;
@@ -421,6 +452,7 @@ async function completeAgentDelivery({ order, payload, io, productNameSnapshot, 
     purchaser, order, productNameSnapshot, colorVariant, advanceAmount,
     orderStatusLabel: 'Delivered', installmentLedger, ledgerUrl,
     product_imei: payload.product_imei, confirmedCustomerName,
+    deliveredByName: user.full_name, deliveredByNumber: user.phone,
   });
 
   const updatedDelivery = await prisma.delivery.findUnique({
@@ -593,6 +625,7 @@ async function completeSelfPickupDelivery({ order, payload, io, productNameSnaps
     purchaser, order, productNameSnapshot, colorVariant, advanceAmount,
     orderStatusLabel: 'Delivered (Self Pickup)', installmentLedger, ledgerUrl,
     product_imei: payload.product_imei, confirmedCustomerName,
+    deliveredByName: user.full_name, deliveredByNumber: user.phone,
   });
 
   await notifyAdmins(
@@ -763,7 +796,7 @@ async function completePendingPaytriggerDelivery(device, io) {
 
   const order = await prisma.order.findUnique({
     where: { id: delivery.order_id },
-    include: { delivery: true, verification: { include: { purchaser: true } } },
+    include: { delivery: true, verification: { include: { purchaser: true } }, outlet: true },
   });
 
   if (!order) {

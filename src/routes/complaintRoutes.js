@@ -1,12 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { createComplaint, getComplaints, updateComplaint, searchPurchasers, pickComplaint } = require('../controllers/complaintController');
+const { createComplaint, getComplaints, updateComplaint, searchPurchasers, pickComplaint, trackComplaint } = require('../controllers/complaintController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 const upload = require('../middlewares/uploadMiddleware');
 const fixUploadPath = require('../middlewares/fixUploadPath');
 
 router.get('/complaints', authenticateJWT, getComplaints);
 router.get('/complaints/search-purchasers', authenticateJWT, searchPurchasers);
+router.get('/complaints/track/:complaintId', trackComplaint);
 router.post('/complaints', authenticateJWT, upload.array('media', 5), fixUploadPath, createComplaint);
 router.post('/complaints/public', upload.array('media', 5), fixUploadPath, createComplaint);
 router.put('/complaints/:id', authenticateJWT, updateComplaint);

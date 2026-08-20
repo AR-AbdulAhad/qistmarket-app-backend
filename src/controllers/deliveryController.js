@@ -120,7 +120,8 @@ const submitDelivery = async (req, res) => {
       },
       include: {
         delivery: true,
-        verification: { include: { purchaser: true } }
+        verification: { include: { purchaser: true } },
+        outlet: true
       }
     });
 
@@ -203,6 +204,7 @@ const submitDelivery = async (req, res) => {
         id: req.user.id,
         full_name: req.user.full_name,
         username: req.user.username,
+        phone: req.user.phone,
         role: req.user.role,
         role_id: req.user.role_id,
       },
@@ -1563,7 +1565,8 @@ const submitSelfPickupDelivery = async (req, res) => {
       where: { id: parseInt(order_id) },
       include: {
         delivery: true,
-        verification: { include: { purchaser: true } }
+        verification: { include: { purchaser: true } },
+        outlet: true
       }
     });
 
@@ -1628,6 +1631,7 @@ const submitSelfPickupDelivery = async (req, res) => {
         id: req.user.id,
         full_name: req.user.full_name,
         username: req.user.username,
+        phone: req.user.phone,
         role: req.user.role,
         role_id: req.user.role_id,
       },

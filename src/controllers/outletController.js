@@ -6,6 +6,7 @@ const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { computeMetricsForPeriod } = require('./cashRegisterController');
 const { sendInstallmentLedger, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
@@ -329,13 +330,12 @@ const getDashboardStats = async (req, res) => {
             totalInstallmentDue += summary.totalInstallmentDue;
             totalInstallmentPaid += summary.totalInstallmentPaid;
             totalArrears += summary.totalArrears;
-            // "Pending Collections" / "Impacted Customers" on the Installment
-            // Recovery card mean installments actually overdue right now — not
-            // every future installment still left on the plan — so this must
-            // use overdueInstallments, not the broader pendingInstallments
-            // (which also counts not-yet-due future months).
-            pendingInstallmentCount += summary.overdueInstallments;
+            // "Pending Collections" counts unique customer accounts whose installment balance is still pending
+            if (summary.totalInstallmentRemaining > 0) {
+                pendingInstallmentCount += 1;
+            }
 
+            // "Impacted Customers" counts unique customer accounts that have overdue installments
             if (summary.overdueInstallments > 0) {
                 ordersWithPendingInstallments += 1;
             }
@@ -1913,6 +1913,7 @@ const verifyInstallmentPayment = async (req, res) => {
                     dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
                 }).catch(err => console.error('Wati Partial Receipt Error for', targetPhone, ':', err));
             }
+            sendAccountAwarenessForOrder(order.id, targetPhone, { itemName: finalProductName });
         }
 
         // Send Next Month Reminder if exists (unchanged)
@@ -2413,7 +2414,8 @@ const getOutletInstallmentsDueList = async (req, res) => {
             blacklist: { amount: 0, customers: 0 },
             defaulter: { amount: 0, customers: 0 },
             ptp: { amount: 0, customers: 0 },
-            paid: { amount: 0, customers: 0 }
+            paid: { amount: 0, customers: 0 },
+            impacted: { amount: 0, customers: 0 }
         };
 
         const allInstallments = [];
@@ -2524,6 +2526,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
                 addSummary('all');
                 if (accountCategory) addSummary(accountCategory);
                 if (isPtp) addSummary('ptp');
+                if (overdueCount > 0) addSummary('impacted');
 
                 const g1 = grantors.find(g => g.grantor_number === 1) || grantors[0] || null;
                 const g2 = grantors.find(g => g.grantor_number === 2) || (grantors[0] && grantors[1] && grantors[0].id !== grantors[1].id ? grantors[1] : null);
@@ -2621,6 +2624,8 @@ const getOutletInstallmentsDueList = async (req, res) => {
             filtered = filtered.filter(inst => inst.accountCategory === 'blacklist');
         } else if (category === 'defaulter') {
             filtered = filtered.filter(inst => inst.accountCategory === 'defaulter');
+        } else if (category === 'impacted') {
+            filtered = filtered.filter(inst => inst.overdueCount > 0);
         } else if (category === 'ptp') {
             filtered = filtered.filter(inst => inst.hasPtp);
         } else if (category === 'paid') {
@@ -2712,7 +2717,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
                     monthsRemainingAmount: monthsDue - monthsCollected,
                     overallSystemRemaining: systemOutstanding,
                     overallSystemPaid: systemCollected,
-                    customerCount: categoriesSummary.all ? categoriesSummary.all.customers : 0
+                    customerCount: totalItems
                 }
             }
         });

@@ -2,6 +2,7 @@ const prisma = require('../../lib/prisma');
 const qrcode = require('qrcode');
 const jwt = require('jsonwebtoken');
 const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder, sendInstallmentLedger } = require('../services/watiService');
+const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
 const now = () => new Date();
@@ -627,6 +628,8 @@ const notifyPayment = async (req, res) => {
                             orderRef: order.order_ref,
                             date: paidDateParsed.toLocaleDateString('en-PK')
                         }).catch(err => console.error('[SmartPay Webhook] Wati Receipt Error:', err));
+
+                        sendAccountAwarenessForOrder(order.id, phone, { itemName: productName });
                     }
 
                     // --- Create Notification for Outlet ---

@@ -13,6 +13,7 @@ const {
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
+const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 const { updateRecoveryRanking } = require('../services/recoveryRankingService');
 const { notifyAdmins, notifyOutlet, notifyUser } = require('../utils/notificationUtils');
@@ -690,6 +691,10 @@ const submitBranchPayment = async (req, res) => {
       })).catch(err => console.error('Wati Partial Receipt Error:', err));
     }
 
+    [...new Set([phone, altPhone].filter(Boolean))].forEach((p) =>
+      sendAccountAwarenessForOrder(order.id, p, { itemName: finalProductName })
+    );
+
     // ── Transaction notification — Admin/Super Admin + the officer's outlet ──
     const io = req.app.get('io');
     const notifyTitle = 'Recovery Payment Collected (Branch)';
@@ -1254,6 +1259,10 @@ const submitInstallment = async (req, res) => {
         dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
       })).catch(err => console.error('Wati Partial Receipt Error:', err));
     }
+
+    [...new Set([phone, altPhone].filter(Boolean))].forEach((p) =>
+      sendAccountAwarenessForOrder(order.id, p, { itemName: finalProductName })
+    );
 
     const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
     const nextRow = rows[rowIndex + 1];

@@ -51,6 +51,7 @@ const searchRoutes = require('./src/routes/searchRoutes');
 const targetRoutes = require('./src/routes/targetRoutes');
 const securityLogRoutes = require('./src/routes/securityLogRoutes');
 const complaintRoutes = require('./src/routes/complaintRoutes');
+const { complaintFormPage } = require('./src/controllers/complaintController');
 const tpsRoutes = require('./src/routes/tpsRoutes');
 const { checkOverdueDevices } = require('./src/controllers/paytriggerController');
 
@@ -476,6 +477,7 @@ app.use('/api/discounts', discountRoutes);
 app.use('/api', accountDeletionRoutes);
 app.use('/api', employeePortalRoutes);
 app.use('/api/smartpay/webhook', smartPayWebhookRoutes);
+app.get('/complaint', complaintFormPage);   // Public complaint form — matches the hardcoded COMPLAINT_URL used in WATI templates
 app.use('/ledger', ledgerRoutes);
 app.use('/api/app-version', appVersionRoutes);   // Public ledger routes — no auth required, must be first!
 app.use('/api/ledger', ledgerRoutes);

@@ -1,6 +1,7 @@
 const prisma = require('../../lib/prisma');
 const { parseTpsAmount, formatTpsAmount, formatTpsAmountPaid } = require('../utils/tpsAmountUtils');
 const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
 const now = () => new Date();
@@ -488,6 +489,8 @@ const billPayment = async (req, res) => {
                             orderRef: order.order_ref,
                             date: paidDateParsed.toLocaleDateString('en-PK')
                         }).catch(err => console.error('[TPS BillPayment] Wati Receipt Error:', err));
+
+                        sendAccountAwarenessForOrder(order.id, phone, { itemName: productName });
                     }
 
                     // ── Online payment notification — Admin/Super Admin + outlet ──

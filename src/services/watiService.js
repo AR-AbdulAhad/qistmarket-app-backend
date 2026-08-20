@@ -4,6 +4,7 @@ require('dotenv').config();
 const WATI_ACCESS_TOKEN = process.env.WATI_ACCESS_TOKEN;
 const WATI_BASE_URL = process.env.WATI_BASE_URL;
 const COMPLAINT_URL = 'https://app.qistmarket.pk/complaint';
+const QIST_BRANCH_CONTACT_NUMBER = '021-111-11-7747';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -70,8 +71,14 @@ const sendGrantorOTP = async (phone, name, otp) => {
 };
 
 // ─── Template 1: Delivery Confirmation ─────────────────────────────────────
-// Params: customer_name, product_name, imei, color_variant, advance_amount,
-//         delivery_date, order_ref, order_status
+// Params (in template body order — must match the live WATI template exactly):
+// 1  Customer_Name           2  Item_Name_Model         3  IMEI_Serial
+// 4  Advance_Amount          5  Delivery_Date           6  Order_Number
+// 7  Delivery_Type           8  Delivered_By_Name       9  Delivered_By_Number
+// 10 Branch_Name             11 Branch_Code             12 Total_Installment_Price
+// 13 Installment_Duration    14 Monthly_Installment     15 Next_Due_Date
+// 16 Remaining_Amount        17 Ledger_Link (bare short_id — WATI template already
+//    has the https://api.qistmarket.pk/ledger/ prefix baked in as literal text)
 
 const WATI_DELIVERY_TEMPLATE = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
 const WATI_DELIVERY_BROADCAST = process.env.WATI_DELIVERY_CONFIRMATION_TEMPLATE || 'delivery_confirmation';
@@ -80,22 +87,39 @@ const sendDeliveryConfirmation = async (phone, {
   customerName,
   productName,
   imei,
-  colorVariant,
   advanceAmount,
   deliveryDate,
   orderRef,
   orderStatus,
+  deliveredByName,
+  deliveredByNumber,
+  branchName,
+  branchCode,
+  totalInstallmentPrice,
+  installmentDuration,
+  monthlyInstallment,
+  nextDueDate,
+  remainingAmount,
+  ledgerUrl,
 }) => {
   const parameters = [
     { name: '1', value: customerName || 'Customer' },
     { name: '2', value: productName || 'N/A' },
     { name: '3', value: imei || 'N/A' },
-    { name: '4', value: colorVariant || 'N/A' },
-    { name: '5', value: String(advanceAmount || 0) },
-    { name: '6', value: deliveryDate || new Date().toDateString() },
-    { name: '7', value: orderRef || 'N/A' },
-    { name: '8', value: orderStatus || 'Delivered' },
-    { name: '9', value: COMPLAINT_URL },
+    { name: '4', value: String(advanceAmount || 0) },
+    { name: '5', value: deliveryDate || new Date().toDateString() },
+    { name: '6', value: orderRef || 'N/A' },
+    { name: '7', value: orderStatus || 'Delivered' },
+    { name: '8', value: deliveredByName || 'N/A' },
+    { name: '9', value: deliveredByNumber || 'N/A' },
+    { name: '10', value: branchName || 'N/A' },
+    { name: '11', value: branchCode || 'N/A' },
+    { name: '12', value: String(totalInstallmentPrice || 0) },
+    { name: '13', value: String(installmentDuration || 0) },
+    { name: '14', value: String(monthlyInstallment || 0) },
+    { name: '15', value: nextDueDate || 'N/A' },
+    { name: '16', value: String(remainingAmount || 0) },
+    { name: '17', value: ledgerUrl || 'N/A' },
   ];
   return sendTemplate(phone, WATI_DELIVERY_TEMPLATE, WATI_DELIVERY_BROADCAST, parameters);
 };
@@ -222,26 +246,93 @@ const sendNextInstallmentReminder = async (phone, {
 };
 
 // ─── Template 5: Complaint Received ───────────────────────────────────────
+// Params (in template body order): Customer_Name, Complaint_ID, Complaint_Date,
+// Complaint_By_Name, Complaint_By_Number, Complaint_By_Designation,
+// Complaint_Tracking_Link (bare complaint_id — WATI template already has the
+// https://api.qistmarket.pk/complaints/track/ prefix baked in as literal text).
 const WATI_COMPLAINT_RECEIVED_TEMPLATE = process.env.WATI_COMPLAINT_RECEIVED_TEMPLATE || 'complaint_received';
 const WATI_COMPLAINT_RECEIVED_BROADCAST = process.env.WATI_COMPLAINT_RECEIVED_TEMPLATE || 'complaint_received';
 
-const sendComplaintReceived = async (phone, { customerName, complaintId }) => {
+const sendComplaintReceived = async (phone, {
+  customerName,
+  complaintId,
+  complaintDate,
+  complaintByName,
+  complaintByNumber,
+  complaintByDesignation,
+  trackingLink,
+}) => {
   const parameters = [
     { name: '1', value: customerName || 'Customer' },
     { name: '2', value: complaintId || 'N/A' },
+    { name: '3', value: complaintDate || new Date().toLocaleDateString('en-PK') },
+    { name: '4', value: complaintByName || 'SELF' },
+    { name: '5', value: complaintByNumber || 'SELF' },
+    { name: '6', value: complaintByDesignation || 'SELF' },
+    { name: '7', value: trackingLink || complaintId || 'N/A' },
   ];
   return sendTemplate(phone, WATI_COMPLAINT_RECEIVED_TEMPLATE, WATI_COMPLAINT_RECEIVED_BROADCAST, parameters);
 };
 
-// ─── Template 6: Complaint Resolved ───────────────────────────────────────
-const WATI_COMPLAINT_RESOLVED_TEMPLATE = process.env.WATI_COMPLAINT_RESOLVED_TEMPLATE || 'complaint_resolved';
-const WATI_COMPLAINT_RESOLVED_BROADCAST = process.env.WATI_COMPLAINT_RESOLVED_TEMPLATE || 'complaint_resolved';
+// ─── Template 5b: Complaint Assigned ────────────────────────────────────────
+// Params (in template body order): Customer_Name, Complaint_ID, Assigned_User_Name,
+// Assigned_User_Number, Assigned_User_Designation, Complaint_Date, Complaint_Tracking_Link
+// (bare complaint_id — same "COMPLAINT TRACK KAREIN" dynamic button pattern as complaint_received).
+const WATI_COMPLAINT_ASSIGNED_TEMPLATE = process.env.WATI_COMPLAINT_ASSIGNED_TEMPLATE || 'complaint_assigned';
+const WATI_COMPLAINT_ASSIGNED_BROADCAST = process.env.WATI_COMPLAINT_ASSIGNED_TEMPLATE || 'complaint_assigned';
 
-const sendComplaintResolved = async (phone, { customerName, complaintId, note }) => {
+const sendComplaintAssigned = async (phone, {
+  customerName,
+  complaintId,
+  assignedUserName,
+  assignedUserNumber,
+  assignedUserDesignation,
+  complaintDate,
+  trackingLink,
+}) => {
   const parameters = [
     { name: '1', value: customerName || 'Customer' },
     { name: '2', value: complaintId || 'N/A' },
-    { name: '3', value: note || 'Resolved gracefully' },
+    { name: '3', value: assignedUserName || 'N/A' },
+    { name: '4', value: assignedUserNumber || 'N/A' },
+    { name: '5', value: assignedUserDesignation || 'N/A' },
+    { name: '6', value: complaintDate || new Date().toLocaleDateString('en-PK') },
+    { name: '7', value: trackingLink || complaintId || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_COMPLAINT_ASSIGNED_TEMPLATE, WATI_COMPLAINT_ASSIGNED_BROADCAST, parameters);
+};
+
+// ─── Template 6: Complaint Resolved ───────────────────────────────────────
+// Params (in template body order): Customer_Name, Complaint_ID, Complaint_Subject,
+// Resolution_Remarks, Solved_By_Name, Solved_By_Number, Solved_By_Designation,
+// Resolved_Date, Resolved_Time, Complaint_Tracking_Link (bare complaint_id — same
+// dynamic-button pattern as complaint_received / complaint_assigned).
+const WATI_COMPLAINT_RESOLVED_TEMPLATE = process.env.WATI_COMPLAINT_RESOLVED_TEMPLATE || 'complaint_resolved';
+const WATI_COMPLAINT_RESOLVED_BROADCAST = process.env.WATI_COMPLAINT_RESOLVED_TEMPLATE || 'complaint_resolved';
+
+const sendComplaintResolved = async (phone, {
+  customerName,
+  complaintId,
+  complaintSubject,
+  resolutionRemarks,
+  solvedByName,
+  solvedByNumber,
+  solvedByDesignation,
+  resolvedDate,
+  resolvedTime,
+  trackingLink,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: complaintId || 'N/A' },
+    { name: '3', value: complaintSubject || 'N/A' },
+    { name: '4', value: resolutionRemarks || 'Resolved gracefully' },
+    { name: '5', value: solvedByName || 'N/A' },
+    { name: '6', value: solvedByNumber || 'N/A' },
+    { name: '7', value: solvedByDesignation || 'N/A' },
+    { name: '8', value: resolvedDate || new Date().toLocaleDateString('en-PK') },
+    { name: '9', value: resolvedTime || new Date().toLocaleTimeString('en-PK') },
+    { name: '10', value: trackingLink || complaintId || 'N/A' },
   ];
   return sendTemplate(phone, WATI_COMPLAINT_RESOLVED_TEMPLATE, WATI_COMPLAINT_RESOLVED_BROADCAST, parameters);
 };
@@ -556,6 +647,41 @@ const sendFinalOrderRejection = async (phone, {
   return sendTemplate(phone, WATI_FINAL_REJECTION_TEMPLATE, WATI_FINAL_REJECTION_BROADCAST, parameters);
 };
 
+// ─── Template 17: Account / Payment Safety Awareness ───────────────────────
+// Params (in template body order): Customer_Name, Order_Number, Item_Name_Model,
+// Order_Booker_Name, Order_Booker_Number, Verification_Officer_Name,
+// Verification_Officer_Number, Branch_Name, Branch_Code, Branch_Contact_Number,
+// Complaint_Link. The last two are fixed company-wide values, not per-order data.
+const WATI_ACCOUNT_AWARENESS_TEMPLATE = process.env.WATI_ACCOUNT_AWARENESS_TEMPLATE || 'account_awareness';
+const WATI_ACCOUNT_AWARENESS_BROADCAST = process.env.WATI_ACCOUNT_AWARENESS_TEMPLATE || 'account_awareness';
+
+const sendAccountAwareness = async (phone, {
+  customerName,
+  orderNumber,
+  itemName,
+  orderBookerName,
+  orderBookerNumber,
+  verificationOfficerName,
+  verificationOfficerNumber,
+  branchName,
+  branchCode,
+}) => {
+  const parameters = [
+    { name: '1', value: customerName || 'Customer' },
+    { name: '2', value: orderNumber || 'N/A' },
+    { name: '3', value: itemName || 'N/A' },
+    { name: '4', value: orderBookerName || 'Qist Market' },
+    { name: '5', value: orderBookerNumber || 'N/A' },
+    { name: '6', value: verificationOfficerName || 'N/A' },
+    { name: '7', value: verificationOfficerNumber || 'N/A' },
+    { name: '8', value: branchName || 'N/A' },
+    { name: '9', value: branchCode || 'N/A' },
+    { name: '10', value: QIST_BRANCH_CONTACT_NUMBER },
+    { name: '11', value: COMPLAINT_URL },
+  ];
+  return sendTemplate(phone, WATI_ACCOUNT_AWARENESS_TEMPLATE, WATI_ACCOUNT_AWARENESS_BROADCAST, parameters);
+};
+
 // ─── Broadcast helper — same template to multiple numbers ─────────────────
 // Dedupes normalized numbers so the same WhatsApp doesn't get double messages.
 const sendToMany = async (phones, sendFn) => {
@@ -588,6 +714,7 @@ module.exports = {
   sendPartialInstallmentPaymentReceipt,
   sendNextInstallmentReminder,
   sendComplaintReceived,
+  sendComplaintAssigned,
   sendComplaintResolved,
   sendOrderStatusNotification,
   sendPtpConfirmation,
@@ -599,6 +726,7 @@ module.exports = {
   sendOrderCancellation,
   sendFinalOrderApproval,
   sendFinalOrderRejection,
+  sendAccountAwareness,
   sendToMany,
   getCompanyNotifyPhones,
 };
