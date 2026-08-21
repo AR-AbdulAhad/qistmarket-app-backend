@@ -76,7 +76,7 @@ const sendOTPSms = async (phone, otp) => {
   return sendSMS(phone, `Your Qist Market verification code is ${otp}. Do not share this code with anyone.`);
 };
 
-/** Guarantor OTP wrapper — mirrors the wording of the WATI "Guarantor OTP Confirmation" WhatsApp template. `name` is the purchaser's name (the person being guaranteed for), not the guarantor's own name — matches how the caller already passes it. */
+/** Guarantor OTP wrapper — mirrors the wording of the WATI "Guarantor OTP Confirmation" WhatsApp template. `name` is the purchaser's name (the person being guaranteed for), not the guarantor's own name — matches how the caller already passes it. This is the SHORT fallback used when order/officer context isn't available at the call site — see sendGuarantorOtpFullSms for the full, order-detail-rich version. */
 const sendGuarantorOTPSms = async (phone, name, otp) => {
   const purchaserName = name || 'is customer';
   return sendSMS(
@@ -85,9 +85,106 @@ const sendGuarantorOTPSms = async (phone, name, otp) => {
   );
 };
 
+/**
+ * Full "Guarantor OTP Confirmation" SMS — the client's exact template text,
+ * word for word, with every {{placeholder}} filled from real order data.
+ * Used instead of sendGuarantorOTPSms when the caller has the order/officer
+ * context on hand (see otpDispatcher.js's sendGuarantorOtp).
+ */
+const sendGuarantorOtpFullSms = async (phone, {
+  guarantorName,
+  customerName,
+  orderNumber,
+  itemNameModel,
+  totalInstallmentPrice,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  otp,
+  frontDeskOfficerName,
+  frontDeskOfficerNumber,
+}) => {
+  const message = `Assalam-o-Alaikum, ${guarantorName || 'Guarantor'}!
+
+${customerName} ne Qist Market se qiston par item hasil karne ke liye aapko apna guarantor banaya hai.
+
+Order Number: ${orderNumber}
+Customer Name: ${customerName}
+Item / Model: ${itemNameModel}
+Total Installment Price: Rs. ${totalInstallmentPrice}
+Advance Amount: Rs. ${advanceAmount}
+Installment Plan: ${installmentDuration} Months
+Monthly Installment: Rs. ${monthlyInstallment}
+
+GUARANTOR KI ZIMMEDARI
+Agar customer muqarara qist ya baqaya raqam ada nahi karta, to signed agreement aur Qist Market ki policy ke mutabiq item ki wapsi aur tamam baqaya raqam ki adaigi ki zimmedari app parhi hogi.
+
+Agar aap tamam tafseelat aur zimmedariyan samajhne ke baad guarantee dene par razamand hain, to yeh code sirf darj-shuda representative ko bata dein:
+
+CONFIRMATION CODE: ${otp}
+
+OUTLET FRONT DESK OFFICER
+Officer Name: ${frontDeskOfficerName || 'N/A'}
+Contact Number: ${frontDeskOfficerNumber || 'N/A'}
+
+ZAROORI HIDAYAT
+Code share karna aapki razamandi aur guarantor banne ki tasdeeq samjha jayega. Agar aap customer ko nahi jaante, guarantee dene par razamand nahi hain ya details durust nahi hain, to code share na karein.`;
+
+  return sendSMS(phone, message);
+};
+
+/**
+ * Full "Purchaser Verification OTP" SMS — the client's exact template text,
+ * word for word, with every {{placeholder}} filled from real order data.
+ * There is no short fallback for this one (see otpDispatcher.js's sendOtp) —
+ * sendOTPSms is used instead when order/officer context isn't available.
+ */
+const sendPurchaserVerificationOtpSms = async (phone, {
+  customerName,
+  orderNumber,
+  itemNameModel,
+  totalInstallmentPrice,
+  advanceAmount,
+  installmentDuration,
+  monthlyInstallment,
+  outletName,
+  otp,
+  verificationOfficerName,
+  verificationOfficerNumber,
+}) => {
+  const message = `Assalam-o-Alaikum, ${customerName}!
+
+Aapke Qist Market order ki verification jaari hai. Verification OTP share karne se pehle neeche di gayi tamam details ka ghour se jaiza lein.
+
+Order Number: ${orderNumber}
+Item / Model: ${itemNameModel}
+Total Installment Price: Rs. ${totalInstallmentPrice}
+Advance Amount: Rs. ${advanceAmount}
+Installment Plan: ${installmentDuration} Months
+Monthly Installment: Rs. ${monthlyInstallment}
+Assigned Outlet: ${outletName}
+
+Agar tamam details durust hain aur aap apni marzi se verification process mukammal karwana chahte hain, to yeh OTP sirf assigned Verification Officer ko bata dein:
+
+VERIFICATION OTP: ${otp}
+
+VERIFICATION OFFICER DETAILS
+Officer Name: ${verificationOfficerName || 'N/A'}
+Contact Number: ${verificationOfficerNumber || 'N/A'}
+
+ZAROORI HIDAYAT
+OTP share karna order details, item ki qeemat, advance amount aur installment plan ki tasdeeq samjha jayega. Agar koi detail ghalat ho to OTP share na karein aur pehle record durust karwayein.
+
+Verification bilkul free hai. Verification ke naam par kisi ko koi raqam ada na karein. OTP share karne ya verification mukammal hone ka matlab order approve hona nahi hai; final approval mukammal jaizay ke baad di jayegi.`;
+
+  return sendSMS(phone, message);
+};
+
 module.exports = {
   sendSMS,
   sendOTPSms,
   sendGuarantorOTPSms,
+  sendGuarantorOtpFullSms,
+  sendPurchaserVerificationOtpSms,
   isEnabled: () => JAZZ_CMT_ENABLED,
 };

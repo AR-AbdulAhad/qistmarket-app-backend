@@ -696,6 +696,36 @@ const sendToMany = async (phones, sendFn) => {
   return results;
 };
 
+// ─── Cash Sale Confirmation (outright walk-in sale, separate from the
+// installment flow above) ───────────────────────────────────────────────
+// Params (in template body order — must match the live WATI template exactly):
+// 1 Customer_Name  2 Item_Name  3 IMEI_Serial  4 Final_Price  5 Sale_Date  6 Outlet_Name
+//
+// This template must be created and approved on the WATI dashboard before
+// sends will actually deliver — until then this call fails soft (same as
+// every other sendTemplate call) and the customer still gets the plain-text
+// SMS sent alongside it by customerNotificationService.notifyCashSale.
+const WATI_CASH_SALE_TEMPLATE = process.env.WATI_CASH_SALE_TEMPLATE || 'cash_sale_confirmation';
+const WATI_CASH_SALE_BROADCAST = process.env.WATI_CASH_SALE_TEMPLATE || 'cash_sale_confirmation';
+
+const sendCashSaleInvoice = async (phone, {
+  customerName,
+  productName,
+  imei,
+  finalPrice,
+  saleDate,
+  outletName,
+}) => {
+  return sendTemplate(phone, WATI_CASH_SALE_TEMPLATE, WATI_CASH_SALE_BROADCAST, [
+    { name: '1', value: customerName || '' },
+    { name: '2', value: productName || '' },
+    { name: '3', value: imei || 'N/A' },
+    { name: '4', value: String(finalPrice ?? '0') },
+    { name: '5', value: saleDate || '' },
+    { name: '6', value: outletName || 'N/A' },
+  ]);
+};
+
 // ─── Company notify numbers — from COMPANY_NOTIFY_PHONE (comma-separated) ─
 const getCompanyNotifyPhones = () =>
   (process.env.COMPANY_NOTIFY_PHONE || '')
@@ -727,6 +757,7 @@ module.exports = {
   sendFinalOrderApproval,
   sendFinalOrderRejection,
   sendAccountAwareness,
+  sendCashSaleInvoice,
   sendToMany,
   getCompanyNotifyPhones,
 };

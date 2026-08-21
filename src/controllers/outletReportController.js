@@ -454,6 +454,11 @@ const getInstallmentRecoveriesReport = async (req, res) => {
         for (const ledger of ledgers) {
             const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
             for (const row of rows) {
+                // month === 0 is the advance/down-payment row (see
+                // ledgerUtils.js's normalizeLedger convention) — this report
+                // is specifically monthly installment recoveries, so the
+                // advance must be excluded even when it's been paid.
+                if (row.month === 0) continue;
                 if (row.status === 'paid' && row.paid_at) {
                     const paidDate = new Date(row.paid_at);
                     let include = true;

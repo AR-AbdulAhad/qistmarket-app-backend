@@ -1,10 +1,13 @@
 const prisma = require('../../lib/prisma');
 const watiService = require('./watiService');
+const jazzSmsService = require('./jazzSmsService');
 
-// Master switch for all 8 customer-facing order/verification lifecycle
-// WhatsApp notifications added here. Separate from WATI_OTP_ENABLED, which
-// only gates OTP sends. Default on; set to 'false' in .env to disable all of
-// them at once without touching call sites.
+// Master switch for all customer-facing order/verification lifecycle
+// WhatsApp notifications added here, plus the Cash Sale confirmation below.
+// Separate from WATI_OTP_ENABLED, which only gates OTP sends. Default on; set
+// to 'false' in .env to disable all of them at once without touching call
+// sites. Does NOT gate the SMS side of notifyCashSale — that's Jazz's own
+// independent JAZZ_CMT_ENABLED flag, since SMS needs no template approval.
 const isEnabled = () => process.env.WATI_ORDER_NOTIFICATIONS_ENABLED !== 'false';
 
 const fmt = (n) => (n === null || n === undefined ? '0' : String(Math.round(Number(n))));
@@ -224,6 +227,51 @@ const notifyFinalDecision = async (order, { decision, reviews } = {}) => {
   }
 };
 
+// 9. Cash Sale Confirmation (outright walk-in sale, not the installment flow
+// above). `sales` is the full list of CashSale rows from one checkout — one
+// entry for a single-product sale, several for a multi-product cart, all
+// sharing the same customer/date. Sent over two independent channels since a
+// WhatsApp template must be pre-approved on WATI's dashboard before
+// sendCashSaleInvoice will actually deliver anything — the plain-text SMS via
+// Jazz needs no such approval and is the channel guaranteed to work as soon
+// as JAZZ_CMT_* env vars are set, so the customer isn't left with zero
+// notification while the WhatsApp template is still pending approval.
+const notifyCashSale = async (sales, outletId) => {
+  const first = sales?.[0];
+  if (!first?.customer_phone) return;
+  try {
+    const outletName = await getOutletName(outletId);
+    const dateStr = formatDateTime(first.created_at);
+    const total = sales.reduce((s, r) => s + r.final_price, 0);
+    const itemLines = sales
+      .map((s) => `- ${s.product_name}${s.imei_serial ? ` (${s.imei_serial})` : ''}: PKR ${fmt(s.final_price)}`)
+      .join('\n');
+
+    const smsMessage =
+      `Qist Market Sale Receipt\n` +
+      `${itemLines}\n` +
+      `Total Paid: PKR ${fmt(total)}\n` +
+      `Date: ${dateStr}\n` +
+      `${outletName ? `Outlet: ${outletName}\n` : ''}` +
+      `Thank you for shopping with Qist Market!`;
+
+    await jazzSmsService.sendSMS(first.customer_phone, smsMessage);
+
+    if (isEnabled()) {
+      await watiService.sendCashSaleInvoice(first.customer_phone, {
+        customerName: first.customer_name,
+        productName: sales.length > 1 ? `${first.product_name} +${sales.length - 1} more` : first.product_name,
+        imei: sales.length === 1 ? (first.imei_serial || 'N/A') : `${sales.length} items`,
+        finalPrice: fmt(total),
+        saleDate: dateStr,
+        outletName: outletName || 'N/A',
+      });
+    }
+  } catch (err) {
+    console.error('[CustomerNotify] notifyCashSale failed:', err.message);
+  }
+};
+
 module.exports = {
   notifyOrderBooked,
   notifyOrderTransferred,
@@ -232,4 +280,6 @@ module.exports = {
   notifyVerificationCompleted,
   notifyOrderCancelled,
   notifyFinalDecision,
+  notifyCashSale,
+  getFrontDeskOfficer,
 };

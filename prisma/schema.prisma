@@ -212,6 +212,7 @@ model Order {
   return_exchanges         ReturnExchange[]      @relation("OrderReturnExchange")
   smart_pay_qrs            SmartPayQr[]
   statusHistories          OrderStatusHistory[]  @relation("OrderStatusHistoryLogs")
+  complaints               Complaint[]
 
   @@index([created_by_user_id])
   @@index([assigned_to_user_id])
@@ -274,6 +275,13 @@ model Complaint {
   updated_at          DateTime @updatedAt
   assigned_to_user_id Int?
   media_urls          Json?
+  // Links this complaint to the customer's actual order once a CSR confirms
+  // the match (loose customer_name/customer_cnic/mobile_number above are
+  // free text entered at filing time and can't be trusted as a join key) —
+  // null until linked. Once set, the complaint also shows up in that order's
+  // detail page as part of its history.
+  order_id            Int?
+  order               Order?   @relation(fields: [order_id], references: [id])
   assigned_to         User?    @relation("assignedComplaints", fields: [assigned_to_user_id], references: [id])
   created_by          User?    @relation("createdComplaints", fields: [created_by_user_id], references: [id])
 
@@ -281,6 +289,7 @@ model Complaint {
   @@index([status])
   @@index([assigned_to_user_id])
   @@index([created_by_user_id], map: "complaints_created_by_user_id_fkey")
+  @@index([order_id])
   @@map("complaints")
 }
 
@@ -768,6 +777,11 @@ model CashSale {
   quoted_price    Float // suggested price shown when the product was selected
   final_price     Float // actual amount collected (may have been edited)
   sold_by_user_id Int
+  // Shared by every row sold together in one multi-product transaction (a
+  // "cart" of several units checked out at once) so they can be grouped back
+  // into a single receipt/invoice. Null for a single-product sale — existing
+  // rows created before this field never need backfilling.
+  sale_group      String?  @db.VarChar(64)
   created_at      DateTime @default(now())
   updated_at      DateTime @updatedAt
 
@@ -777,6 +791,7 @@ model CashSale {
 
   @@index([outlet_id])
   @@index([created_at])
+  @@index([sale_group])
   @@map("cash_sales")
 }
 

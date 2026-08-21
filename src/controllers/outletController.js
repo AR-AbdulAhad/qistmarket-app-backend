@@ -298,7 +298,7 @@ const getDashboardStats = async (req, res) => {
             closing_cash: liveMetrics.closing_cash || liveMetrics.expected_cash || 0
         };
 
-        // ─── Installment Summary (Overall Cumulative Snapshot) ──────────────────────────────────────
+        // ─── Installment Summary & Collection Rate (Month-wise Snapshot) ───────────────────
         const deliveredOrders = await prisma.order.findMany({
             where: {
                 outlet_id: outlet_id,
@@ -313,11 +313,39 @@ const getDashboardStats = async (req, res) => {
             }
         });
 
-        let totalInstallmentDue = 0;
-        let totalInstallmentPaid = 0;
+        // Determine target month range for collection rate (defaults to active calendar month or custom filter)
+        let mStart, mEnd;
+        if (filter === 'custom' && startDate && endDate) {
+            mStart = new Date(startDate);
+            mStart.setHours(0, 0, 0, 0);
+            mEnd = new Date(endDate);
+            mEnd.setHours(23, 59, 59, 999);
+        } else {
+            mStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+            mEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+        }
+
+        let cumInstallmentDue = 0;
+        let cumInstallmentPaid = 0;
         let totalArrears = 0;
         let pendingInstallmentCount = 0;
         let ordersWithPendingInstallments = 0;
+
+        // Determine target month range for collection rate
+        // let mStart, mEnd;
+        if (filter === 'custom' && startDate && endDate) {
+            mStart = new Date(startDate);
+            mStart.setHours(0, 0, 0, 0);
+            mEnd = new Date(endDate);
+            mEnd.setHours(23, 59, 59, 999);
+        } else {
+            mStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+            mEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+        }
+
+        let monthPaid = 0;
+        let monthScheduledUnpaid = 0;
+        let monthOverdueUnpaid = 0;
 
         for (const order of deliveredOrders) {
             let rawRows = [];
@@ -327,19 +355,65 @@ const getDashboardStats = async (req, res) => {
             const normalized = getNormalizedLedger(rawRows);
             const { summary } = normalized;
 
-            totalInstallmentDue += summary.totalInstallmentDue;
-            totalInstallmentPaid += summary.totalInstallmentPaid;
+            cumInstallmentDue += summary.totalInstallmentDue;
+            cumInstallmentPaid += summary.totalInstallmentPaid;
             totalArrears += summary.totalArrears;
-            // "Pending Collections" counts unique customer accounts whose installment balance is still pending
+
             if (summary.totalInstallmentRemaining > 0) {
                 pendingInstallmentCount += 1;
             }
 
-            // "Impacted Customers" counts unique customer accounts that have overdue installments
             if (summary.overdueInstallments > 0) {
                 ordersWithPendingInstallments += 1;
             }
+
+            // Month-wise row analysis — three independent questions, each
+            // with its own scoping rule. None of these is derived from
+            // summing the other two.
+            // - Total Month Paid: cash actually collected in the target
+            //   period, by payment date (matches the Installment Recoveries
+            //   report exactly).
+            // - Month Remaining: what's still owed on installments
+            //   scheduled (by due date) in the target period, whether or
+            //   not that due date has passed yet.
+            // - Total Due: the arrears portion of that — only the slice of
+            //   Month Remaining whose due date has ALREADY passed and
+            //   still hasn't been paid. An installment due later this
+            //   month that's simply not due yet is not "due" in this sense.
+            const rows = Array.isArray(rawRows) ? rawRows : [];
+            for (const r of rows) {
+                if (r.month === 0) continue; // advance/down-payment, not a monthly installment — excluded from all three, matching the Recoveries report
+
+                const dueAmt = parseFloat(r.amount || r.dueAmount || 0);
+                const paidAmt = parseFloat(r.paid_amount || r.paidAmount || (r.status === 'paid' ? dueAmt : 0));
+                const remAmt = Math.max(0, dueAmt - paidAmt);
+
+                // Total Month Paid: cash recovered in the target period (matches Installment Recoveries report)
+                if (r.status === 'paid' && r.paid_at) {
+                    const pDate = new Date(r.paid_at);
+                    if (pDate >= mStart && pDate <= mEnd) {
+                        monthPaid += (dueAmt || paidAmt);
+                    }
+                }
+
+                // Month Remaining / Total Due: scheduled unpaid for installments due in the target period
+                const dDateStr = r.due_date || r.dueDate;
+                if (dDateStr) {
+                    const dDate = new Date(dDateStr);
+                    if (!isNaN(dDate.getTime()) && dDate >= mStart && dDate <= mEnd && r.status !== 'paid') {
+                        monthScheduledUnpaid += remAmt;
+                        if (dDate < todayStart) {
+                            monthOverdueUnpaid += remAmt;
+                        }
+                    }
+                }
+            }
         }
+
+        const monthRemaining = monthScheduledUnpaid;
+        const monthDue = monthOverdueUnpaid;
+        const monthScheduledTotal = monthPaid + monthRemaining;
+        const cumulativeRemaining = Math.max(0, cumInstallmentDue - cumInstallmentPaid);
 
         // Calculate growth increment percentage
         const calcIncrement = (curr, prev) => {
@@ -419,9 +493,19 @@ const getDashboardStats = async (req, res) => {
                     periodSales: currentSales
                 },
                 installments: {
-                    totalInstallmentDue,
-                    totalInstallmentPaid,
-                    totalRemaining: Math.max(0, totalInstallmentDue - totalInstallmentPaid),
+                    totalInstallmentDue: monthDue,
+                    totalInstallmentPaid: monthPaid,
+                    totalRemaining: monthRemaining,
+                    monthDue,
+                    monthPaid,
+                    monthRemaining,
+                    // Paid vs Remaining split for the donut — deliberately
+                    // divided by their own sum, not by Total Due (arrears),
+                    // since arrears can be smaller than what's been paid and
+                    // would push this past 100%.
+                    paidPercentage: monthScheduledTotal > 0 ? Math.round((monthPaid / monthScheduledTotal) * 1000) / 10 : 0,
+                    remainingPercentage: monthScheduledTotal > 0 ? Math.round((monthRemaining / monthScheduledTotal) * 1000) / 10 : 0,
+                    cumulativeRemaining,
                     totalArrears,
                     pendingInstallmentCount,
                     ordersWithPendingInstallments
@@ -2317,7 +2401,10 @@ const getOutletInstallmentsDueList = async (req, res) => {
         min_balance,
         max_balance,
         start_date,
-        end_date
+        end_date,
+        month,
+        year,
+        status
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page));
@@ -2498,10 +2585,19 @@ const getOutletInstallmentsDueList = async (req, res) => {
 
             const isPtp = hasPtp;
 
-            // Find the representative installment for the table row
-            let repInstallment = pendingInstallments[0]; 
-            if (!repInstallment && installmentLedger.length > 0) {
-                repInstallment = installmentLedger[installmentLedger.length - 1];
+            // Find the representative installment for the table row (prefer row matching month & year filter if provided)
+            let repInstallment = null;
+            if (month && year) {
+                const targetM = parseInt(month);
+                const targetY = parseInt(year);
+                repInstallment = installmentLedger.find(r => {
+                    if (!r.dueDate) return false;
+                    const d = new Date(r.dueDate);
+                    return !isNaN(d.getTime()) && (d.getMonth() + 1) === targetM && d.getFullYear() === targetY;
+                });
+            }
+            if (!repInstallment) {
+                repInstallment = pendingInstallments[0] || installmentLedger[installmentLedger.length - 1];
             }
             if (!repInstallment) return; // Ignore if no ledger
 
@@ -2560,7 +2656,12 @@ const getOutletInstallmentsDueList = async (req, res) => {
                     product_name: invInfo?.product_name || cashRecord?.product_name || order.product_name,
                     imei_serial: imeiSerial || 'N/A',
                     monthlyAmount: repInstallment.dueAmount,
-                    remainingAmount: summary.totalInstallmentRemaining, 
+                    remainingAmount: summary.totalInstallmentRemaining,
+                    // Same metric that feeds the Outlet Dashboard's
+                    // Installment Recovery "Arrears" total (sum of every
+                    // overdue-and-unpaid installment's remaining balance) —
+                    // shown per-account here.
+                    arrearsAmount: summary.totalArrears || 0,
                     partialPayment: (repInstallment.paidAmount > 0 && repInstallment.status !== 'paid') ? repInstallment.paidAmount : (repInstallment.status === 'paid' ? repInstallment.dueAmount : null),
                     paidDate: matchedRawRow?.paid_at || repInstallment.paidAt || null,
                     paymentHistory: paymentHistory,
@@ -2675,6 +2776,14 @@ const getOutletInstallmentsDueList = async (req, res) => {
         }
         if (max_balance) {
             filtered = filtered.filter(inst => inst.remainingAmount <= Number(max_balance));
+        }
+        // Row-status filter (Paid/Partial/Pending) — applied server-side
+        // against the full matching set, not just whichever page happens to
+        // be loaded client-side, so switching this dropdown gives a
+        // Customer Count that's actually correct for that status (and so
+        // Paid + Partial + Pending adds back up to the "All" total).
+        if (status) {
+            filtered = filtered.filter(inst => (inst.status || 'pending').toLowerCase() === status.toLowerCase());
         }
 
         let monthsDue = 0;

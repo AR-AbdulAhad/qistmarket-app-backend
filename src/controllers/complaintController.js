@@ -179,7 +179,8 @@ const getComplaints = async (req, res) => {
         orderBy: { created_at: 'desc' },
         include: {
           created_by: { select: { id: true, full_name: true, role: { select: { name: true } } } },
-          assigned_to: { select: { id: true, full_name: true } }
+          assigned_to: { select: { id: true, full_name: true } },
+          order: { select: { id: true, order_ref: true, customer_name: true } }
         },
         skip,
         take,
@@ -304,6 +305,115 @@ const pickComplaint = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/complaints/:id
+ * Full detail for one complaint — used by the "View Details" action so a CSR
+ * can inspect a complaint (description, attachments, reporter) before
+ * deciding whether to pick it, not only after.
+ *
+ * `customer_name`/`customer_cnic`/`mobile_number` on Complaint are free text
+ * entered at filing time, not a real foreign key, so if the complaint isn't
+ * linked to an Order yet this also looks up candidate Customer records by
+ * CNIC/mobile and returns their orders as `candidateOrders` for the CSR to
+ * confirm and link.
+ */
+const getComplaintById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const complaint = await prisma.complaint.findUnique({
+      where: { id: Number(id) },
+      include: {
+        created_by: { select: { id: true, full_name: true, role: { select: { name: true } } } },
+        assigned_to: { select: { id: true, full_name: true } },
+        order: { select: { id: true, order_ref: true, customer_name: true, status: true } },
+      },
+    });
+
+    if (!complaint) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Complaint not found.' } });
+    }
+
+    let candidateOrders = [];
+    if (!complaint.order_id && (complaint.customer_cnic || complaint.mobile_number)) {
+      const customers = await prisma.customer.findMany({
+        where: {
+          OR: [
+            complaint.customer_cnic ? { cnic: complaint.customer_cnic } : undefined,
+            complaint.mobile_number ? { mobile: complaint.mobile_number } : undefined,
+          ].filter(Boolean),
+        },
+        include: {
+          orders: {
+            select: { id: true, order_ref: true, customer_name: true, product_name: true, status: true, created_at: true },
+            orderBy: { created_at: 'desc' },
+          },
+        },
+      });
+      candidateOrders = customers.flatMap((c) => c.orders);
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { complaint, candidateOrders },
+    });
+  } catch (error) {
+    console.error('Get complaint by id error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
+/**
+ * PUT /api/complaints/:id/link
+ * Confirms which Order this complaint belongs to (or clears the link when
+ * `order_id` is null). Once linked, the complaint also appears in that
+ * order's own detail page as part of its history.
+ */
+const linkComplaintToOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { order_id } = req.body;
+
+    const existing = await prisma.complaint.findUnique({ where: { id: Number(id) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Complaint not found.' } });
+    }
+
+    if (order_id !== null && order_id !== undefined) {
+      const order = await prisma.order.findUnique({ where: { id: Number(order_id) }, select: { id: true } });
+      if (!order) {
+        return res.status(404).json({ success: false, error: { code: 404, message: 'Order not found.' } });
+      }
+    }
+
+    const complaint = await prisma.complaint.update({
+      where: { id: Number(id) },
+      data: {
+        order_id: order_id === null ? null : Number(order_id),
+        updated_at: now(),
+      },
+      include: {
+        order: { select: { id: true, order_ref: true, customer_name: true } },
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: order_id ? 'Complaint linked to order successfully.' : 'Complaint unlinked from order.',
+      data: { complaint },
+    });
+  } catch (error) {
+    console.error('Link complaint to order error:', error);
+    return res.status(500).json({
+      success: false,
+      error: { code: 500, message: 'Internal server error' },
+    });
+  }
+};
+
 const searchPurchasers = async (req, res) => {
   try {
     const { q } = req.query;
@@ -347,108 +457,9 @@ const searchPurchasers = async (req, res) => {
 // here for it, so every tap 404'd. Submits to the existing POST /api/complaints/public.
 
 const complaintFormPage = (req, res) => {
-  const html = `<!DOCTYPE html>
-<html lang="ur" dir="ltr">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Complaint Register — Qist Market</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, 'Segoe UI', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: #f1f5f9; color: #0f172a; padding: 16px; }
-    .wrapper { max-width: 520px; margin: 0 auto; }
-    .card { background: #fff; border-radius: 22px; padding: 1.4rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 10px 20px -5px rgba(0,0,0,0.03); }
-    h1 { font-size: 1.1rem; font-weight: 800; color: #dc2626; margin-bottom: 4px; }
-    .sub { font-size: 0.72rem; color: #64748b; margin-bottom: 20px; }
-    label { display: block; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; color: #6c86a3; margin: 14px 0 6px; }
-    input, textarea { width: 100%; border: 1.5px solid #e2e8f0; border-radius: 14px; padding: 11px 14px; font-size: 0.9rem; font-family: inherit; color: #0f172a; }
-    input:focus, textarea:focus { outline: none; border-color: #dc2626; }
-    textarea { resize: vertical; min-height: 90px; }
-    input[type="file"] { border: none; padding: 6px 0; font-size: 0.8rem; }
-    .btn { width: 100%; margin-top: 20px; background: #dc2626; color: #fff; border: none; padding: 13px; border-radius: 60px; font-weight: 800; font-size: 0.9rem; cursor: pointer; }
-    .btn:disabled { opacity: 0.6; cursor: default; }
-    .err { color: #dc2626; font-size: 0.78rem; margin-top: 10px; display: none; }
-    .success { display: none; text-align: center; }
-    .success .tick { font-size: 2.2rem; margin-bottom: 8px; }
-    .success h2 { font-size: 1.05rem; font-weight: 800; color: #15803d; margin-bottom: 10px; }
-    .success .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 0.85rem; }
-    .success .row span:first-child { color: #6c86a3; font-weight: 700; text-transform: uppercase; font-size: 0.65rem; }
-    .success a.track { display: block; margin-top: 16px; color: #dc2626; font-weight: 700; font-size: 0.85rem; text-decoration: none; }
-    .footer { text-align: center; font-size: 0.68rem; color: #94a3b8; margin-top: 16px; }
-  </style>
-</head>
-<body>
-  <div class="wrapper">
-    <div class="card">
-      <div id="formView">
-        <h1>Complaint Register Karein</h1>
-        <div class="sub">Qist Market Support — apni complaint darj karwayein</div>
-
-        <form id="complaintForm">
-          <label>Name</label>
-          <input type="text" name="customer_name" required />
-
-          <label>CNIC</label>
-          <input type="text" name="customer_cnic" placeholder="42101-1234567-1" required />
-
-          <label>Mobile Number</label>
-          <input type="tel" name="mobile_number" placeholder="03XX-XXXXXXX" required />
-
-          <label>Complaint Details</label>
-          <textarea name="description" required></textarea>
-
-          <label>Attachments (optional)</label>
-          <input type="file" name="media" accept="image/*" multiple />
-
-          <button class="btn" type="submit">Submit Complaint</button>
-          <div class="err" id="errMsg"></div>
-        </form>
-      </div>
-
-      <div class="success" id="successView">
-        <div class="tick">✅</div>
-        <h2>Complaint Registered!</h2>
-        <div class="row"><span>Complaint ID</span><span id="outComplaintId"></span></div>
-        <p style="font-size:0.8rem;color:#64748b;margin-top:12px;">Hamari team 24 hours mein aap se rabta karegi.</p>
-        <a class="track" id="outTrackLink" href="#" target="_blank" rel="noopener">Complaint Track Karein →</a>
-      </div>
-    </div>
-    <div class="footer">Har Cheez Qist Par!</div>
-  </div>
-
-  <script>
-    document.getElementById('complaintForm').addEventListener('submit', async function (e) {
-      e.preventDefault();
-      var form = e.target;
-      var btn = form.querySelector('.btn');
-      var errEl = document.getElementById('errMsg');
-      errEl.style.display = 'none';
-      btn.disabled = true;
-      btn.textContent = 'Bhej rahe hain...';
-
-      try {
-        var res = await fetch('/api/complaints/public', { method: 'POST', body: new FormData(form) });
-        var data = await res.json();
-        if (!res.ok || !data.success) {
-          throw new Error((data && data.error && data.error.message) || 'Complaint submit nahi ho saki.');
-        }
-        var complaintId = data.data.complaint.complaint_id;
-        document.getElementById('outComplaintId').textContent = complaintId;
-        document.getElementById('outTrackLink').href = '/api/complaints/track/' + encodeURIComponent(complaintId);
-        document.getElementById('formView').style.display = 'none';
-        document.getElementById('successView').style.display = 'block';
-      } catch (err) {
-        errEl.textContent = err.message;
-        errEl.style.display = 'block';
-        btn.disabled = false;
-        btn.textContent = 'Submit Complaint';
-      }
-    });
-  </script>
-</body>
-</html>`;
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  return res.send(html);
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:2000';
+  const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  return res.redirect(302, `${frontendUrl}/complaint${queryString}`);
 };
 
 // ─── GET /api/complaints/track/:complaintId — public tracking page (no auth) ──
@@ -539,12 +550,63 @@ const trackComplaint = async (req, res) => {
   }
 };
 
+const searchPublicComplaints = async (req, res) => {
+  try {
+    const { query } = req.query;
+    if (!query || !query.trim()) {
+      return res.status(400).json({ success: false, message: 'Please enter CNIC, Mobile Number or Complaint ID.' });
+    }
+    const q = query.trim();
+    const digitsOnly = q.replace(/\D/g, '');
+
+    const conditions = [
+      { complaint_id: { contains: q } },
+      { customer_cnic: { contains: q } },
+      { mobile_number: { contains: q } },
+      { customer_name: { contains: q } },
+    ];
+
+    if (digitsOnly && digitsOnly.length >= 4) {
+      conditions.push({ customer_cnic: { contains: digitsOnly } });
+      conditions.push({ mobile_number: { contains: digitsOnly } });
+    }
+
+    const complaints = await prisma.complaint.findMany({
+      where: {
+        OR: conditions,
+      },
+      select: {
+        id: true,
+        complaint_id: true,
+        customer_name: true,
+        customer_cnic: true,
+        mobile_number: true,
+        description: true,
+        status: true,
+        resolution_note: true,
+        created_at: true,
+        updated_at: true,
+      },
+      orderBy: { created_at: 'desc' },
+      take: 10,
+    });
+
+    return res.json({ success: true, data: complaints });
+  } catch (error) {
+    console.error('Public complaint search error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to search complaints.' });
+  }
+};
+
 module.exports = {
   createComplaint,
   getComplaints,
+  getComplaintById,
   updateComplaint,
   pickComplaint,
+  linkComplaintToOrder,
   searchPurchasers,
   trackComplaint,
+  searchPublicComplaints,
   complaintFormPage,
 };

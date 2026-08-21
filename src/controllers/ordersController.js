@@ -1901,6 +1901,13 @@ const getOrderById = async (req, res) => {
           },
           orderBy: { created_at: 'desc' }
         },
+        complaints: {
+          include: {
+            created_by: { select: { username: true, full_name: true } },
+            assigned_to: { select: { username: true, full_name: true } }
+          },
+          orderBy: { created_at: 'desc' }
+        },
         verification: {
           include: {
             reviews: {

@@ -1,6 +1,7 @@
 const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const puppeteer = require('puppeteer');
+const axios = require('axios');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendInstallmentLedger, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
@@ -61,6 +62,12 @@ const accountStatusMeta = (status) => {
 };
 
 const QIST_SUPPORT_PHONE = '021-111-11-7747';
+// Support tab specific — a real mobile UAN and a separate WhatsApp (WATI)
+// number, plus the head office address, distinct from the outlet's own
+// branch phone/address shown in Branch Details.
+const QIST_UAN_NUMBER = '+92 304 1111144';
+const QIST_WHATSAPP_NUMBER = '0340 4444660';
+const QIST_HEAD_OFFICE_ADDRESS = 'Office No. 401, Plot # 31-C, Street 5, DHA Phase 5, Badar Commercial Area, Defence Housing Authority, Karachi, 75500, Pakistan';
 
 // ─── Shared: fetch ledger data from DB ──────────────────────────────────────
 
@@ -74,6 +81,7 @@ async function fetchLedger(where) {
             include: {
               purchaser: true,
               grantors: { orderBy: { grantor_number: 'asc' } },
+              verification_locations: true,
             },
           },
           cash_in_hand: {
@@ -108,9 +116,41 @@ async function fetchLedger(where) {
   });
 }
 
+// ─── Shared: best-effort product photo lookup ───────────────────────────────
+
+const QIST_MARKET_PRODUCT_API = 'https://api.qistmarket.pk/api/product';
+
+// Matches vendorController's fetchApiProductMap matching rule (exact,
+// case-insensitive name match) against the qistmarket.pk catalog, but only
+// needs one image so it isn't worth sharing that heavier per-purchase helper.
+// Tries api_product_name (the name a vendor purchase was matched against)
+// before the raw product_name, since the former is the one actually
+// confirmed to exist in the catalog. Never throws — a slow/unreachable
+// catalog must not break the customer-facing ledger page, it just renders
+// without a photo.
+async function fetchProductImageUrl(productName, apiProductName) {
+  const namesToTry = [apiProductName, productName]
+    .filter(Boolean)
+    .map((n) => n.trim().toLowerCase());
+  if (!namesToTry.length) return null;
+
+  try {
+    const response = await axios.get(QIST_MARKET_PRODUCT_API, { timeout: 6000 });
+    const products = Array.isArray(response.data) ? response.data : [];
+    for (const name of namesToTry) {
+      const match = products.find((p) => (p.name || '').trim().toLowerCase() === name);
+      if (match?.ProductImage?.[0]?.url) return match.ProductImage[0].url;
+    }
+    return null;
+  } catch (err) {
+    console.warn('[LedgerController] fetchProductImageUrl failed:', err.message);
+    return null;
+  }
+}
+
 // ─── Shared: build HTML from ledger record (RESPONSIVE VERSION) ───────────────────────────────────
 
-function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null) {
+function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null, productImageUrl = null) {
   const order = ledger.order;
   const delivery = ledger.delivery;
   const purchaser = order.verification?.purchaser;
@@ -190,6 +230,18 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(outlet.address)}`
     : null;
 
+  // Where the purchaser/guarantor actually were when field verification
+  // captured their location — distinct from mapsUrl above (the branch's own
+  // address), and from present_address (self-reported, not GPS-verified).
+  const verificationLocations = order.verification?.verification_locations || [];
+  const verificationMapUrl = (personType, personId) => {
+    const loc = verificationLocations.find(
+      (l) => l.person_type === personType && l.person_id === personId && l.latitude != null && l.longitude != null
+    );
+    return loc ? `https://www.google.com/maps/search/?api=1&query=${loc.latitude},${loc.longitude}` : null;
+  };
+  const purchaserMapUrl = purchaser ? verificationMapUrl('purchaser', purchaser.id) : null;
+
   const consumerNumber = ledger.consumer_numbers?.[0]?.consumer_number || null;
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
   const qrImageSrc = smartPayQr?.qr_image_base64 || null;
@@ -200,7 +252,9 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
 
   // ── Guarantor cards (real data from GrantorVerification, if any exist) ──
   const guarantorCardsHtml = grantors.length
-    ? grantors.map((g, idx) => `
+    ? grantors.map((g, idx) => {
+        const gMapUrl = verificationMapUrl(`grantor${idx + 1}`, g.id);
+        return `
         <div class="guarantor-item">
           <div class="info-label" style="margin-bottom:6px;">Guarantor ${idx + 1}</div>
           <div class="info-val" style="margin-bottom:8px;">${g.name}</div>
@@ -208,7 +262,9 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
             <div class="info-row"><span class="info-label">CNIC</span><span class="info-val">${maskCnic(g.cnic_number)}</span></div>
             <div class="info-row"><span class="info-label">Mobile</span><span class="info-val">${g.telephone_number || 'N/A'}</span></div>
           </div>
-        </div>`).join('')
+          ${gMapUrl ? `<a class="btn-outline" style="margin-top:10px;display:inline-block;text-align:center;" href="${gMapUrl}" target="_blank" rel="noopener">📍 Verification Location</a>` : ''}
+        </div>`;
+      }).join('')
     : `<p style="font-size:0.8rem;color:#94a3b8;">Koi guarantor record maujood nahi.</p>`;
 
   // ── Ledger rows, computed once and rendered into both a compact (mobile) and full (desktop) table ──
@@ -257,6 +313,10 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
 
   // ── Reusable content blocks (shared between mobile & desktop markup) ──
 
+  const productImageHtml = productImageUrl
+    ? `<div style="margin-bottom:14px;"><img src="${productImageUrl}" alt="${productName}" style="width:96px;height:96px;object-fit:contain;border-radius:14px;border:1px solid #e2e8f0;background:#fff;padding:6px;" /></div>`
+    : '';
+
   const productDetailsRows = `
       <div class="info-row"><span class="info-label">Product</span><span class="info-val">${productName}</span></div>
       <div class="info-row"><span class="info-label">Model</span><span class="info-val">${modelName}</span></div>
@@ -284,7 +344,8 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       <div class="info-row"><span class="info-label">Hirer Name</span><span class="info-val">${customerName}${grantorRelationLabel}</span></div>
       <div class="info-row"><span class="info-label">CNIC</span><span class="info-val">${cnicMasked}</span></div>
       <div class="info-row"><span class="info-label">Mobile Number</span><span class="info-val">${phone}</span></div>
-      <div class="info-row"><span class="info-label">Address</span><span class="info-val">${address}</span></div>`;
+      <div class="info-row"><span class="info-label">Address</span><span class="info-val">${address}</span></div>
+      ${purchaserMapUrl ? `<a class="btn-outline" style="margin-top:6px;display:inline-block;text-align:center;" href="${purchaserMapUrl}" target="_blank" rel="noopener">📍 Verification Location</a>` : ''}`;
 
   const branchDetailsBlock = `
       <div class="info-row"><span class="info-label">Branch Name</span><span class="info-val">${branchName}</span></div>
@@ -326,11 +387,24 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
         </ul>
       </div>`;
 
+  const realCnic = purchaser?.cnic_number || (cnic !== 'N/A' ? cnic : '');
+  const realPhone = purchaser?.telephone_number || order.whatsapp_number || (phone !== 'N/A' ? phone : '');
+
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:2000';
+  const submitComplaintUrl = `${frontendUrl}/complaint?customer_name=${encodeURIComponent(customerName)}&customer_cnic=${encodeURIComponent(realCnic)}&mobile_number=${encodeURIComponent(realPhone)}`;
+
   const helpBoxHtml = `
       <div class="section-title" style="color:#dc2626;">HELP / COMPLAINT</div>
       <p style="font-size:0.78rem;color:#64748b;margin-bottom:12px;">Agar aapko kisi qisam ki pareshani hai to humse rabta karein.</p>
-      <button class="btn-primary no-print" style="width:100%;margin-bottom:8px;" disabled>Submit Complaint</button>
-      <button class="btn-outline no-print" style="width:100%;" disabled>Check Complaint Status</button>`;
+      <a href="${submitComplaintUrl}" target="_blank" class="btn-primary no-print" style="width:100%;margin-bottom:8px;display:block;text-align:center;text-decoration:none;box-sizing:border-box;">Submit Complaint</a>
+      <button type="button" onclick="checkInlineComplaintStatus(this, '${encodeURIComponent(realCnic)}', '${encodeURIComponent(realPhone)}')" class="btn-outline no-print" style="width:100%;box-sizing:border-box;cursor:pointer;">Check Complaint Status</button>
+
+      <div class="inline-complaint-status-box" style="display:none;margin-top:12px;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+        <div class="inline-complaint-status-loading" style="text-align:center;font-size:0.78rem;color:#64748b;padding:8px 0;font-weight:600;">
+          ⏳ Complaint status search kiya ja raha hai...
+        </div>
+        <div class="inline-complaint-status-result"></div>
+      </div>`;
 
   const docsListHtml = `
       <div class="section-title" style="color:#0f172a;">IMPORTANT DOCUMENTS</div>
@@ -340,6 +414,62 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
         <li>📄 Terms & Conditions</li>
         <li>📄 Payment Receipts Guide</li>
       </ul>`;
+
+  // ── Documents tab: the actual uploaded verification documents for the
+  // purchaser and every guarantor on this order — not the placeholder list
+  // above, which has no backing file for any of its four items yet.
+  const docLink = (label, url) => url
+    ? `<a href="${url}" target="_blank" rel="noopener" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;margin-bottom:8px;text-decoration:none;color:#1e293b;font-weight:700;font-size:0.8rem;">
+        <span>📎 ${label}</span><span style="color:#dc2626;font-size:0.7rem;font-weight:800;">VIEW →</span>
+      </a>`
+    : `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#f8fafc;border:1px dashed #e2e8f0;border-radius:12px;margin-bottom:8px;color:#94a3b8;font-weight:600;font-size:0.8rem;">
+        <span>📎 ${label}</span><span style="font-size:0.7rem;">Not uploaded</span>
+      </div>`;
+
+  const purchaserDocsHtml = `
+      ${docLink('CNIC Front', purchaser?.cnic_front_url)}
+      ${docLink('CNIC Back', purchaser?.cnic_back_url)}
+      ${docLink('Utility Bill', purchaser?.utility_bill_url)}
+      ${docLink('Service Card', purchaser?.service_card_url)}
+      ${docLink('Signature', purchaser?.signature_url)}`;
+
+  const guarantorDocsHtml = grantors.length
+    ? grantors.map((g, idx) => `
+        <div style="margin-bottom:18px;">
+          <div class="info-label" style="margin-bottom:8px;">Guarantor ${idx + 1} — ${g.name}</div>
+          ${docLink('CNIC Front', g.cnic_front_url)}
+          ${docLink('CNIC Back', g.cnic_back_url)}
+          ${docLink('Utility Bill', g.utility_bill_url)}
+          ${docLink('Service Card', g.service_card_url)}
+          ${docLink('Signature', g.signature_url)}
+        </div>`).join('')
+    : `<p style="font-size:0.8rem;color:#94a3b8;">Koi guarantor documents maujood nahi.</p>`;
+
+  const documentsTabHtml = `
+      <div class="section-title" style="color:#0f172a;">📄 Documents</div>
+      <div class="desktop-2col">
+        <div>
+          <div class="info-label" style="margin-bottom:10px;">Purchaser Documents</div>
+          ${purchaserDocsHtml}
+        </div>
+        <div>
+          <div class="info-label" style="margin-bottom:10px;">Guarantor Documents</div>
+          ${guarantorDocsHtml}
+        </div>
+      </div>`;
+
+  // ── Support tab: the company UAN/WhatsApp contact + a way to file a
+  // complaint. Kept separate from the Complaints tab's interactive
+  // submit+status box below so the two never end up sharing DOM ids.
+  const supportTabHtml = `
+      <div class="section-title" style="color:#0f172a;">🛟 Contact & Support</div>
+      <p style="font-size:0.8rem;color:#334155;line-height:1.9;margin-bottom:16px;">
+        📞 UAN: <strong>${QIST_UAN_NUMBER}</strong><br/>
+        💬 WhatsApp: <strong>${QIST_WHATSAPP_NUMBER}</strong><br/>
+        📍 Head Office: ${QIST_HEAD_OFFICE_ADDRESS}<br/>
+        🕒 Mon - Sat (11:00 AM - 08:30 PM)
+      </p>
+      <a href="${submitComplaintUrl}" target="_blank" class="btn-primary no-print" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box;">Submit a Complaint</a>`;
 
   const quickLinksHtml = `
       <div class="section-title" style="color:#0f172a;">QUICK LINKS</div>
@@ -373,12 +503,12 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
           <img class="logo-img" src="${logoDataURI}" alt="QistMarket" />
         </div>
         <div class="nav-links">
-          <span>🏠 Dashboard</span>
-          <span class="active">📋 Ledger</span>
-          <span>✉️ Payments</span>
-          <span>ℹ️ Complaints</span>
-          <span>📄 Documents</span>
-          <span>🛟 Support</span>
+          <span class="nav-tab active" data-tab="dashboard" onclick="showTab('dashboard')">🏠 Dashboard</span>
+          <span class="nav-tab" data-tab="ledger" onclick="showTab('ledger')">📋 Ledger</span>
+          <span class="nav-tab" data-tab="payments" onclick="showTab('payments')">✉️ Payments</span>
+          <span class="nav-tab" data-tab="complaints" onclick="showTab('complaints')">ℹ️ Complaints</span>
+          <span class="nav-tab" data-tab="documents" onclick="showTab('documents')">📄 Documents</span>
+          <span class="nav-tab" data-tab="support" onclick="showTab('support')">🛟 Support</span>
         </div>
         <div class="nav-branch">
           <span class="info-label">Branch</span>
@@ -388,10 +518,12 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
 
   const bottomNavHtml = `
       <nav class="mobile-bottomnav no-print">
-        <span>🏠<br/>Dashboard</span>
-        <span class="active">📋<br/>Ledger</span>
-        <span>✉️<br/>Payments</span>
-        <span>☰<br/>More</span>
+        <span class="nav-tab active" data-tab="dashboard" onclick="showTab('dashboard')">🏠<br/>Dashboard</span>
+        <span class="nav-tab" data-tab="ledger" onclick="showTab('ledger')">📋<br/>Ledger</span>
+        <span class="nav-tab" data-tab="payments" onclick="showTab('payments')">✉️<br/>Payments</span>
+        <span class="nav-tab" data-tab="complaints" onclick="showTab('complaints')">ℹ️<br/>Complaints</span>
+        <span class="nav-tab" data-tab="documents" onclick="showTab('documents')">📄<br/>Documents</span>
+        <span class="nav-tab" data-tab="support" onclick="showTab('support')">🛟<br/>Support</span>
       </nav>`;
 
   return `<!DOCTYPE html>
@@ -531,10 +663,11 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     .mobile-outstanding .lbl { font-size: 0.68rem; text-transform: uppercase; opacity: 0.85; }
     .mobile-bottomnav {
       position: fixed; bottom: 0; left: 0; right: 0; background: #fff; border-top: 1px solid #eef2f7;
-      display: flex; justify-content: space-around; padding: 8px 0 10px; font-size: 0.62rem; font-weight: 700; color: #94a3b8; z-index: 20;
+      display: flex; justify-content: space-around; padding: 6px 0 8px; font-size: 0.54rem; font-weight: 700; color: #94a3b8; z-index: 20;
     }
-    .mobile-bottomnav span { text-align: center; line-height: 1.5; }
+    .mobile-bottomnav span { text-align: center; line-height: 1.4; cursor: pointer; flex: 1; }
     .mobile-bottomnav span.active { color: #dc2626; }
+    .desktop-topnav .nav-links .nav-tab { cursor: pointer; }
 
     /* ── Desktop view ── */
     .desktop-topnav {
@@ -577,6 +710,9 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       .desktop-grid { grid-template-columns: 1fr !important; }
       .card, .info-card, .table-wrapper, .footer-note { box-shadow: none; border: 1px solid #ddd; break-inside: avoid; }
       .ledger-table th { background: #333 !important; color: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      /* Printing/saving as PDF should include every tab's content, not just
+         whichever one happens to be active on screen. */
+      .tab-panel { display: block !important; }
     }
   </style>
 </head>
@@ -601,19 +737,25 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       <div class="amt">${formatPKR(remainingAmount)}</div>
       <div class="lbl">Total Outstanding</div>
     </div>
-    <a class="btn-primary no-print" href="#mobile-pay" style="display:block;text-align:center;margin-bottom:20px;">Pay Now</a>
+    <a class="btn-primary no-print" href="javascript:void(0)" onclick="showTab('payments')" style="display:block;text-align:center;margin-bottom:20px;">Pay Now</a>
 
-    <div class="card">
+    <div class="card tab-panel" data-tab="dashboard">
       <div class="section-title">📦 Product Details</div>
+      ${productImageHtml}
       <div class="info-grid-2col">${productDetailsRows}</div>
     </div>
 
-    <div class="card">
+    <div class="card tab-panel" data-tab="dashboard">
       <div class="section-title">🗂 Plan Details</div>
       <div class="info-grid-2col">${planDetailsRows}</div>
     </div>
 
-    <div class="card">
+    <div class="card tab-panel" data-tab="dashboard">
+      <div class="section-title">📍 Branch Details</div>
+      <div class="info-grid-2col">${branchDetailsBlock}</div>
+    </div>
+
+    <div class="card tab-panel" data-tab="dashboard,ledger">
       <div class="section-title">🧾 Installment / Payment Ledger</div>
       <div class="table-wrapper" style="box-shadow:none;">
         <table class="ledger-table mobile-ledger-table" id="mobileLedgerTable">
@@ -624,16 +766,14 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       ${rowsMeta.some(r => r.extra) ? `<button class="view-all-btn no-print" onclick="document.getElementById('mobileLedgerTable').classList.toggle('show-all'); this.textContent = this.textContent.indexOf('All') > -1 ? 'Hide Payments' : 'View All Payments';">View All Payments</button>` : ''}
     </div>
 
-    ${noteBoxHtml}
+    <div class="card tab-panel" data-tab="dashboard,payments">${paymentBoxHtml}</div>
+    <div class="tab-panel" data-tab="dashboard,payments">${noteBoxHtml}</div>
 
-    <div class="card" id="mobile-pay">${paymentBoxHtml}</div>
+    <div class="card tab-panel" data-tab="dashboard,complaints">${helpBoxHtml}</div>
 
-    <div class="card">${helpBoxHtml}</div>
+    <div class="card tab-panel" data-tab="dashboard,documents">${documentsTabHtml}</div>
 
-    <div class="card">
-      <div class="section-title">📍 Branch Details</div>
-      <div class="info-grid-2col">${branchDetailsBlock}</div>
-    </div>
+    <div class="card tab-panel" data-tab="dashboard,support">${supportTabHtml}</div>
 
     ${bottomNavHtml}
   </div>
@@ -662,16 +802,17 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
         <div class="lbl">Total Outstanding</div>
         <div class="amt">${formatPKR(remainingAmount)}</div>
         <div class="info-label" style="margin-top:6px;">Next Due Date: <strong>${nextDueDate}</strong></div>
-        <a class="btn-primary no-print" href="#desktop-pay" style="display:inline-block;margin-top:10px;">Pay Now</a>
+        <a class="btn-primary no-print" href="javascript:void(0)" onclick="showTab('payments')" style="display:inline-block;margin-top:10px;">Pay Now</a>
       </div>
     </div>
 
     <div class="desktop-grid">
       <div>
-        <div class="card">
+        <div class="card tab-panel" data-tab="dashboard">
           <div class="desktop-2col">
             <div>
               <div class="section-title">📦 Product Details</div>
+              ${productImageHtml}
               <div class="info-grid-2col">${productDetailsRows}</div>
             </div>
             <div>
@@ -681,7 +822,7 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
           </div>
         </div>
 
-        <div class="card">
+        <div class="card tab-panel" data-tab="dashboard">
           <div class="desktop-3col">
             <div>
               <div class="section-title">👤 Hirer / Purchaser Details</div>
@@ -698,12 +839,12 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
           </div>
         </div>
 
-        <div class="card">
+        <div class="card tab-panel" data-tab="dashboard">
           <div class="section-title">📊 Account Summary</div>
           <div class="summary-bar">${accountSummaryRows}</div>
         </div>
 
-        <div class="card" style="padding:0;overflow:hidden;">
+        <div class="card tab-panel" data-tab="dashboard,ledger" style="padding:0;overflow:hidden;">
           <div style="padding:1.2rem 1.2rem 0;">
             <div class="section-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">🧾 Installment / Payment Ledger</div>
           </div>
@@ -723,12 +864,15 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
           </div>
           <div style="height:1.2rem;"></div>
         </div>
+
+        <div class="card tab-panel" data-tab="dashboard,documents">${documentsTabHtml}</div>
       </div>
 
       <div id="desktop-pay">
-        <div class="card">${paymentBoxHtml}</div>
-        ${noteBoxHtml}
-        <div class="card">${helpBoxHtml}</div>
+        <div class="card tab-panel" data-tab="dashboard,payments">${paymentBoxHtml}</div>
+        <div class="tab-panel" data-tab="dashboard,payments">${noteBoxHtml}</div>
+        <div class="card tab-panel" data-tab="dashboard,complaints">${helpBoxHtml}</div>
+        <div class="card tab-panel" data-tab="dashboard,support">${supportTabHtml}</div>
       </div>
     </div>
 
@@ -747,6 +891,114 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     <p style="margin-top:6px;">Generated: ${new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })}</p>
   </div>
 </div>
+<script>
+function showTab(tab) {
+  // A panel can belong to more than one tab (e.g. "dashboard,payments") so
+  // Dashboard keeps showing everything, while Payments/Ledger/etc. still
+  // narrow down to just their own section — data-tab is a comma list here,
+  // not a single value.
+  document.querySelectorAll('.tab-panel').forEach(function (el) {
+    var tabs = (el.getAttribute('data-tab') || '').split(',');
+    el.style.display = (tabs.indexOf(tab) !== -1) ? '' : 'none';
+  });
+  document.querySelectorAll('.nav-tab').forEach(function (el) {
+    if (el.getAttribute('data-tab') === tab) {
+      el.classList.add('active');
+    } else {
+      el.classList.remove('active');
+    }
+  });
+}
+showTab('dashboard');
+
+async function checkInlineComplaintStatus(btn, cnicVal, phoneVal) {
+  // The Help/Complaint block is rendered twice in this document (once for
+  // the mobile layout, once for the desktop layout — only one is visible at
+  // a time via CSS). Looking the box up by id would always hit whichever
+  // copy comes first in the DOM, even if the user clicked the other one's
+  // button — so find it relative to the button that was actually clicked.
+  var box = btn.nextElementSibling;
+  var loading = box ? box.querySelector('.inline-complaint-status-loading') : null;
+  var resultEl = box ? box.querySelector('.inline-complaint-status-result') : null;
+
+  if (!box || !resultEl) return;
+
+  if (box.style.display === 'block' && resultEl.dataset.fetched === 'true') {
+    box.style.display = 'none';
+    resultEl.dataset.fetched = 'false';
+    return;
+  }
+
+  box.style.display = 'block';
+  loading.style.display = 'block';
+  resultEl.innerHTML = '';
+
+  // A complaint only needs mobile_number filled in (customer_cnic is
+  // optional), so searching by CNIC alone can miss real complaints filed
+  // under the same phone but a different/no CNIC. Search both identifiers
+  // and merge the results (deduped by complaint_id) rather than falling
+  // back to phone only when the CNIC looks unusable.
+  var cnicQuery = decodeURIComponent(cnicVal || '');
+  if (!cnicQuery || cnicQuery === 'N/A' || cnicQuery.indexOf('*') !== -1) cnicQuery = '';
+  var phoneQuery = decodeURIComponent(phoneVal || '');
+  if (!phoneQuery || phoneQuery === 'N/A') phoneQuery = '';
+
+  var queries = [];
+  if (cnicQuery) queries.push(cnicQuery);
+  if (phoneQuery && phoneQuery !== cnicQuery) queries.push(phoneQuery);
+
+  try {
+    var responses = await Promise.all(queries.map(function (q) {
+      return fetch('/api/complaints/public/search?query=' + encodeURIComponent(q)).then(function (r) { return r.json(); });
+    }));
+    loading.style.display = 'none';
+    resultEl.dataset.fetched = 'true';
+
+    var seen = {};
+    var complaints = [];
+    responses.forEach(function (data) {
+      if (data.success && data.data) {
+        data.data.forEach(function (cmp) {
+          if (!seen[cmp.complaint_id]) {
+            seen[cmp.complaint_id] = true;
+            complaints.push(cmp);
+          }
+        });
+      }
+    });
+
+    if (complaints.length > 0) {
+      var html = '<div style="font-size:0.75rem;font-weight:800;color:#0f172a;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">Found ' + complaints.length + ' Complaint(s):</div>';
+      complaints.forEach(function(cmp) {
+        var statusBg = '#fef3c7';
+        var statusColor = '#b45309';
+        var st = (cmp.status || '').toLowerCase();
+        if (st === 'assigned' || st === 'in progress') { statusBg = '#dbeafe'; statusColor = '#1d4ed8'; }
+        else if (st === 'resolved' || st === 'solved') { statusBg = '#dcfce7'; statusColor = '#15803d'; }
+        else if (st === 'rejected') { statusBg = '#ffe4e6'; statusColor = '#e11d48'; }
+
+        var dateStr = new Date(cmp.created_at).toLocaleDateString('en-PK', { day: '2-digit', month: 'short', year: 'numeric' });
+
+        html += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:10px;font-size:0.78rem;box-shadow:0 1px 2px rgba(0,0,0,0.03);">' +
+                  '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;">' +
+                    '<span style="font-weight:800;color:#0f172a;font-size:0.8rem;">' + cmp.complaint_id + '</span>' +
+                    '<span style="background:' + statusBg + ';color:' + statusColor + ';padding:3px 10px;border-radius:20px;font-size:0.65rem;font-weight:800;text-transform:uppercase;">' + cmp.status + '</span>' +
+                  '</div>' +
+                  '<div style="color:#64748b;font-size:0.7rem;margin-bottom:6px;font-weight:600;">📅 Date: ' + dateStr + '</div>' +
+                  '<div style="color:#334155;background:#f8fafc;padding:8px 10px;border-radius:8px;margin-bottom:6px;word-break:break-word;line-height:1.4;">' + (cmp.description || '') + '</div>' +
+                  (cmp.resolution_note ? '<div style="color:#15803d;background:#f0fdf4;border:1px solid #bbf7d0;padding:8px 10px;border-radius:8px;font-size:0.72rem;margin-top:6px;"><strong>Note:</strong> ' + cmp.resolution_note + '</div>' : '') +
+                '</div>';
+      });
+      resultEl.innerHTML = html;
+    } else {
+      resultEl.innerHTML = '<div style="font-size:0.78rem;color:#64748b;text-align:center;padding:8px 0;font-weight:600;">Is account ke khilaf koi complaint registered nahi hai.</div>';
+    }
+  } catch (err) {
+    loading.style.display = 'none';
+    resultEl.innerHTML = '<div style="font-size:0.75rem;color:#dc2626;text-align:center;padding:6px 0;">Complaint status fetch nahi ho saka. Please try again.</div>';
+  }
+}
+</script>
 </body>
 </html>`;
 }
@@ -780,7 +1032,11 @@ const viewLedger = async (req, res) => {
     const stockItem = ledger.delivery?.product_imei
       ? await prisma.outletInventory.findFirst({ where: { imei_serial: ledger.delivery.product_imei } })
       : null;
-    const html = buildLedgerHtml(ledger, { showPrintBtn: true }, stockItem);
+    const productImageUrl = await fetchProductImageUrl(
+      stockItem?.product_name || ledger.order.product_name,
+      stockItem?.api_product_name
+    );
+    const html = buildLedgerHtml(ledger, { showPrintBtn: true }, stockItem, productImageUrl);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.send(html);
   } catch (error) {
@@ -803,7 +1059,11 @@ const downloadLedgerPdf = async (req, res) => {
     const stockItem = ledger.delivery?.product_imei
       ? await prisma.outletInventory.findFirst({ where: { imei_serial: ledger.delivery.product_imei } })
       : null;
-    const html = buildLedgerHtml(ledger, { showPrintBtn: false }, stockItem);
+    const productImageUrl = await fetchProductImageUrl(
+      stockItem?.product_name || ledger.order.product_name,
+      stockItem?.api_product_name
+    );
+    const html = buildLedgerHtml(ledger, { showPrintBtn: false }, stockItem, productImageUrl);
 
     const browser = await puppeteer.launch({
       headless: true,

@@ -24,8 +24,13 @@ const isJazzEnabled = () => process.env.JAZZ_OTP_ENABLED === 'true';
  * { success, wati, jazz } so a caller that needs to know whether the OTP
  * actually went out (e.g. an HTTP endpoint reporting failure to the app) can
  * check it; fire-and-forget callers can simply ignore the return value.
+ *
+ * `context`, when provided (order/officer details — see appVerificationOtp.js
+ * for the shape), switches the Jazz SMS from the generic short OTP text to
+ * the client's full "Purchaser Verification OTP" template. WATI is
+ * unaffected either way — this only changes the SMS channel.
  */
-const sendOtp = async (phone, otp) => {
+const sendOtp = async (phone, otp, context = null) => {
   const result = { success: false, wati: null, jazz: null };
 
   if (isWatiEnabled()) {
@@ -36,7 +41,10 @@ const sendOtp = async (phone, otp) => {
   }
 
   if (isJazzEnabled()) {
-    result.jazz = await jazzSmsService.sendOTPSms(phone, otp).catch((err) => {
+    result.jazz = await (context
+      ? jazzSmsService.sendPurchaserVerificationOtpSms(phone, { ...context, otp })
+      : jazzSmsService.sendOTPSms(phone, otp)
+    ).catch((err) => {
       console.error('[OTP] Jazz send failed:', err?.message || err);
       return { success: false, error: err?.message || String(err) };
     });
@@ -53,11 +61,13 @@ const sendOtp = async (phone, otp) => {
 
 /**
  * Same as sendOtp, but for the named "guarantor" OTP flow — uses the WATI
- * grantor-specific template (with the guarantor's name) and, on Jazz, a
- * condensed guarantor-worded SMS. Gated by the same WATI_OTP_ENABLED /
+ * grantor-specific template (with the guarantor's name) unchanged, and on
+ * Jazz either the condensed guarantor-worded SMS (no context) or the full
+ * "Guarantor OTP Confirmation" template (context provided — see
+ * appVerificationOtp.js for the shape). Gated by the same WATI_OTP_ENABLED /
  * JAZZ_OTP_ENABLED flags as the generic OTP so both flows switch together.
  */
-const sendGuarantorOtp = async (phone, name, otp) => {
+const sendGuarantorOtp = async (phone, name, otp, context = null) => {
   const result = { success: false, wati: null, jazz: null };
 
   if (isWatiEnabled()) {
@@ -68,7 +78,10 @@ const sendGuarantorOtp = async (phone, name, otp) => {
   }
 
   if (isJazzEnabled()) {
-    result.jazz = await jazzSmsService.sendGuarantorOTPSms(phone, name, otp).catch((err) => {
+    result.jazz = await (context
+      ? jazzSmsService.sendGuarantorOtpFullSms(phone, { ...context, otp })
+      : jazzSmsService.sendGuarantorOTPSms(phone, name, otp)
+    ).catch((err) => {
       console.error('[OTP] Jazz guarantor send failed:', err?.message || err);
       return { success: false, error: err?.message || String(err) };
     });
