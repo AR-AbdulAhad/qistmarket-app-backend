@@ -457,7 +457,10 @@ const searchPurchasers = async (req, res) => {
 // here for it, so every tap 404'd. Submits to the existing POST /api/complaints/public.
 
 const complaintFormPage = (req, res) => {
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:2000';
+  // If FRONTEND_URL is missing on the deployed server, this MUST NOT fall back to
+  // localhost — that silently sends every real customer's "COMPLAINT REGISTER
+  // KAREIN" WhatsApp button tap to a dead localhost redirect in their own browser.
+  const frontendUrl = process.env.FRONTEND_URL || 'https://qms.qistmarket.pk';
   const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
   return res.redirect(302, `${frontendUrl}/complaint${queryString}`);
 };

@@ -2609,11 +2609,27 @@ const assignDelivery = async (req, res) => {
   try {
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
-      include: { verification: true }
+      include: { verification: true, delivery: true }
     });
 
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
 
     if (action === 'unassign') {
+      // A Delivery row only ever gets created once an officer/outlet has actually
+      // submitted (or started, for the PayTrigger-gated case) the handover. Blindly
+      // resetting status to 'approved' here would silently orphan that Delivery
+      // record — the order reappears in the Approved Order List looking untouched,
+      // while Self Pickup/Delivery still see the existing record and refuse to
+      // proceed ("already picked up"), even though nothing shows it was ever picked.
+      if (order.delivery) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot unassign: this order already has a delivery record (in progress or completed). Use Return/Exchange instead.',
+        });
+      }
+
       const updatedOrder = await prisma.order.update({
         where: { id: Number(id) },
         data: {
@@ -2711,21 +2727,41 @@ const assignBulkDelivery = async (req, res) => {
 
   try {
     if (action === 'unassign') {
-      await prisma.order.updateMany({
-        where: { id: { in: order_ids.map(Number) } },
-        data: {
-          delivery_officer_id: null,
-          delivery_assigned_at: null,
-          status: 'approved',
-          updated_at: new Date(),
-        }
+      const ids = order_ids.map(Number);
+
+      // Same guard as the single-order unassign: never revert an order that
+      // already has a Delivery record (in progress or completed) back to
+      // 'approved' — that orphans the Delivery row and corrupts the order list.
+      const ordersWithDelivery = await prisma.order.findMany({
+        where: { id: { in: ids }, delivery: { isNot: null } },
+        select: { id: true }
       });
-      for (const orderId of order_ids) {
-        await logOrderStatusChange(orderId, null, 'approved', req.user);
+      const blockedIds = new Set(ordersWithDelivery.map(o => o.id));
+      const unassignableIds = ids.filter(orderId => !blockedIds.has(orderId));
+
+      if (unassignableIds.length > 0) {
+        await prisma.order.updateMany({
+          where: { id: { in: unassignableIds } },
+          data: {
+            delivery_officer_id: null,
+            delivery_assigned_at: null,
+            status: 'approved',
+            updated_at: new Date(),
+          }
+        });
+        for (const orderId of unassignableIds) {
+          await logOrderStatusChange(orderId, null, 'approved', req.user);
+        }
       }
+
+      const message = blockedIds.size > 0
+        ? `${unassignableIds.length} orders unassigned from delivery. ${blockedIds.size} skipped (already have a delivery record).`
+        : `${unassignableIds.length} orders unassigned from delivery`;
+
       return res.status(200).json({
         success: true,
-        message: `${order_ids.length} orders unassigned from delivery`
+        message,
+        data: { unassigned: unassignableIds, skipped: [...blockedIds] }
       });
     }
 

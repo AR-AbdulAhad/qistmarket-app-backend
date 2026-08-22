@@ -84,6 +84,8 @@ const sendCode = async (req, res) => {
   }
 
   try {
+    console.log(`[OTP] ${name ? `Guarantor (${name})` : 'Purchaser'} — phone=${phone} order_id=${order_id || 'n/a'} code=${code}`);
+
     const context = order_id ? await buildOtpContext(parseInt(order_id), phone, Boolean(name)) : null;
 
     const result = name

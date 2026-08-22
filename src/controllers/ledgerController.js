@@ -390,7 +390,9 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
   const realCnic = purchaser?.cnic_number || (cnic !== 'N/A' ? cnic : '');
   const realPhone = purchaser?.telephone_number || order.whatsapp_number || (phone !== 'N/A' ? phone : '');
 
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:2000';
+  // Same production-safety concern as complaintController.complaintFormPage —
+  // never let a missing env var leak a localhost link into a customer-facing page.
+  const frontendUrl = process.env.FRONTEND_URL || 'https://qms.qistmarket.pk';
   const submitComplaintUrl = `${frontendUrl}/complaint?customer_name=${encodeURIComponent(customerName)}&customer_cnic=${encodeURIComponent(realCnic)}&mobile_number=${encodeURIComponent(realPhone)}`;
 
   const helpBoxHtml = `
