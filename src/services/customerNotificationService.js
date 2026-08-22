@@ -40,7 +40,13 @@ const getOutletName = async (outletId) => {
 };
 
 // No dedicated "Front Desk Officer" role exists yet — resolved from the
-// outlet's active Employee records by job title/designation.
+// outlet's active Employee records by job title/designation, when that HR
+// data exists. In practice `Employee.designation` is essentially never
+// populated (empty across the whole DB at the time of writing this), so this
+// always fell through to null — every "OUTLET FRONT DESK OFFICER" block in
+// the order-transfer/verification-officer WATI templates showed N/A/N/A
+// regardless of outlet. Falls back to an active outlet-assigned login user
+// (role: Branch User) — that data actually exists and is kept current.
 const getFrontDeskOfficer = async (outletId) => {
   if (!outletId) return null;
   try {
@@ -52,7 +58,17 @@ const getFrontDeskOfficer = async (outletId) => {
       },
       select: { full_name: true, phone: true },
     });
-    return employee || null;
+    if (employee) return employee;
+
+    const branchUser = await prisma.user.findFirst({
+      where: {
+        outlet_id: outletId,
+        status: 'active',
+        role: { name: 'Branch User' },
+      },
+      select: { full_name: true, phone: true },
+    });
+    return branchUser || null;
   } catch (err) {
     console.error('[CustomerNotify] getFrontDeskOfficer failed:', err.message);
     return null;

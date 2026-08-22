@@ -9,7 +9,11 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { logAction } = require('../utils/auditLogger');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
-const logoDataURI = '';
+// Was left as an empty string, so both <img src="${logoDataURI}"> spots below
+// rendered as a broken-image icon next to the "QistMarket" alt text on every
+// ledger page and PDF. Served as a static file (not inlined as base64) so the
+// browser can cache it instead of re-downloading ~200KB on every ledger view.
+const logoDataURI = 'https://api.qistmarket.pk/static/qist-market-logo.png';
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
 
@@ -106,6 +110,11 @@ async function fetchLedger(where) {
           product_imei: true,
           selected_plan: true,
           end_time: true,
+          uploads: {
+            where: { upload_type: 'face_photo' },
+            take: 1,
+            select: { file_url: true },
+          },
         },
       },
       consumer_numbers: {
@@ -156,7 +165,6 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
   const purchaser = order.verification?.purchaser;
   const grantors = order.verification?.grantors || [];
   const customerName = purchaser?.name || order.customer_name || 'Customer';
-  const fatherHusbandName = purchaser?.father_husband_name || '';
   const cnic = purchaser?.cnic_number || 'N/A';
   const cnicMasked = maskCnic(cnic);
   const phone = purchaser?.telephone_number || order.whatsapp_number || 'N/A';
@@ -309,12 +317,18 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
           <td>${r.statusHtml}</td>
         </tr>`).join('');
 
-  const grantorRelationLabel = fatherHusbandName ? ` C/O ${fatherHusbandName}` : '';
+  // "gdfgdfg C/O Guarantor1 C/O Guarantor2" — chained C/O per guarantor on the order.
+  const grantorRelationLabel = grantors.map(g => ` C/O ${g.name}`).join('');
 
   // ── Reusable content blocks (shared between mobile & desktop markup) ──
 
-  const productImageHtml = productImageUrl
-    ? `<div style="margin-bottom:14px;"><img src="${productImageUrl}" alt="${productName}" style="width:96px;height:96px;object-fit:contain;border-radius:14px;border:1px solid #e2e8f0;background:#fff;padding:6px;" /></div>`
+  const deliveryPhotoUrl = delivery?.uploads?.[0]?.file_url || null;
+
+  const productImageHtml = (productImageUrl || deliveryPhotoUrl)
+    ? `<div style="display:flex;gap:10px;margin-bottom:14px;">
+        ${productImageUrl ? `<div style="text-align:center;"><img src="${productImageUrl}" alt="${productName}" style="width:96px;height:96px;object-fit:contain;border-radius:14px;border:1px solid #e2e8f0;background:#fff;padding:6px;" /><div style="font-size:0.65rem;color:#94a3b8;margin-top:4px;">Product</div></div>` : ''}
+        ${deliveryPhotoUrl ? `<div style="text-align:center;"><img src="${deliveryPhotoUrl}" alt="Customer at delivery" style="width:96px;height:96px;object-fit:cover;border-radius:14px;border:1px solid #e2e8f0;background:#fff;" /><div style="font-size:0.65rem;color:#94a3b8;margin-top:4px;">Customer</div></div>` : ''}
+      </div>`
     : '';
 
   const productDetailsRows = `
@@ -408,13 +422,14 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
         <div class="inline-complaint-status-result"></div>
       </div>`;
 
+  // Only lists items that actually go somewhere on this page — "Terms &
+  // Conditions" and "Payment Receipts Guide" were removed because no such
+  // page/document exists anywhere in the app yet, so they were dead text.
   const docsListHtml = `
       <div class="section-title" style="color:#0f172a;">IMPORTANT DOCUMENTS</div>
       <ul class="doc-list">
-        <li>📄 Order Details</li>
-        <li>📄 Invoice / Agreement</li>
-        <li>📄 Terms & Conditions</li>
-        <li>📄 Payment Receipts Guide</li>
+        <li><a href="javascript:void(0)" onclick="showTab('dashboard')">📄 Order Details</a></li>
+        <li><a href="https://api.qistmarket.pk/api/ledger/pdf/${ledger.short_id}" target="_blank" rel="noopener">📄 Invoice / Agreement</a></li>
       </ul>`;
 
   // ── Documents tab: the actual uploaded verification documents for the
@@ -473,13 +488,12 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       </p>
       <a href="${submitComplaintUrl}" target="_blank" class="btn-primary no-print" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box;">Submit a Complaint</a>`;
 
+  // "Payment Guide", "Terms & Conditions" and "Privacy Policy" were removed —
+  // no such page exists anywhere in the app yet, so they were dead text.
   const quickLinksHtml = `
       <div class="section-title" style="color:#0f172a;">QUICK LINKS</div>
       <ul class="doc-list">
-        <li>📞 Contact Branch</li>
-        <li>📘 Payment Guide</li>
-        <li>📃 Terms & Conditions</li>
-        <li>🔒 Privacy Policy</li>
+        <li><a href="tel:${QIST_SUPPORT_PHONE.replace(/[^\d+]/g, '')}">📞 Contact Branch</a></li>
       </ul>`;
 
   const contactUsHtml = `
@@ -488,16 +502,11 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
         📞 ${QIST_SUPPORT_PHONE}<br/>
         📍 ${branchAddress}<br/>
         🕒 Mon - Sat (11:00 AM - 08:30 PM)
-      </p>`;
+      </p>
+      ${mapsUrl ? `<a class="btn-outline" style="margin-top:6px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a>` : ''}`;
 
-  const socialIconsHtml = `
-      <div class="section-title" style="color:#0f172a;">FOLLOW US</div>
-      <div class="social-icons no-print">
-        <a href="#" aria-label="Facebook">f</a>
-        <a href="#" aria-label="Instagram">◎</a>
-        <a href="#" aria-label="YouTube">▶</a>
-        <a href="#" aria-label="TikTok">♪</a>
-      </div>`;
+  // FOLLOW US removed — no real Qist Market social media URLs exist anywhere
+  // in the codebase; all four icons pointed to "#" (dead links).
 
   const topNavHtml = `
       <nav class="desktop-topnav no-print">
@@ -626,13 +635,9 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     .note-box ul { list-style: disc; margin-left: 16px; font-size: 0.75rem; color: #92400e; line-height: 1.7; }
 
     .doc-list { list-style: none; }
-    .doc-list li { padding: 7px 0; font-size: 0.8rem; font-weight: 600; color: #64748b; }
-
-    .social-icons { display: flex; gap: 10px; }
-    .social-icons a {
-      width: 34px; height: 34px; border-radius: 50%; background: #f1f5f9; color: #475569;
-      display: flex; align-items: center; justify-content: center; text-decoration: none; font-weight: 800;
-    }
+    .doc-list li { padding: 7px 0; font-size: 0.8rem; font-weight: 600; }
+    .doc-list li a { color: #64748b; text-decoration: none; }
+    .doc-list li a:hover { color: #dc2626; text-decoration: underline; }
 
     .summary-item { display: flex; flex-direction: column; gap: 4px; }
 
@@ -701,7 +706,7 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     @media (min-width: 1024px) { .summary-bar { grid-template-columns: repeat(6, 1fr); } }
 
     .footer-cols { display: grid; grid-template-columns: 1fr; gap: 24px; }
-    @media (min-width: 900px) { .footer-cols { grid-template-columns: repeat(4, 1fr); } }
+    @media (min-width: 900px) { .footer-cols { grid-template-columns: repeat(3, 1fr); } }
 
     /* Print */
     @media print {
@@ -882,7 +887,6 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       <div>${docsListHtml}</div>
       <div>${quickLinksHtml}</div>
       <div>${contactUsHtml}</div>
-      <div>${socialIconsHtml}</div>
     </div>
 
     <div class="action-bar no-print" style="display:flex;justify-content:flex-end;margin-top:16px;">${printBtnHtml}</div>
