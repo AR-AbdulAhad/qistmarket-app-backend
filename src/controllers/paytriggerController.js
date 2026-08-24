@@ -4,8 +4,43 @@ const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones } = require('../services/watiService');
 const { completePendingPaytriggerDelivery } = require('../services/deliveryCompletionService');
+const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
 const now = () => new Date();
+
+// Notifies admins + the order's outlet whenever a device's lock_status
+// actually flips to 'locked' or 'unlocked' — covers both PayTrigger's own
+// webhook-driven changes (handleCallback) and our overdue auto-lock cron
+// (checkOverdueDevices), so nobody has to go check the PayTrigger dashboard
+// to find out a customer's device just got locked/unlocked.
+// Skips the very first status a device ever reports (previousLockStatus ===
+// 'unknown') — that's initial enrollment settling into its starting state,
+// not a meaningful lock/unlock event.
+async function notifyLockStatusChange(device, previousLockStatus, io) {
+  const newLockStatus = device.lock_status;
+  if (previousLockStatus === 'unknown') return;
+  if (previousLockStatus === newLockStatus) return;
+  if (newLockStatus !== 'locked' && newLockStatus !== 'unlocked') return;
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: device.order_id },
+      select: { order_ref: true, customer_name: true, product_name: true, outlet_id: true },
+    });
+    if (!order) return;
+
+    const action = newLockStatus === 'locked' ? 'Locked' : 'Unlocked';
+    const title = `Device ${action}`;
+    const message = `Order #${order.order_ref} (${order.customer_name}) — ${order.product_name || device.product_model || 'device'} has been ${action.toLowerCase()} via PayTrigger.`;
+
+    await notifyAdmins(title, message, 'paytrigger_lock_status', device.order_id, io);
+    if (order.outlet_id) {
+      await notifyOutlet(order.outlet_id, title, message, 'paytrigger_lock_status', device.order_id, io);
+    }
+  } catch (e) {
+    console.error('[PayTrigger] notifyLockStatusChange failed:', e.message);
+  }
+}
 
 async function enrollDevice(req, res) {
   try {
@@ -324,6 +359,9 @@ async function handleCallback(req, res) {
 
     const updatedDevice = await prisma.payTriggerDevice.update({ where: { id: device.id }, data: updateData });
 
+    const io = req.app.get('io');
+    notifyLockStatusChange(updatedDevice, device.lock_status, io).catch(() => {});
+
     if (notifyType === 1000) {
       // Activation callback - device is now active
       console.log(`[PayTrigger] Device ${imei || deviceTag} activated`);
@@ -347,7 +385,6 @@ async function handleCallback(req, res) {
       || serverState === 3000;
 
     if (becameActive && updatedDevice.delivery_id) {
-      const io = req.app.get('io');
       completePendingPaytriggerDelivery(updatedDevice, io)
         .then((outcome) => {
           if (outcome?.completed) {
@@ -540,12 +577,13 @@ async function checkOverdueDevices(io = null) {
         });
 
         if (result?.code === 200) {
-          await prisma.payTriggerDevice.update({
+          const updatedDevice = await prisma.payTriggerDevice.update({
             where: { id: device.id },
             data: { lock_status: 'locked', last_sync_at: now() },
           });
           lockedCount++;
           console.log(`[PayTrigger] Auto-locked device ${device.imei} (overdue)`);
+          notifyLockStatusChange(updatedDevice, device.lock_status, io).catch(() => {});
         }
       } catch (e) {
         console.error(`[PayTrigger] Auto-lock failed for ${device.imei}:`, e.message);

@@ -1412,12 +1412,23 @@ const searchDeliveredOrders = async (req, res) => {
             is_delivered: true,
             OR: [
                 { order_ref: { contains: query } },
+                { token_number: { contains: query } },
                 { customer_name: { contains: query } },
                 { product_name: { contains: query } },
                 { imei_serial: { contains: query } },
+                { whatsapp_number: { contains: query } },
+                { alternate_contact: { contains: query } },
                 {
                     delivery: {
                         product_imei: { contains: query }
+                    }
+                },
+                {
+                    customer: {
+                        OR: [
+                            { cnic: { contains: query } },
+                            { mobile: { contains: query } }
+                        ]
                     }
                 }
             ]
@@ -1434,7 +1445,14 @@ const searchDeliveredOrders = async (req, res) => {
                     take: 1,
                     orderBy: { created_at: 'desc' }
                 },
-                paytrigger_devices: true
+                paytrigger_devices: true,
+                customer: { select: { is_blacklisted: true } },
+                verification: {
+                    include: {
+                        purchaser: { select: { is_blacklisted: true } },
+                        grantors: { select: { is_blacklisted: true } }
+                    }
+                }
             },
             orderBy: { created_at: 'desc' },
             take: 20
@@ -1478,7 +1496,12 @@ const searchDeliveredOrders = async (req, res) => {
                 delivered_variant: deliveredVariant,
                 delivered_imei: deliveredImei,
                 delivered_advance: deliveredAdvance,
-                is_enrolled: order.paytrigger_devices && order.paytrigger_devices.length > 0
+                is_enrolled: order.paytrigger_devices && order.paytrigger_devices.length > 0,
+                is_customer_blacklisted: !!(
+                    order.customer?.is_blacklisted ||
+                    order.verification?.purchaser?.is_blacklisted ||
+                    order.verification?.grantors?.some(g => g.is_blacklisted)
+                )
             };
         });
 

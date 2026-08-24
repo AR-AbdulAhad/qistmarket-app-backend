@@ -11,9 +11,11 @@ const { logAction } = require('../utils/auditLogger');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 // Was left as an empty string, so both <img src="${logoDataURI}"> spots below
 // rendered as a broken-image icon next to the "QistMarket" alt text on every
-// ledger page and PDF. Served as a static file (not inlined as base64) so the
-// browser can cache it instead of re-downloading ~200KB on every ledger view.
-const logoDataURI = 'https://api.qistmarket.pk/static/qist-market-logo.png';
+// ledger page and PDF. Points at the frontend's own already-deployed static
+// asset (qistmarket-app-dashboard/public/images/logo/qist-market-logo.png) —
+// same file the dashboard/complaint page use — so this backend never needs
+// to host or deploy a copy of it itself.
+const logoDataURI = 'https://qms.qistmarket.pk/images/logo/qist-market-logo.png';
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
 
@@ -159,7 +161,7 @@ async function fetchProductImageUrl(productName, apiProductName) {
 
 // ─── Shared: build HTML from ledger record (RESPONSIVE VERSION) ───────────────────────────────────
 
-function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null, productImageUrl = null) {
+function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   const order = ledger.order;
   const delivery = ledger.delivery;
   const purchaser = order.verification?.purchaser;
@@ -253,10 +255,6 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
   const consumerNumber = ledger.consumer_numbers?.[0]?.consumer_number || null;
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
   const qrImageSrc = smartPayQr?.qr_image_base64 || null;
-
-  const printBtnHtml = showPrintBtn
-    ? `<button class="print-btn no-print" onclick="window.print()">🖨️ PDF Save / Print Karen</button>`
-    : '';
 
   // ── Guarantor cards (real data from GrantorVerification, if any exist) ──
   const guarantorCardsHtml = grantors.length
@@ -656,12 +654,13 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
     tfoot td { padding: 12px 10px; }
     .view-all-btn { width: 100%; margin-top: 10px; background: #fff; border: 1.5px solid #fecaca; color: #dc2626; font-weight: 800; font-size: 0.75rem; padding: 11px; border-radius: 60px; cursor: pointer; }
 
-    .footer-note { padding: 18px; text-align: center; font-size: 0.7rem; color: #5b6e8c; margin-top: 20px; }
-    .footer-note strong { color: #dc2626; }
+    /* Applies everywhere .logo-img is used (desktop-topnav, mobile-topbar) —
+       without this, an <img> with no width/height renders at its native
+       pixel size, which for this logo file fills the whole viewport. */
+    .logo-img { height: 34px; width: auto; }
 
     /* ── Mobile view ── */
     .mobile-topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-    .mobile-topbar .logo-img { height: 34px; }
     .mobile-header-card { text-align: left; }
     .mobile-header-card .cust-name { font-size: 1.05rem; font-weight: 800; }
     .mobile-header-card .cust-sub { font-size: 0.72rem; color: #64748b; margin-top: 2px; }
@@ -889,12 +888,6 @@ function buildLedgerHtml(ledger, { showPrintBtn = false } = {}, stockItem = null
       <div>${contactUsHtml}</div>
     </div>
 
-    <div class="action-bar no-print" style="display:flex;justify-content:flex-end;margin-top:16px;">${printBtnHtml}</div>
-  </div>
-
-  <div class="footer-note">
-    <p>Yeh document <strong>Qist Market</strong> ki taraf se generate kiya gaya hai.</p>
-    <p style="margin-top:6px;">Generated: ${new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })}</p>
   </div>
 </div>
 <script>
@@ -1042,7 +1035,7 @@ const viewLedger = async (req, res) => {
       stockItem?.product_name || ledger.order.product_name,
       stockItem?.api_product_name
     );
-    const html = buildLedgerHtml(ledger, { showPrintBtn: true }, stockItem, productImageUrl);
+    const html = buildLedgerHtml(ledger, stockItem, productImageUrl);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.send(html);
   } catch (error) {
@@ -1069,7 +1062,7 @@ const downloadLedgerPdf = async (req, res) => {
       stockItem?.product_name || ledger.order.product_name,
       stockItem?.api_product_name
     );
-    const html = buildLedgerHtml(ledger, { showPrintBtn: false }, stockItem, productImageUrl);
+    const html = buildLedgerHtml(ledger, stockItem, productImageUrl);
 
     const browser = await puppeteer.launch({
       headless: true,

@@ -1685,6 +1685,29 @@ const getRecoveryDashboardStats = async (req, res) => {
       _sum: { amount_collected: true }
     });
 
+    // recoveryVisit only covers payments the officer logged in-app. Payments
+    // collected outside a visit (outlet counter, online SmartPay QR) never
+    // create a recoveryVisit row, so without this they'd silently vanish
+    // from "Collected Amount" even though they belong to this officer's
+    // accounts — same gap already accounted for in the per-customer ledger
+    // timeline (see the outsidePaymentRows comment further down this file).
+    const officerLedgers = await prisma.order.findMany({
+      where: { recovery_officer_id: userId },
+      select: { installment_ledger: { select: { ledger_rows: true } } }
+    });
+
+    let outsideCollectedAmount = 0;
+    for (const o of officerLedgers) {
+      const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
+      for (const row of rows) {
+        if (!['outlet', 'online'].includes(row.collection_source)) continue;
+        if (!row.paid_at) continue;
+        const paidAt = new Date(row.paid_at);
+        if (isNaN(paidAt.getTime()) || paidAt < start || paidAt > end) continue;
+        outsideCollectedAmount += parseFloat(row.paid_amount || 0);
+      }
+    }
+
     const topVisitDeadlineOrders = await prisma.order.findMany({
       where: {
         recovery_officer_id: userId,
@@ -2021,7 +2044,7 @@ const getRecoveryDashboardStats = async (req, res) => {
 
     const monthlyTarget = targetRecord?.target_amount || 0;
     const customerTarget = targetRecord?.target_customers || 0;
-    const achievedAmount = collectedAmountSum._sum.amount_collected || 0;
+    const achievedAmount = (collectedAmountSum._sum.amount_collected || 0) + outsideCollectedAmount;
     const achievedCustomers = statusCounts['completed'] || 0;
     const remainingAmount = Math.max(0, monthlyTarget - achievedAmount);
     const remainingCustomers = Math.max(0, customerTarget - achievedCustomers);

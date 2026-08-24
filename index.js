@@ -455,10 +455,6 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Static brand assets (logo, etc.) — separate from /uploads since those are
-// dynamic user-submitted files, not static app assets.
-app.use('/static', express.static(path.join(__dirname, 'public')));
-
 // Health check
 app.get('/', (req, res) => {
   res.json({
