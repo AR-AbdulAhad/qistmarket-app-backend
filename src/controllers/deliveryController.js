@@ -1687,10 +1687,16 @@ const submitSelfPickupDelivery = async (req, res) => {
     }
 
     if (order.delivery) {
-      // Also covers the PayTrigger-gated case: a placeholder Delivery row already
-      // exists (status = awaiting_paytrigger_enrollment), so re-submission is blocked
-      // the same way a completed delivery blocks re-submission.
-      return res.status(400).json({ success: false, message: 'Delivery already submitted for this order' });
+      if (order.delivery.status === 'awaiting_paytrigger_enrollment' || order.is_delivered || order.status === 'delivered' || order.status === 'completed') {
+        return res.status(400).json({ success: false, message: 'Delivery already submitted and completed for this order' });
+      }
+      // Stale or non-completed delivery record on an approved order — clean it up so self-pickup can proceed
+      try {
+        await prisma.deliveryUpload.deleteMany({ where: { delivery_id: order.delivery.id } });
+        await prisma.delivery.delete({ where: { id: order.delivery.id } });
+      } catch (delErr) {
+        console.error('Error cleaning up stale delivery record before self-pickup:', delErr);
+      }
     }
 
     // 2. Update purchaser phone number if provided
