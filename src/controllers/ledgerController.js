@@ -280,17 +280,16 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
     : `<p style="font-size:0.8rem;color:#94a3b8;">Koi guarantor record maujood nahi.</p>`;
 
   // ── Ledger rows, computed once and rendered into both a compact (mobile) and full (desktop) table ──
-  const rowsMeta = allRows.map((row, idx) => {
-    const isAdvance = row.month === 0;
+  const rowsMeta = installmentRows.map((row, idx) => {
     const priorInstallments = installmentRows.filter(r => r.month < row.month);
-    const isNext = !isAdvance && row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
+    const isNext = row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
     const displayStatus = isNext ? 'pending' : row.status;
     return {
-      rowNum: isAdvance ? 'ADV' : String(row.month).padStart(2, '0'),
-      isAdvance,
+      rowNum: String(idx + 1).padStart(2, '0'),
+      isAdvance: false,
       isNext,
-      rowClass: `${isAdvance ? 'advance-row' : ''} ${isNext ? 'current-month' : ''}`,
-      dueDateText: isAdvance ? deliveryDate : formatDate(row.due_date),
+      rowClass: isNext ? 'current-month' : '',
+      dueDateText: formatDate(row.due_date),
       dueAmountText: formatPKR(row.dueAmount),
       arrearsText: row.arrears ? formatPKR(row.arrears) : null,
       paidText: row.paidAmount > 0 ? formatPKR(row.paidAmount) : '—',
