@@ -1,6 +1,7 @@
 const prisma = require('../../lib/prisma');
 const { parseTpsAmount, formatTpsAmount, formatTpsAmountPaid } = require('../utils/tpsAmountUtils');
-const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendNextInstallmentReminder } = require('../services/watiService');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
@@ -307,15 +308,21 @@ const billPayment = async (req, res) => {
                }
             }
 
-            await prisma.consumerNumber.update({
-                where: { id: consumer.id },
+            await prisma.consumerNumber.updateMany({
+                where: {
+                    OR: [
+                        { id: consumer.id },
+                        { user_id: consumer.user_id, type: 'officer_cash' },
+                        { cash_submission_ref: consumer.cash_submission_ref }
+                    ]
+                },
                 data: {
                     bill_status: 'P',
                     amount_due: 0,
                     cash_submission_ref: null,
                     amount_paid: parsedAmountFinal,
                     date_paid: paidDateParsed,
-                    tran_auth_id: tran_auth_id,
+                    tran_auth_id: String(tran_auth_id),
                     updated_at: now()
                 }
             });
@@ -385,10 +392,12 @@ const billPayment = async (req, res) => {
 
             let remainingAmount = parsedAmountFinal;
             let paymentApplied = false;
+            let lastTouchedRowIndex = -1;
 
             for (let i = 0; i < rows.length; i++) {
                 if (rows[i].status !== 'paid' && remainingAmount > 0) {
                     paymentApplied = true;
+                    lastTouchedRowIndex = i;
                     const expected = parseFloat(rows[i].amount || rows[i].dueAmount || 0);
                     const alreadyPaid = parseFloat(rows[i].paid_amount || 0);
                     const remainingForThisRow = expected - alreadyPaid;
@@ -482,13 +491,34 @@ const billPayment = async (req, res) => {
                     }
 
                     if (phone) {
-                        sendInstallmentPaymentReceipt(phone, {
-                            customerName,
-                            amount: parsedAmountFinal,
-                            productName,
-                            orderRef: order.order_ref,
-                            date: paidDateParsed.toLocaleDateString('en-PK')
-                        }).catch(err => console.error('[TPS BillPayment] Wati Receipt Error:', err));
+                        const lastRow = lastTouchedRowIndex >= 0 ? rows[lastTouchedRowIndex] : null;
+                        if (lastRow && lastRow.status === 'paid') {
+                            sendQistReceivingForPayment(phone, {
+                                order,
+                                ledger,
+                                rows,
+                                rowIndex: lastTouchedRowIndex,
+                                customerName,
+                                productName,
+                                paidAmount: parsedAmountFinal,
+                                paymentMethod: `1LINK TPS - ${bank_mnemonic || 'UNKNOWN'}`,
+                                paymentDate: paidDateParsed.toLocaleDateString('en-PK'),
+                                transactionId: tran_auth_id,
+                            }).catch(err => console.error('[TPS BillPayment] Wati Qist Receiving Error:', err));
+                        } else if (lastRow) {
+                            sendPartialPaymentForRow(phone, {
+                                order,
+                                ledger,
+                                rows,
+                                rowIndex: lastTouchedRowIndex,
+                                customerName,
+                                productName,
+                                paidAmount: parsedAmountFinal,
+                                paymentMethod: `1LINK TPS - ${bank_mnemonic || 'UNKNOWN'}`,
+                                paymentDate: paidDateParsed.toLocaleDateString('en-PK'),
+                                transactionId: tran_auth_id,
+                            }).catch(err => console.error('[TPS BillPayment] Wati Partial Payment Error:', err));
+                        }
 
                         sendAccountAwarenessForOrder(order.id, phone, { itemName: productName });
                     }
@@ -508,8 +538,11 @@ const billPayment = async (req, res) => {
 
             // 8. Decide what happens to ConsumerNumber for the NEXT inquiry
             const newPendingIndex = rows.findIndex(r => r.status !== 'paid');
+            // sendQistReceivingForPayment already carries the next-installment info
+            // when the last touched row was fully settled — skip the separate reminder then.
+            const lastRowWasFullyPaid = lastTouchedRowIndex >= 0 && rows[lastTouchedRowIndex].status === 'paid';
 
-            if (newPendingIndex !== -1) {
+            if (newPendingIndex !== -1 && !lastRowWasFullyPaid) {
                 // There is ANOTHER installment waiting for the future
                 const nextRow = rows[newPendingIndex];
 

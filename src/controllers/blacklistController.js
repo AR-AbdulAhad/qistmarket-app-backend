@@ -1,6 +1,36 @@
 const prisma = require('../../lib/prisma');
-const { syncBlacklistStatus } = require('../utils/blacklistUtils');
+const { syncBlacklistStatus, notifyBlacklistedOrder } = require('../utils/blacklistUtils');
 const { logAction } = require('../utils/auditLogger');
+
+// Notifies every delivered order under this CNIC with a live ledger —
+// normally one, but a repeat customer can have more than one order on file.
+async function notifyManualBlacklist(cnic) {
+    try {
+        const purchaserRecords = await prisma.purchaserVerification.findMany({
+            where: { cnic_number: cnic },
+            include: {
+                verification: {
+                    include: {
+                        grantors: true,
+                        order: { include: { delivery: { include: { installment_ledger: true } } } },
+                    },
+                },
+            },
+        });
+
+        for (const pv of purchaserRecords) {
+            const order = pv.verification?.order;
+            if (!order || !order.is_delivered) continue;
+            const rows = order.delivery?.installment_ledger?.ledger_rows;
+            if (!Array.isArray(rows)) continue;
+
+            notifyBlacklistedOrder({ ...order, verification: { purchaser: pv, grantors: pv.verification.grantors } }, rows)
+                .catch((e) => console.error('[Blacklist] notify error:', e));
+        }
+    } catch (e) {
+        console.error('[Blacklist] notifyManualBlacklist error:', e);
+    }
+}
 
 /**
  * searchByCnicOrPhone
@@ -74,6 +104,7 @@ const setBlacklistStatus = async (req, res) => {
                 }),
             ]);
             await logAction(req, 'MANUAL_BLACKLIST', `CNIC ${cleanCnic} manually blacklisted. ${category ? `Category: ${category}. ` : ''}${reason ? 'Reason: ' + reason : ''}`, null, 'BlacklistAction');
+            notifyManualBlacklist(cleanCnic);
             return res.json({ success: true, message: 'Customer blacklisted.' });
         }
 

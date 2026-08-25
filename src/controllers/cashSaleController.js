@@ -125,7 +125,7 @@ const createCashSale = async (req, res) => {
 
     // Fire-and-forget: notifyCashSale fails soft (never throws) and must not
     // delay or block the sale response.
-    notifyCashSale(createdSales, outlet_id);
+    notifyCashSale(createdSales, outlet_id, { full_name: req.user.full_name, phone: req.user.phone });
 
     return res.status(201).json({
       success: true,

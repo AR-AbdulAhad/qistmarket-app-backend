@@ -1,4 +1,72 @@
 const prisma = require('../../lib/prisma');
+const { getNormalizedLedger } = require('./ledgerUtils');
+const { sendMarkBlacklist, sendGuarantorNotice } = require('../services/watiService');
+
+/**
+ * Sends the "mark_blacklist" WATI message to the customer, and "guarantor_notice"
+ * to every grantor on the account, once that account has just been blacklisted.
+ * Called from both the automatic 90-day sync and the manual staff action —
+ * centralised here since both need the same outstanding-balance /
+ * earliest-overdue-date lookup from the order's ledger, and both blacklist
+ * the purchaser AND every linked grantor together in one operation.
+ */
+async function notifyBlacklistedOrder(order, ledgerRows) {
+  const rows = Array.isArray(ledgerRows) ? ledgerRows : [];
+  const outstandingAmount = getNormalizedLedger(rows).summary.grandTotalRemaining;
+  const itemName = order.product_name;
+  const orderRef = order.order_ref;
+  const ledgerUrl = order.delivery?.installment_ledger?.short_id || null;
+  const customerName = order.verification?.purchaser?.name || order.customer_name;
+
+  try {
+    const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+    if (phone) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const overdueRows = rows
+        .filter((r) => {
+          if ((r.status || '').toLowerCase() === 'paid') return false;
+          const d = r.due_date || r.dueDate;
+          const dDate = d ? new Date(d) : null;
+          return dDate && !isNaN(dDate.getTime()) && dDate < today;
+        })
+        .sort((a, b) => new Date(a.due_date || a.dueDate) - new Date(b.due_date || b.dueDate));
+      const overdueDate = overdueRows[0]
+        ? new Date(overdueRows[0].due_date || overdueRows[0].dueDate).toLocaleDateString('en-PK')
+        : null;
+
+      const result = await sendMarkBlacklist(phone, {
+        customerName,
+        itemName,
+        orderRef,
+        outstandingAmount,
+        overdueDate,
+        ledgerUrl,
+      });
+      console.log('[WATI] Mark blacklist:', result?.success ? 'sent ✓' : result?.error);
+    }
+  } catch (e) {
+    console.error('[blacklistUtils] notifyBlacklistedOrder (customer) error:', e);
+  }
+
+  const grantors = Array.isArray(order.verification?.grantors) ? order.verification.grantors : [];
+  for (const grantor of grantors) {
+    if (!grantor.telephone_number) continue;
+    try {
+      const result = await sendGuarantorNotice(grantor.telephone_number, {
+        guarantorName: grantor.name,
+        customerName,
+        itemName,
+        orderRef,
+        outstandingAmount,
+        ledgerUrl,
+      });
+      console.log('[WATI] Guarantor notice:', result?.success ? 'sent ✓' : result?.error);
+    } catch (e) {
+      console.error('[blacklistUtils] notifyBlacklistedOrder (grantor) error:', e);
+    }
+  }
+}
 
 /**
  * Automatically syncs the blacklist status for all delivered orders.
@@ -41,6 +109,10 @@ async function syncBlacklistStatus() {
         );
 
         const blacklistedVerificationIds = [];
+        // Only accounts crossing from not-blacklisted to blacklisted THIS run
+        // get notified — re-running the sync must not re-notify someone who
+        // was already flagged on a previous pass.
+        const newlyBlacklistedOrders = [];
 
         for (const order of orders) {
             const purchaserCnic = order.verification?.purchaser?.cnic_number;
@@ -82,6 +154,9 @@ async function syncBlacklistStatus() {
 
             if (isBlacklisted && order.verification?.id) {
                 blacklistedVerificationIds.push(order.verification.id);
+                if (!order.verification?.purchaser?.is_blacklisted) {
+                    newlyBlacklistedOrders.push({ order, rows });
+                }
             }
         }
 
@@ -99,6 +174,10 @@ async function syncBlacklistStatus() {
             });
 
             console.log(`[BlacklistSync] Successfully blacklisted ${blacklistedVerificationIds.length} verifications.`);
+
+            for (const { order, rows } of newlyBlacklistedOrders) {
+                notifyBlacklistedOrder(order, rows).catch((e) => console.error('[BlacklistSync] notify error:', e));
+            }
         }
 
         return { success: true, count: blacklistedVerificationIds.length };
@@ -146,5 +225,6 @@ async function checkBlacklistStatus(cnic) {
 
 module.exports = {
     syncBlacklistStatus,
-    checkBlacklistStatus
+    checkBlacklistStatus,
+    notifyBlacklistedOrder
 };

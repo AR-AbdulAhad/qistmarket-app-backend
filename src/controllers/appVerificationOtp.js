@@ -2,7 +2,6 @@ require('dotenv').config();
 
 const prisma = require('../../lib/prisma');
 const { sendOtp, sendGuarantorOtp } = require('../services/otpDispatcher');
-const { getFrontDeskOfficer } = require('../services/customerNotificationService');
 
 const fmt = (n) => Math.round(Number(n) || 0);
 
@@ -39,12 +38,10 @@ const buildOtpContext = async (orderId, phone, isGuarantor) => {
 
     if (isGuarantor) {
       const grantor = order.verification?.grantors?.find((g) => g.telephone_number === phone);
-      const frontDesk = await getFrontDeskOfficer(order.outlet_id);
       return {
         ...base,
         guarantorName: grantor?.name || 'Guarantor',
-        frontDeskOfficerName: frontDesk?.full_name,
-        frontDeskOfficerNumber: frontDesk?.phone,
+        price: base.totalInstallmentPrice,
       };
     }
 

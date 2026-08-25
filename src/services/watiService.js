@@ -689,6 +689,484 @@ const sendAccountAwareness = async (phone, {
   return sendTemplate(phone, WATI_ACCOUNT_AWARENESS_TEMPLATE, WATI_ACCOUNT_AWARENESS_BROADCAST, parameters);
 };
 
+// ─── Template 18: Qist (Installment) Receiving Confirmation ────────────────
+// Named body variables (WATI live template `qist_receiving`) plus one named
+// *button* variable (Ledger_Link — fills the dynamic "Complete Ledger" button,
+// https://qms.qistmarket.pk/ledger/{{Ledger_Link}}). The "COMPLAINT REGISTER
+// KARE" button is a STATIC website link baked into the template — no param
+// for it. Sent once a ledger row is FULLY paid (partial payments use
+// sendPartialPayment/partial_payment below instead); it folds the old separate
+// "next installment reminder" message into this one, so callers should send
+// sendNextInstallmentReminder only when this template is NOT the one being sent.
+const WATI_QIST_RECEIVING_TEMPLATE = process.env.WATI_QIST_RECEIVING_TEMPLATE || 'qist_receiving';
+const WATI_QIST_RECEIVING_BROADCAST = process.env.WATI_QIST_RECEIVING_TEMPLATE || 'qist_receiving';
+
+const sendQistReceiving = async (phone, {
+  customerName,
+  productName,
+  paidAmount,
+  paymentMode,
+  paymentDate,
+  transactionId,
+  orderRef,
+  remainingBalance,
+  paymentChannel,
+  representativeName,
+  representativeNumber,
+  nextInstallmentAmount,
+  nextInstallmentDate,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Product_Name', value: productName || 'N/A' },
+    { name: 'Paid_Amount', value: String(paidAmount || 0) },
+    { name: 'Payment_Mode', value: paymentMode || 'N/A' },
+    { name: 'Payment_Date', value: paymentDate || new Date().toLocaleDateString('en-PK') },
+    { name: 'Transaction_ID', value: transactionId || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Remaining_Balance', value: String(remainingBalance ?? 0) },
+    { name: 'Payment_Channel', value: paymentChannel || 'N/A' },
+    { name: 'Representative_Name', value: representativeName || 'N/A' },
+    { name: 'Representative_Number', value: representativeNumber || 'N/A' },
+    { name: 'Next_Installment_Amount', value: nextInstallmentAmount != null ? String(nextInstallmentAmount) : 'N/A' },
+    { name: 'Next_Installment_Date', value: nextInstallmentDate || 'Loan Complete' },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_QIST_RECEIVING_TEMPLATE, WATI_QIST_RECEIVING_BROADCAST, parameters);
+};
+
+// ─── Template 19: Partial Payment Confirmation ──────────────────────────────
+// Named body variables (WATI live template `partial_payment`) plus one named
+// *button* variable (Ledger_Link — same dynamic "Complete Ledger" button as
+// qist_receiving). Sent when a ledger row is only PARTIALLY paid — replaces
+// sendPartialInstallmentPaymentReceipt above, same way sendQistReceiving
+// replaced sendInstallmentPaymentReceipt for the full-paid case.
+const WATI_PARTIAL_PAYMENT_V2_TEMPLATE = process.env.WATI_PARTIAL_PAYMENT_V2_TEMPLATE || 'partial_payment';
+const WATI_PARTIAL_PAYMENT_V2_BROADCAST = process.env.WATI_PARTIAL_PAYMENT_V2_TEMPLATE || 'partial_payment';
+
+const sendPartialPayment = async (phone, {
+  customerName,
+  productName,
+  paidAmount,
+  paymentMode,
+  paymentDate,
+  transactionId,
+  orderRef,
+  installmentAmount,
+  installmentRemaining,
+  remainingBalance,
+  paymentChannel,
+  representativeName,
+  representativeNumber,
+  dueDate,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Product_Name', value: productName || 'N/A' },
+    { name: 'Paid_Amount', value: String(paidAmount || 0) },
+    { name: 'Payment_Mode', value: paymentMode || 'N/A' },
+    { name: 'Payment_Date', value: paymentDate || new Date().toLocaleDateString('en-PK') },
+    { name: 'Transaction_ID', value: transactionId || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Installment_Amount', value: String(installmentAmount ?? 0) },
+    { name: 'Installment_Remaining', value: String(installmentRemaining ?? 0) },
+    { name: 'Remaining_Balance', value: String(remainingBalance ?? 0) },
+    { name: 'Payment_Channel', value: paymentChannel || 'N/A' },
+    { name: 'Representative_Name', value: representativeName || 'N/A' },
+    { name: 'Representative_Number', value: representativeNumber || 'N/A' },
+    { name: 'Due_Date', value: dueDate || 'N/A' },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_PARTIAL_PAYMENT_V2_TEMPLATE, WATI_PARTIAL_PAYMENT_V2_BROADCAST, parameters);
+};
+
+// ─── Template 21: Item Return Confirmation ──────────────────────────────────
+// Named body variables (WATI live template `item_return_confirmation`) plus
+// one named *button* variable (Ledger_Link — dynamic "Complete Ledger" button,
+// same pattern as qist_receiving/partial_payment). Sent once the OUTLET
+// confirms physical receipt of a RETURNED item back — not on Exchange (the
+// order stays open there) and not on initiation (the OTP at that stage goes
+// to the delivery officer, not the customer).
+const WATI_ITEM_RETURN_CONFIRMATION_TEMPLATE = process.env.WATI_ITEM_RETURN_CONFIRMATION_TEMPLATE || 'item_return_confirmation';
+const WATI_ITEM_RETURN_CONFIRMATION_BROADCAST = process.env.WATI_ITEM_RETURN_CONFIRMATION_TEMPLATE || 'item_return_confirmation';
+
+const sendItemReturnConfirmation = async (phone, {
+  customerName,
+  itemName,
+  orderRef,
+  returnDate,
+  representativeName,
+  representativeNumber,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Return_Date', value: returnDate || new Date().toLocaleDateString('en-PK') },
+    { name: 'Representative_Name', value: representativeName || 'N/A' },
+    { name: 'Representative_Number', value: representativeNumber || 'N/A' },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_ITEM_RETURN_CONFIRMATION_TEMPLATE, WATI_ITEM_RETURN_CONFIRMATION_BROADCAST, parameters);
+};
+
+// ─── Template 22: Installment Reminder (N days before due) ─────────────────
+// Named body variables (WATI live template `installment_reminder`) plus one
+// named *button* variable (Ledger_Link — dynamic "Live Ledger" button); the
+// "COMPLAINT REGISTER KARE" button is a STATIC website link baked into the
+// template, no param for it. Sent by a daily cron (installmentReminderService.js)
+// to every customer whose next unpaid installment falls due in exactly
+// REMINDER_DAYS_BEFORE days — distinct from sendNextInstallmentReminder above,
+// which fires immediately after a payment event instead of on a schedule.
+const WATI_INSTALLMENT_REMINDER_V2_TEMPLATE = process.env.WATI_INSTALLMENT_REMINDER_V2_TEMPLATE || 'installment_reminder';
+const WATI_INSTALLMENT_REMINDER_V2_BROADCAST = process.env.WATI_INSTALLMENT_REMINDER_V2_TEMPLATE || 'installment_reminder';
+
+const sendInstallmentReminder = async (phone, {
+  customerName,
+  itemName,
+  installmentAmount,
+  installmentDueDate,
+  orderRef,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Installment_Amount', value: String(installmentAmount || 0) },
+    { name: 'Installment_Due_Date', value: installmentDueDate || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_INSTALLMENT_REMINDER_V2_TEMPLATE, WATI_INSTALLMENT_REMINDER_V2_BROADCAST, parameters);
+};
+
+// ─── Template 23: Delivery Officer Handover ─────────────────────────────────
+// Named body variables (WATI live template `delivery_officer_handover`) — no
+// buttons. Sent the moment an order is ASSIGNED to a delivery officer (order
+// status -> 'picked', i.e. stock has been handed to that officer to go
+// deliver) — distinct from the doorstep OTP handover, which fires later at
+// the officer's actual handover to the customer (see jazzSmsService.js's
+// sendItemHandoverSms — that step is Jazz SMS only, no WATI template).
+const WATI_DELIVERY_OFFICER_HANDOVER_TEMPLATE = process.env.WATI_DELIVERY_OFFICER_HANDOVER_TEMPLATE || 'delivery_officer_handover';
+const WATI_DELIVERY_OFFICER_HANDOVER_BROADCAST = process.env.WATI_DELIVERY_OFFICER_HANDOVER_TEMPLATE || 'delivery_officer_handover';
+
+const sendDeliveryOfficerHandover = async (phone, {
+  customerName,
+  itemName,
+  orderRef,
+  deliveryOfficerName,
+  deliveryOfficerNumber,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Delivery_Officer_Name', value: deliveryOfficerName || 'N/A' },
+    { name: 'Delivery_Officer_Number', value: deliveryOfficerNumber || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_DELIVERY_OFFICER_HANDOVER_TEMPLATE, WATI_DELIVERY_OFFICER_HANDOVER_BROADCAST, parameters);
+};
+
+// ─── Template 24: Recovery Officer Assigned ─────────────────────────────────
+// Named body variables (WATI live template `assign_recovery_officer`) — no
+// buttons; Complaint_Link is plain body text here (unlike the button-style
+// complaint link on other templates), so it gets the same fixed COMPLAINT_URL
+// already used for that purpose elsewhere in this file (sendPtpConfirmation,
+// sendPartialInstallmentPaymentReceipt). Sent the moment a Recovery Officer
+// is assigned to an order to chase its due/overdue installment(s).
+const WATI_ASSIGN_RECOVERY_OFFICER_TEMPLATE = process.env.WATI_ASSIGN_RECOVERY_OFFICER_TEMPLATE || 'assign_recovery_officer';
+const WATI_ASSIGN_RECOVERY_OFFICER_BROADCAST = process.env.WATI_ASSIGN_RECOVERY_OFFICER_TEMPLATE || 'assign_recovery_officer';
+
+const sendAssignRecoveryOfficer = async (phone, {
+  customerName,
+  itemName,
+  orderRef,
+  dueAmount,
+  recoveryOfficerName,
+  recoveryOfficerNumber,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Due_Amount', value: String(dueAmount || 0) },
+    { name: 'Recovery_Officer_Name', value: recoveryOfficerName || 'N/A' },
+    { name: 'Recovery_Officer_Number', value: recoveryOfficerNumber || 'N/A' },
+    { name: 'Complaint_Link', value: COMPLAINT_URL },
+  ];
+  return sendTemplate(phone, WATI_ASSIGN_RECOVERY_OFFICER_TEMPLATE, WATI_ASSIGN_RECOVERY_OFFICER_BROADCAST, parameters);
+};
+
+// ─── Template 25: Last Installment (Account Cleared) ────────────────────────
+// Named body variables (WATI live template `last_installment`) plus one named
+// *button* variable (Ledger_Link — dynamic ledger button, same pattern as
+// qist_receiving/partial_payment); the complaint button is STATIC, no param
+// for it. Sent INSTEAD OF sendQistReceiving when the row just paid off was
+// the customer's last unpaid installment — see sendQistReceivingForPayment
+// in qistReceivingUtils.js, which branches to this once nextRow is empty.
+const WATI_LAST_INSTALLMENT_TEMPLATE = process.env.WATI_LAST_INSTALLMENT_TEMPLATE || 'last_installment';
+const WATI_LAST_INSTALLMENT_BROADCAST = process.env.WATI_LAST_INSTALLMENT_TEMPLATE || 'last_installment';
+
+const sendLastInstallment = async (phone, {
+  customerName,
+  itemName,
+  orderRef,
+  paidAmount,
+  transactionId,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Paid_Amount', value: String(paidAmount || 0) },
+    { name: 'Transaction_ID', value: transactionId || 'N/A' },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_LAST_INSTALLMENT_TEMPLATE, WATI_LAST_INSTALLMENT_BROADCAST, parameters);
+};
+
+// ─── Template 26: Cash Sale Receipt ─────────────────────────────────────────
+// Named body variables (WATI live template `cash_sale`) — no buttons. Sent
+// for an outright walk-in cash sale from the outlet's Cash Sale section
+// (cashSaleController.js / customerNotificationService.notifyCashSale) —
+// replaces the older positional sendCashSaleInvoice/`cash_sale_confirmation`
+// above, same way sendQistReceiving replaced sendInstallmentPaymentReceipt.
+const WATI_CASH_SALE_V2_TEMPLATE = process.env.WATI_CASH_SALE_V2_TEMPLATE || 'cash_sale';
+const WATI_CASH_SALE_V2_BROADCAST = process.env.WATI_CASH_SALE_V2_TEMPLATE || 'cash_sale';
+
+const sendCashSale = async (phone, {
+  customerName,
+  itemName,
+  serialNumber,
+  totalAmount,
+  saleDate,
+  invoiceNumber,
+  transactionId,
+  representativeName,
+  representativeNumber,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Serial_Number', value: serialNumber || 'N/A' },
+    { name: 'Total_Amount', value: String(totalAmount || 0) },
+    { name: 'Sale_Date', value: saleDate || new Date().toLocaleDateString('en-PK') },
+    { name: 'Invoice_Number', value: invoiceNumber || 'N/A' },
+    { name: 'Transaction_ID', value: transactionId || 'N/A' },
+    { name: 'Representative_Name', value: representativeName || 'N/A' },
+    { name: 'Representative_Number', value: representativeNumber || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_CASH_SALE_V2_TEMPLATE, WATI_CASH_SALE_V2_BROADCAST, parameters);
+};
+
+// ─── Template 27: Customer Ledger ───────────────────────────────────────────
+// Named body variables (WATI live template `customer_ledger`) plus one named
+// *button* variable (Ledger_Link — same dynamic pattern as every other
+// ledger-linking template above). A simpler, general-purpose "here's your
+// live ledger" message — replaces the older positional sendInstallmentLedger
+// (`installment_ledger`/`installment_status_ledger`, {{1}}..{{8}}) above,
+// same way sendQistReceiving replaced sendInstallmentPaymentReceipt.
+const WATI_CUSTOMER_LEDGER_TEMPLATE = process.env.WATI_CUSTOMER_LEDGER_TEMPLATE || 'customer_ledger';
+const WATI_CUSTOMER_LEDGER_BROADCAST = process.env.WATI_CUSTOMER_LEDGER_TEMPLATE || 'customer_ledger';
+
+const sendCustomerLedger = async (phone, {
+  customerName,
+  orderRef,
+  itemName,
+  remainingBalance,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Remaining_Balance', value: String(remainingBalance ?? 0) },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_CUSTOMER_LEDGER_TEMPLATE, WATI_CUSTOMER_LEDGER_BROADCAST, parameters);
+};
+
+// ─── Template 28: Account Marked Blacklist ──────────────────────────────────
+// Named body variables (WATI live template `mark_blacklist`) plus one named
+// *button* variable (Ledger_Link — same dynamic ledger button as every other
+// ledger-linking template above). Sent the moment an account is NEWLY marked
+// blacklisted for non-payment — see blacklistUtils.js's notifyBlacklistedOrder,
+// called from both the automatic 90-day sync and the manual staff action.
+const WATI_MARK_BLACKLIST_TEMPLATE = process.env.WATI_MARK_BLACKLIST_TEMPLATE || 'mark_blacklist';
+const WATI_MARK_BLACKLIST_BROADCAST = process.env.WATI_MARK_BLACKLIST_TEMPLATE || 'mark_blacklist';
+
+const sendMarkBlacklist = async (phone, {
+  customerName,
+  itemName,
+  orderRef,
+  outstandingAmount,
+  overdueDate,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Outstanding_Amount', value: String(outstandingAmount ?? 0) },
+    { name: 'Overdue_Date', value: overdueDate || 'N/A' },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_MARK_BLACKLIST_TEMPLATE, WATI_MARK_BLACKLIST_BROADCAST, parameters);
+};
+
+// ─── Template 29: Guarantor Blacklist Notice ────────────────────────────────
+// Named body variables (WATI live template `guarantor_notice`) plus one named
+// *button* variable (Ledger_Link — same dynamic ledger button as
+// mark_blacklist above). Sent to every GRANTOR on an account the moment that
+// account is newly marked blacklisted — see blacklistUtils.js's
+// notifyBlacklistedOrder, which sends this alongside sendMarkBlacklist (the
+// customer's own copy) for the same event.
+const WATI_GUARANTOR_NOTICE_TEMPLATE = process.env.WATI_GUARANTOR_NOTICE_TEMPLATE || 'guarantor_notice';
+const WATI_GUARANTOR_NOTICE_BROADCAST = process.env.WATI_GUARANTOR_NOTICE_TEMPLATE || 'guarantor_notice';
+
+const sendGuarantorNotice = async (phone, {
+  guarantorName,
+  customerName,
+  itemName,
+  orderRef,
+  outstandingAmount,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Guarantor_Name', value: guarantorName || 'Guarantor' },
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Outstanding_Amount', value: String(outstandingAmount ?? 0) },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_GUARANTOR_NOTICE_TEMPLATE, WATI_GUARANTOR_NOTICE_BROADCAST, parameters);
+};
+
+// ─── Template 30: Payment Overdue (Defaulter Notice) ────────────────────────
+// Named body variables (WATI live template `payment_overdue`) — no buttons.
+// Sent once, the day an account first crosses into overdue (an unpaid
+// installment's due date has passed) — see paymentOverdueService.js's daily
+// cron. Requires a recovery officer already assigned (the message names one),
+// so an overdue account with none yet assigned won't get this until it is.
+const WATI_PAYMENT_OVERDUE_TEMPLATE = process.env.WATI_PAYMENT_OVERDUE_TEMPLATE || 'payment_overdue';
+const WATI_PAYMENT_OVERDUE_BROADCAST = process.env.WATI_PAYMENT_OVERDUE_TEMPLATE || 'payment_overdue';
+
+const sendPaymentOverdue = async (phone, {
+  customerName,
+  itemName,
+  dueAmount,
+  orderRef,
+  recoveryOfficerName,
+  recoveryOfficerNumber,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Due_Amount', value: String(dueAmount ?? 0) },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Recovery_Officer_Name', value: recoveryOfficerName || 'N/A' },
+    { name: 'Recovery_Officer_Number', value: recoveryOfficerNumber || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_PAYMENT_OVERDUE_TEMPLATE, WATI_PAYMENT_OVERDUE_BROADCAST, parameters);
+};
+
+// ─── Template 31: Guarantor Overdue Notice ──────────────────────────────────
+// Named body variables (WATI live template `notice_guarantor_overdue`) plus
+// one named *button* variable (Ledger_Link — same dynamic ledger button as
+// payment_overdue's siblings). Sent to every GRANTOR on an account the same
+// moment sendPaymentOverdue fires for the customer — see
+// paymentOverdueService.js, same pairing as sendMarkBlacklist/sendGuarantorNotice.
+const WATI_GUARANTOR_OVERDUE_TEMPLATE = process.env.WATI_GUARANTOR_OVERDUE_TEMPLATE || 'notice_guarantor_overdue';
+const WATI_GUARANTOR_OVERDUE_BROADCAST = process.env.WATI_GUARANTOR_OVERDUE_TEMPLATE || 'notice_guarantor_overdue';
+
+const sendGuarantorOverdueNotice = async (phone, {
+  guarantorName,
+  customerName,
+  itemName,
+  dueAmount,
+  orderRef,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Guarantor_Name', value: guarantorName || 'Guarantor' },
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Due_Amount', value: String(dueAmount ?? 0) },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_GUARANTOR_OVERDUE_TEMPLATE, WATI_GUARANTOR_OVERDUE_BROADCAST, parameters);
+};
+
+// ─── Template 32: Overdue Installment (Item Locked) ─────────────────────────
+// Named body variables (WATI live template `overdue_installment`) plus one
+// named *button* variable (Ledger_Link — same dynamic ledger button as every
+// other ledger-linking template above). Sent the moment a PayTrigger device
+// actually flips to locked — see paytriggerController.js's
+// notifyLockStatusChange, called from the overdue auto-lock cron
+// (checkOverdueDevices), the manual lock action, and PayTrigger's own webhook.
+const WATI_OVERDUE_INSTALLMENT_TEMPLATE = process.env.WATI_OVERDUE_INSTALLMENT_TEMPLATE || 'overdue_installment';
+const WATI_OVERDUE_INSTALLMENT_BROADCAST = process.env.WATI_OVERDUE_INSTALLMENT_TEMPLATE || 'overdue_installment';
+
+const sendOverdueInstallment = async (phone, {
+  customerName,
+  itemName,
+  installmentAmount,
+  installmentDueDate,
+  orderRef,
+  remainingBalance,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Installment_Amount', value: String(installmentAmount ?? 0) },
+    { name: 'Installment_Due_Date', value: installmentDueDate || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Remaining_Balance', value: String(remainingBalance ?? 0) },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_OVERDUE_INSTALLMENT_TEMPLATE, WATI_OVERDUE_INSTALLMENT_BROADCAST, parameters);
+};
+
+// ─── Template 33: Guarantor Overdue + Locked Notice ─────────────────────────
+// Named body variables (WATI live template `guarantor_overdue`) plus one
+// named *button* variable (Ledger_Link — same dynamic ledger button as
+// overdue_installment's sibling). Sent to every GRANTOR on an account the
+// same moment sendOverdueInstallment fires for the customer — see
+// paytriggerController.js's notifyLockStatusChange, same pairing as
+// sendMarkBlacklist/sendGuarantorNotice and sendPaymentOverdue/sendGuarantorOverdueNotice.
+const WATI_GUARANTOR_OVERDUE_LOCK_TEMPLATE = process.env.WATI_GUARANTOR_OVERDUE_LOCK_TEMPLATE || 'guarantor_overdue';
+const WATI_GUARANTOR_OVERDUE_LOCK_BROADCAST = process.env.WATI_GUARANTOR_OVERDUE_LOCK_TEMPLATE || 'guarantor_overdue';
+
+const sendGuarantorOverdue = async (phone, {
+  guarantorName,
+  customerName,
+  itemName,
+  installmentAmount,
+  installmentDueDate,
+  orderRef,
+  remainingBalance,
+  ledgerUrl,
+}) => {
+  const parameters = [
+    { name: 'Guarantor_Name', value: guarantorName || 'Guarantor' },
+    { name: 'Customer_Name', value: customerName || 'Customer' },
+    { name: 'Item_Name_Model', value: itemName || 'N/A' },
+    { name: 'Installment_Amount', value: String(installmentAmount ?? 0) },
+    { name: 'Installment_Due_Date', value: installmentDueDate || 'N/A' },
+    { name: 'Order_Ref', value: orderRef || 'N/A' },
+    { name: 'Remaining_Balance', value: String(remainingBalance ?? 0) },
+    { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+  ];
+  return sendTemplate(phone, WATI_GUARANTOR_OVERDUE_LOCK_TEMPLATE, WATI_GUARANTOR_OVERDUE_LOCK_BROADCAST, parameters);
+};
+
 // ─── Broadcast helper — same template to multiple numbers ─────────────────
 // Dedupes normalized numbers so the same WhatsApp doesn't get double messages.
 const sendToMany = async (phones, sendFn) => {
@@ -749,6 +1227,21 @@ module.exports = {
   sendInstallmentLedger,
   sendInstallmentPaymentReceipt,
   sendPartialInstallmentPaymentReceipt,
+  sendQistReceiving,
+  sendPartialPayment,
+  sendItemReturnConfirmation,
+  sendInstallmentReminder,
+  sendDeliveryOfficerHandover,
+  sendAssignRecoveryOfficer,
+  sendLastInstallment,
+  sendCashSale,
+  sendCustomerLedger,
+  sendMarkBlacklist,
+  sendGuarantorNotice,
+  sendPaymentOverdue,
+  sendGuarantorOverdueNotice,
+  sendOverdueInstallment,
+  sendGuarantorOverdue,
   sendNextInstallmentReminder,
   sendComplaintReceived,
   sendComplaintAssigned,

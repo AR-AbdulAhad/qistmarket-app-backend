@@ -19,6 +19,7 @@ const {
   unpickOrder,
   submitCashToOutlet,
   cancelCashSubmission,
+  verifyOnlineCashSubmission,
   initiateReturnExchange,
   getDeliveryOfficerOTPLogs,
   replaceDeliveryUpload,
@@ -64,6 +65,7 @@ router.post('/delivery/unpick-order', authenticateJWT, unpickOrder);
 // Cash handling routes
 router.post('/delivery-boy/submit-cash', authenticateJWT, submitCashToOutlet);
 router.post('/delivery-boy/cash-submission/:submission_ref/cancel', authenticateJWT, cancelCashSubmission);
+router.post('/delivery-boy/cash-submission/:submission_ref/verify-online', authenticateJWT, verifyOnlineCashSubmission);
 
 // Return / Exchange initiate
 router.post('/delivery-boy/initiate-return', authenticateJWT, initiateReturnExchange);

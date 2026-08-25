@@ -3,7 +3,8 @@ const jwt = require('jsonwebtoken');
 const puppeteer = require('puppeteer');
 const axios = require('axios');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
-const { sendInstallmentLedger, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
@@ -1212,32 +1213,47 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
     await updateCashRegister(null, outlet_id, 'installments_received', payingNow, 'add');
 
     const customerName = order.verification?.purchaser?.name || order.customer_name;
+    const paymentTxnId = `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`;
     if (totalPaid >= dueAmount) {
-      sendInstallmentPaymentReceipt(phone, {
+      sendQistReceivingForPayment(phone, {
+        order,
+        ledger,
+        rows,
+        rowIndex,
         customerName,
-        amount: payingNow,
         productName: order.product_name,
-        orderRef: order.order_ref,
-        date: new Date().toLocaleDateString('en-PK')
-      }).catch(err => console.error('Wati Receipt Error:', err));
-    } else {
-      sendPartialInstallmentPaymentReceipt(phone, {
-        customerName,
         paidAmount: payingNow,
-        remainingAmount: Math.max(0, dueAmount - totalPaid),
+        paymentMethod: payment_method,
+        paymentDate: new Date().toLocaleDateString('en-PK'),
+        transactionId: paymentTxnId,
+        representativeName: req.user?.full_name,
+        representativeNumber: req.user?.phone,
+      }).catch(err => console.error('Wati Qist Receiving Error:', err));
+    } else {
+      sendPartialPaymentForRow(phone, {
+        order,
+        ledger,
+        rows,
+        rowIndex,
+        customerName,
         productName: order.product_name,
-        orderRef: order.order_ref,
-        dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
-      }).catch(err => console.error('Wati Partial Receipt Error:', err));
+        paidAmount: payingNow,
+        paymentMethod: payment_method,
+        paymentDate: new Date().toLocaleDateString('en-PK'),
+        transactionId: paymentTxnId,
+        representativeName: req.user?.full_name,
+        representativeNumber: req.user?.phone,
+      }).catch(err => console.error('Wati Partial Payment Error:', err));
     }
 
     sendAccountAwarenessForOrder(order.id, phone, { itemName: order.product_name });
 
-    // Send Next Month Reminder if exists
+    // Send Next Month Reminder if exists — skipped on the full-paid branch
+    // above since sendQistReceiving already carries the next-installment info.
     const nextRow = rows[rowIndex + 1];
     const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
-    
-    if (nextRow) {
+
+    if (nextRow && totalPaid < dueAmount) {
       sendNextInstallmentReminder(phone, {
         customerName,
         productName: order.product_name,
@@ -1247,31 +1263,19 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
       });
     }
 
-    // Send Installment Ledger
-    const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-    let firstRowAmount = 0;
-    let dueDateStr = 'N/A';
-    if (rows.length > 1) {
-      firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
-      const firstRowDate = new Date(rows[1].due_date || rows[1].dueDate);
-      if (!isNaN(firstRowDate.getTime())) {
-          dueDateStr = firstRowDate.toLocaleDateString('en-PK');
-      }
-    }
-    
+    // Send Customer Ledger
+    const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
+
     const altPhone = order.verification?.purchaser?.alternate_phone_number;
     const targetPhones = [phone];
     if (altPhone && altPhone.trim() !== '') targetPhones.push(altPhone.trim());
-    
+
     for (const targetPhone of targetPhones) {
-        sendInstallmentLedger(targetPhone, {
+        sendCustomerLedger(targetPhone, {
             customerName,
-            productName: order.product_name,
             orderRef: order.order_ref,
-            nextMonthLabel: 'Mahina 1',
-            monthlyAmount: firstRowAmount,
-            dueDate: dueDateStr,
-            totalRemaining: totalRemain,
+            itemName: order.product_name,
+            remainingBalance,
             ledgerUrl
         }).catch(e => console.error('[WATI] Ledger send error on payment:', e));
     }
@@ -1327,30 +1331,14 @@ const sendLedgerToCustomer = async (req, res) => {
     }
 
     const normalized = getNormalizedLedger(ledger.ledger_rows);
-    const { installment_ledger: installmentRows } = normalized;
-
-    // Use normalized rows for amount
-    let firstRowAmount = 0;
-    let dueDateStr = 'N/A';
-    if (installmentRows && installmentRows.length > 0) {
-        firstRowAmount = installmentRows[0].amount || installmentRows[0].dueAmount || 0;
-        dueDateStr = formatDatePK(installmentRows[0].due_date || installmentRows[0].dueDate);
-    }
-    
-    const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
-    const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-
     const ledgerUrl = `${shortId}`;
 
-    const sendPromises = phonesToSend.map(phone => 
-      sendInstallmentLedger(phone, {
+    const sendPromises = phonesToSend.map(phone =>
+      sendCustomerLedger(phone, {
         customerName: customerName,
-        productName: order.product_name || 'N/A',
         orderRef: order.order_ref,
-        nextMonthLabel: 'Mahina 1',
-        monthlyAmount: firstRowAmount,
-        dueDate: dueDateStr,
-        totalRemaining: totalRemain,
+        itemName: order.product_name || 'N/A',
+        remainingBalance: normalized.summary.grandTotalRemaining,
         ledgerUrl,
       })
     );

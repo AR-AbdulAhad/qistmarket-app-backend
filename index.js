@@ -716,6 +716,35 @@ server.listen(PORT, () => {
       }
     }, { timezone: 'Asia/Karachi' });
     console.log('[AutomationRules] Daily automation-rules digest registered (09:00 Asia/Karachi).');
+
+    // Customer-facing installment reminders: every unpaid installment due in
+    // exactly 3 days gets a "installment_reminder" WATI message. Runs daily —
+    // installmentReminderService stamps each ledger row it messages so a
+    // cron re-run (or a later run the same day) never double-sends.
+    const { runInstallmentReminders } = require('./src/services/installmentReminderService');
+    cron.schedule('0 10 * * *', async () => {
+      try {
+        await runInstallmentReminders();
+      } catch (err) {
+        console.error('[InstallmentReminder] Cron run failed:', err);
+      }
+    }, { timezone: 'Asia/Karachi' });
+    console.log('[InstallmentReminder] Daily installment-reminder job registered (10:00 Asia/Karachi).');
+
+    // Customer-facing overdue notice: an account with a recovery officer
+    // assigned gets a "payment_overdue" WATI message ONCE, the day it first
+    // has an unpaid installment past its due date. paymentOverdueService
+    // stamps every currently-overdue row it messages so this never repeats
+    // for the same account on later runs.
+    const { runPaymentOverdueNotices } = require('./src/services/paymentOverdueService');
+    cron.schedule('30 10 * * *', async () => {
+      try {
+        await runPaymentOverdueNotices();
+      } catch (err) {
+        console.error('[PaymentOverdue] Cron run failed:', err);
+      }
+    }, { timezone: 'Asia/Karachi' });
+    console.log('[PaymentOverdue] Daily payment-overdue job registered (10:30 Asia/Karachi).');
   } else {
     console.warn('[MidnightCron] node-cron not available; midnight safety-net disabled.');
   }

@@ -5,12 +5,14 @@ const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { computeMetricsForPeriod } = require('./cashRegisterController');
-const { sendInstallmentLedger, sendInstallmentPaymentReceipt, sendPartialInstallmentPaymentReceipt, sendNextInstallmentReminder } = require('../services/watiService');
+const { sendCustomerLedger, sendNextInstallmentReminder, sendItemReturnConfirmation } = require('../services/watiService');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const pt = require('../services/paytriggerService');
+const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 const { notifyUser } = require('../utils/notificationUtils');
 const { logLoginAction } = require('../utils/auditLogger');
 
@@ -900,7 +902,11 @@ const verifyReturnExchangeOtp = async (req, res) => {
             where: { id: parseInt(record_id) },
             include: {
                 order: {
-                    include: { delivery: true }
+                    include: {
+                        delivery: true,
+                        installment_ledger: true,
+                        verification: { include: { purchaser: true } }
+                    }
                 }
             }
         });
@@ -1010,6 +1016,21 @@ const verifyReturnExchangeOtp = async (req, res) => {
             });
 
             await logOrderStatusChange(record.order_id, record.order.status || 'delivered', 'Returned', req.user);
+
+            // Customer-facing "item received back" confirmation — Return only,
+            // not Exchange (order stays open there, no closure messaging fits).
+            const returnPhone = record.order.verification?.purchaser?.telephone_number || record.order.whatsapp_number;
+            if (returnPhone) {
+                sendItemReturnConfirmation(returnPhone, {
+                    customerName: record.order.verification?.purchaser?.name || record.order.customer_name,
+                    itemName: record.product_name || record.order.product_name,
+                    orderRef: record.order.order_ref,
+                    returnDate: nowDate.toLocaleDateString('en-PK'),
+                    representativeName: req.user?.full_name,
+                    representativeNumber: req.user?.phone,
+                    ledgerUrl: record.order.installment_ledger?.short_id || null,
+                }).catch(err => console.error('Wati Item Return Confirmation Error:', err));
+            }
         }
 
         // Step 7: Update inventory status
@@ -1187,6 +1208,9 @@ const initiateDirectReturn = async (req, res) => {
         await logOrderStatusChange(returnRecord.order_id, order.status || 'delivered', 'Returned', req.user);
 
         // Move existing delivery to ArchivedDelivery
+        // (also captures the ledger's short_id before it gets cascade-deleted
+        // below, so the return-confirmation WATI message can still link it)
+        let returnedLedgerShortId = null;
         if (order.delivery) {
             try {
                 const existingDelivery = await prisma.delivery.findUnique({
@@ -1195,6 +1219,7 @@ const initiateDirectReturn = async (req, res) => {
                 });
 
                 if (existingDelivery) {
+                    returnedLedgerShortId = existingDelivery.installment_ledger?.short_id || null;
                     await prisma.archivedDelivery.create({
                         data: {
                             order_id: existingDelivery.order_id,
@@ -1310,18 +1335,22 @@ const initiateDirectReturn = async (req, res) => {
         // Send Notification
         const savedPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
         const phoneToUse = customer_phone || savedPhone;
-        const { sendReturnConfirmation } = require('../services/watiService');
-        if (phoneToUse && sendReturnConfirmation) {
+        if (phoneToUse) {
+            // Ledger_Link is 'N/A' here (via returnedLedgerShortId) if the
+            // delivery/ledger archive step above ran and deleted the live
+            // ledger row — a dead link would be worse than showing nothing.
             try {
-                await sendReturnConfirmation(phoneToUse, {
+                await sendItemReturnConfirmation(phoneToUse, {
                     customerName: order.customer_name || 'Customer',
-                    productName: productName,
+                    itemName: productName,
                     orderRef: order.order_ref,
-                    refundAmount: returnRecord.is_cash_refund ? returnRecord.refund_amount : 0,
-                    returnDate: nowDate.toDateString()
+                    returnDate: nowDate.toLocaleDateString('en-PK'),
+                    representativeName: req.user?.full_name,
+                    representativeNumber: req.user?.phone,
+                    ledgerUrl: returnedLedgerShortId,
                 });
             } catch (err) {
-                console.error('Error sending return confirmation:', err);
+                console.error('Error sending item return confirmation:', err);
             }
         }
 
@@ -2003,31 +2032,45 @@ const verifyInstallmentPayment = async (req, res) => {
 
         for (const targetPhone of targetPhones) {
             if (totalPaid >= dueAmount) {
-                sendInstallmentPaymentReceipt(targetPhone, {
+                sendQistReceivingForPayment(targetPhone, {
+                    order,
+                    ledger,
+                    rows,
+                    rowIndex,
                     customerName,
-                    amount: payingNow,
                     productName: finalProductName,
-                    orderRef: order.order_ref,
-                    date: new Date().toLocaleDateString('en-PK')
-                }).catch(err => console.error('Wati Receipt Error for', targetPhone, ':', err));
-            } else {
-                sendPartialInstallmentPaymentReceipt(targetPhone, {
-                    customerName,
                     paidAmount: payingNow,
-                    remainingAmount: Math.max(0, dueAmount - totalPaid),
+                    paymentMethod: payment_method,
+                    paymentDate: new Date().toLocaleDateString('en-PK'),
+                    transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
+                    representativeName: req.user?.full_name,
+                    representativeNumber: req.user?.phone,
+                }).catch(err => console.error('Wati Qist Receiving Error for', targetPhone, ':', err));
+            } else {
+                sendPartialPaymentForRow(targetPhone, {
+                    order,
+                    ledger,
+                    rows,
+                    rowIndex,
+                    customerName,
                     productName: finalProductName,
-                    orderRef: order.order_ref,
-                    dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
-                }).catch(err => console.error('Wati Partial Receipt Error for', targetPhone, ':', err));
+                    paidAmount: payingNow,
+                    paymentMethod: payment_method,
+                    paymentDate: new Date().toLocaleDateString('en-PK'),
+                    transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
+                    representativeName: req.user?.full_name,
+                    representativeNumber: req.user?.phone,
+                }).catch(err => console.error('Wati Partial Payment Error for', targetPhone, ':', err));
             }
             sendAccountAwarenessForOrder(order.id, targetPhone, { itemName: finalProductName });
         }
 
-        // Send Next Month Reminder if exists (unchanged)
+        // Send Next Month Reminder if exists — skipped on the full-paid branch
+        // above since sendQistReceiving already carries the next-installment info.
         const nextRow = rows[rowIndex + 1];
         const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
-        
-        if (nextRow) {
+
+        if (nextRow && totalPaid < dueAmount) {
             sendNextInstallmentReminder(phone, {
                 customerName,
                 productName: finalProductName,
@@ -2037,36 +2080,24 @@ const verifyInstallmentPayment = async (req, res) => {
             }).catch(err => console.error('Wati Reminder Error:', err));
         }
 
-        // Send Installment Ledger to all target phones
-        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-        let firstRowAmount = 0;
-        let dueDateStr = 'N/A';
-        if (rows.length > 1) {
-            firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
-            dueDateStr = new Date(rows[1].due_date || rows[1].dueDate).toLocaleDateString('en-PK');
-        }
+        // Send Customer Ledger to all target phones
+        const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
         for (const targetPhone of targetPhones) {
-            sendInstallmentLedger(targetPhone, {
+            sendCustomerLedger(targetPhone, {
                 customerName,
-                productName: finalProductName,
                 orderRef: order.order_ref,
-                nextMonthLabel: 'Mahina 1', // We can improve this, but leaving it consistent for now
-                monthlyAmount: firstRowAmount,
-                dueDate: dueDateStr,
-                totalRemaining: totalRemain,
+                itemName: finalProductName,
+                remainingBalance,
                 ledgerUrl
             }).catch(e => console.error('[WATI] Ledger send error on payment:', e));
         }
 
-        // ── PayTrigger: Update repayment info if fully paid (non-blocking) ──
-        if (pt.ENABLED() && totalPaid >= dueAmount && imeiSerial) {
-            prisma.payTriggerDevice.findFirst({ where: { imei: imeiSerial } }).then(device => {
-                if (device) {
-                    pt.updateRepayInfo(imeiSerial, order.order_ref, 'fully_paid')
-                        .then(r => console.log('[PayTrigger] updateRepayInfo ok:', r?.code, r?.message))
-                        .catch(e => console.error('[PayTrigger] updateRepayInfo failed:', e.message));
-                }
-            }).catch(e => console.error('[PayTrigger] device lookup failed:', e.message));
+        // ── PayTrigger: push the lock forward / remove it once this month is paid (non-blocking) ──
+        // dueAmount here is only THIS row's amount, not the whole loan, so "fully
+        // paid" just means this installment is settled — see syncPayTriggerAfterPayment
+        // for how that maps to extending vs. removing the device lock.
+        if (totalPaid >= dueAmount) {
+            syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, month_number, phone });
         }
 
         return res.json({ success: true, message: 'Payment processed successfully' });

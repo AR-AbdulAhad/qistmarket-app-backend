@@ -13,7 +13,7 @@ const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
-const { sendDeliveryConfirmation, sendInstallmentLedger } = require('../services/watiService');
+const { sendDeliveryConfirmation, sendCustomerLedger } = require('../services/watiService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
@@ -296,17 +296,11 @@ function sendCompletionWatiMessages({ purchaser, order, productNameSnapshot, col
 
   const sendLedgerTo = (phone) => {
     if (!installmentLedger || !ledgerUrl) return;
-    const rows = Array.isArray(installmentLedger.ledger_rows) ? installmentLedger.ledger_rows : [];
-    const firstRow = rows[1];
-    const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-    sendInstallmentLedger(phone, {
+    sendCustomerLedger(phone, {
       customerName: confirmedCustomerName,
-      productName: productNameSnapshot,
       orderRef: order.order_ref,
-      nextMonthLabel: 'Mahina 1',
-      monthlyAmount: firstRow?.amount || 0,
-      dueDate: firstRow ? formatDatePK(firstRow.due_date) : 'N/A',
-      totalRemaining: totalRemain,
+      itemName: productNameSnapshot,
+      remainingBalance: remainingAmountVal,
       ledgerUrl,
     }).catch(e => console.error('[WATI] Ledger template error:', e));
   };

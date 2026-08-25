@@ -2,14 +2,13 @@ const prisma = require('../../lib/prisma');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const {
-  sendInstallmentPaymentReceipt,
-  sendPartialInstallmentPaymentReceipt,
   sendNextInstallmentReminder,
   sendPtpConfirmation,
   sendToMany,
   getCompanyNotifyPhones,
-  sendInstallmentLedger
+  sendCustomerLedger
 } = require('../services/watiService');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
@@ -17,6 +16,7 @@ const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 const { updateRecoveryRanking } = require('../services/recoveryRankingService');
 const { notifyAdmins, notifyOutlet, notifyUser } = require('../utils/notificationUtils');
+const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 
 const now = () => new Date();
 
@@ -672,23 +672,42 @@ const submitBranchPayment = async (req, res) => {
       || order.alternate_contact;
     const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
 
+    // PayTrigger: extend the device lock to the next due date, or remove it
+    // entirely if this was the last unpaid installment (non-blocking).
     if (totalPaid >= dueAmount) {
-      sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
+      syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, month_number, phone });
+    }
+
+    if (totalPaid >= dueAmount) {
+      sendToMany(notifyPhones, (p) => sendQistReceivingForPayment(p, {
+        order,
+        ledger,
+        rows,
+        rowIndex,
         customerName,
-        amount: payingNow,
         productName: finalProductName,
-        orderRef: order.order_ref,
-        date: new Date().toLocaleDateString('en-PK')
-      })).catch(err => console.error('Wati Receipt Error:', err));
-    } else {
-      sendToMany(notifyPhones, (p) => sendPartialInstallmentPaymentReceipt(p, {
-        customerName,
         paidAmount: payingNow,
-        remainingAmount: Math.max(0, dueAmount - totalPaid),
+        paymentMethod: payment_method,
+        paymentDate: new Date().toLocaleDateString('en-PK'),
+        transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
+        representativeName: req.user?.full_name,
+        representativeNumber: req.user?.phone,
+      })).catch(err => console.error('Wati Qist Receiving Error:', err));
+    } else {
+      sendToMany(notifyPhones, (p) => sendPartialPaymentForRow(p, {
+        order,
+        ledger,
+        rows,
+        rowIndex,
+        customerName,
         productName: finalProductName,
-        orderRef: order.order_ref,
-        dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
-      })).catch(err => console.error('Wati Partial Receipt Error:', err));
+        paidAmount: payingNow,
+        paymentMethod: payment_method,
+        paymentDate: new Date().toLocaleDateString('en-PK'),
+        transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
+        representativeName: req.user?.full_name,
+        representativeNumber: req.user?.phone,
+      })).catch(err => console.error('Wati Partial Payment Error:', err));
     }
 
     [...new Set([phone, altPhone].filter(Boolean))].forEach((p) =>
@@ -1241,32 +1260,53 @@ const submitInstallment = async (req, res) => {
       || order.alternate_contact;
     const notifyPhones = [phone, altPhone, req.user?.phone, ...getCompanyNotifyPhones()];
 
+    // PayTrigger: extend the device lock to the next due date, or remove it
+    // entirely if this was the last unpaid installment (non-blocking).
     if (totalPaid >= dueAmount) {
-      sendToMany(notifyPhones, (p) => sendInstallmentPaymentReceipt(p, {
+      syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, month_number, phone });
+    }
+
+    if (totalPaid >= dueAmount) {
+      sendToMany(notifyPhones, (p) => sendQistReceivingForPayment(p, {
+        order,
+        ledger,
+        rows,
+        rowIndex,
         customerName,
-        amount: payingNow,
         productName: finalProductName,
-        orderRef: order.order_ref,
-        date: new Date().toLocaleDateString('en-PK')
-      })).catch(err => console.error('Wati Receipt Error:', err));
-    } else {
-      sendToMany(notifyPhones, (p) => sendPartialInstallmentPaymentReceipt(p, {
-        customerName,
         paidAmount: payingNow,
-        remainingAmount: Math.max(0, dueAmount - totalPaid),
+        paymentMethod: payment_method,
+        paymentDate: new Date().toLocaleDateString('en-PK'),
+        transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
+        representativeName: req.user?.full_name,
+        representativeNumber: req.user?.phone,
+      })).catch(err => console.error('Wati Qist Receiving Error:', err));
+    } else {
+      sendToMany(notifyPhones, (p) => sendPartialPaymentForRow(p, {
+        order,
+        ledger,
+        rows,
+        rowIndex,
+        customerName,
         productName: finalProductName,
-        orderRef: order.order_ref,
-        dueDate: new Date(rows[rowIndex].due_date || rows[rowIndex].dueDate).toLocaleDateString('en-PK')
-      })).catch(err => console.error('Wati Partial Receipt Error:', err));
+        paidAmount: payingNow,
+        paymentMethod: payment_method,
+        paymentDate: new Date().toLocaleDateString('en-PK'),
+        transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
+        representativeName: req.user?.full_name,
+        representativeNumber: req.user?.phone,
+      })).catch(err => console.error('Wati Partial Payment Error:', err));
     }
 
     [...new Set([phone, altPhone].filter(Boolean))].forEach((p) =>
       sendAccountAwarenessForOrder(order.id, p, { itemName: finalProductName })
     );
 
+    // Send Next Month Reminder if exists — skipped on the full-paid branch
+    // above since sendQistReceiving already carries the next-installment info.
     const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
     const nextRow = rows[rowIndex + 1];
-    if (nextRow) {
+    if (nextRow && totalPaid < dueAmount) {
       sendToMany(notifyPhones, (p) => sendNextInstallmentReminder(p, {
         customerName,
         productName: finalProductName,
@@ -1289,26 +1329,14 @@ const submitInstallment = async (req, res) => {
       })).catch(err => console.error('Wati PTP Confirmation Error:', err));
     }
 
-    // Send Installment Ledger
-    const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-    let firstRowAmount = 0;
-    let dueDateStr = 'N/A';
-    if (rows.length > 1) {
-        firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
-        const firstRowDate = new Date(rows[1].due_date || rows[1].dueDate);
-        if (!isNaN(firstRowDate.getTime())) {
-            dueDateStr = firstRowDate.toLocaleDateString('en-PK');
-        }
-    }
+    // Send Customer Ledger
+    const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
 
-    sendToMany(notifyPhones, (p) => sendInstallmentLedger(p, {
+    sendToMany(notifyPhones, (p) => sendCustomerLedger(p, {
         customerName,
-        productName: finalProductName,
         orderRef: order.order_ref,
-        nextMonthLabel: 'Mahina 1',
-        monthlyAmount: firstRowAmount,
-        dueDate: dueDateStr,
-        totalRemaining: totalRemain,
+        itemName: finalProductName,
+        remainingBalance,
         ledgerUrl
     })).catch(e => console.error('[WATI] Ledger send error on payment:', e));
 

@@ -248,11 +248,14 @@ const notifyFinalDecision = async (order, { decision, reviews } = {}) => {
 // entry for a single-product sale, several for a multi-product cart, all
 // sharing the same customer/date. Sent over two independent channels since a
 // WhatsApp template must be pre-approved on WATI's dashboard before
-// sendCashSaleInvoice will actually deliver anything — the plain-text SMS via
+// sendCashSale will actually deliver anything — the plain-text SMS via
 // Jazz needs no such approval and is the channel guaranteed to work as soon
 // as JAZZ_CMT_* env vars are set, so the customer isn't left with zero
 // notification while the WhatsApp template is still pending approval.
-const notifyCashSale = async (sales, outletId) => {
+// `soldByUser` ({ full_name, phone }) is the outlet staff who rang up the
+// sale — passed straight through from req.user by the caller since CashSale
+// rows only carry sold_by_user_id, not the name/phone themselves.
+const notifyCashSale = async (sales, outletId, soldByUser = null) => {
   const first = sales?.[0];
   if (!first?.customer_phone) return;
   try {
@@ -274,13 +277,21 @@ const notifyCashSale = async (sales, outletId) => {
     await jazzSmsService.sendSMS(first.customer_phone, smsMessage);
 
     if (isEnabled()) {
-      await watiService.sendCashSaleInvoice(first.customer_phone, {
+      // No payment-gateway transaction exists for a walk-in cash sale — the
+      // sale's own row id is the real, queryable invoice reference (matches
+      // GET /api/outlet/cash-sale/:id), and Transaction_ID is a synthetic
+      // receipt reference built off it, same pattern used for cash
+      // installment payments elsewhere in the app.
+      await watiService.sendCashSale(first.customer_phone, {
         customerName: first.customer_name,
-        productName: sales.length > 1 ? `${first.product_name} +${sales.length - 1} more` : first.product_name,
-        imei: sales.length === 1 ? (first.imei_serial || 'N/A') : `${sales.length} items`,
-        finalPrice: fmt(total),
+        itemName: sales.length > 1 ? `${first.product_name} +${sales.length - 1} more` : first.product_name,
+        serialNumber: sales.length === 1 ? (first.imei_serial || 'N/A') : `${sales.length} items`,
+        totalAmount: fmt(total),
         saleDate: dateStr,
-        outletName: outletName || 'N/A',
+        invoiceNumber: `CS-${first.id}`,
+        transactionId: `CASH-${first.id}-${Date.now().toString(36).toUpperCase()}`,
+        representativeName: soldByUser?.full_name,
+        representativeNumber: soldByUser?.phone,
       });
     }
   } catch (err) {

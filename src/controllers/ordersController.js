@@ -4,8 +4,11 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { logAction } = require('../utils/auditLogger');
-const { sendOrderStatusNotification } = require('../services/watiService');
-const { sendOtp: sendOTP, sendGuarantorOtp } = require('../services/otpDispatcher');
+const watiService = require('../services/watiService');
+const { sendOrderStatusNotification, sendDeliveryOfficerHandover, sendAssignRecoveryOfficer } = watiService;
+const { getNormalizedLedger } = require('../utils/ledgerUtils');
+const { sendOtp: sendOTP, sendGuarantorOtp, isWatiEnabled, isJazzEnabled } = require('../services/otpDispatcher');
+const jazzSmsService = require('../services/jazzSmsService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const customerNotify = require('../services/customerNotificationService');
 const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth } = require('../services/rankingService');
@@ -2609,7 +2612,7 @@ const assignDelivery = async (req, res) => {
   try {
     const order = await prisma.order.findUnique({
       where: { id: Number(id) },
-      include: { verification: true, delivery: true }
+      include: { verification: { include: { purchaser: true } }, delivery: true }
     });
 
     if (!order) {
@@ -2675,7 +2678,7 @@ const assignDelivery = async (req, res) => {
         updated_at: new Date(),
       },
       include: {
-        delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
+        delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true, phone: true } }
       }
     });
 
@@ -2704,6 +2707,18 @@ const assignDelivery = async (req, res) => {
     }
     if (updatedOrder.delivery_officer) {
       await sendOrderAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, 'delivery', io);
+
+      // Customer-facing heads-up — stock has been handed to this officer.
+      const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+      if (customerPhone) {
+        sendDeliveryOfficerHandover(customerPhone, {
+          customerName: order.verification?.purchaser?.name || order.customer_name,
+          itemName: order.product_name,
+          orderRef: updatedOrder.order_ref,
+          deliveryOfficerName: updatedOrder.delivery_officer.full_name,
+          deliveryOfficerNumber: updatedOrder.delivery_officer.phone,
+        }).catch(err => console.error('Wati Delivery Officer Handover Error:', err));
+      }
     }
     io?.to(`officer_${user_id}`).emit('delivery_data_updated', { reason: 'order_assigned', orderId: updatedOrder.id });
 
@@ -2796,12 +2811,27 @@ const assignBulkDelivery = async (req, res) => {
     const io = req.app.get('io');
     const updatedOrders = await prisma.order.findMany({
       where: { id: { in: order_ids.map(Number) } },
-      include: { delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } } }
+      include: {
+        delivery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true, phone: true } },
+        verification: { include: { purchaser: true } },
+      }
     });
 
     for (const order of updatedOrders) {
       if (order.delivery_officer) {
         await sendOrderAssignmentNotification(order, order.delivery_officer, 'delivery', io);
+
+        // Customer-facing heads-up — stock has been handed to this officer.
+        const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+        if (customerPhone) {
+          sendDeliveryOfficerHandover(customerPhone, {
+            customerName: order.verification?.purchaser?.name || order.customer_name,
+            itemName: order.product_name,
+            orderRef: order.order_ref,
+            deliveryOfficerName: order.delivery_officer.full_name,
+            deliveryOfficerNumber: order.delivery_officer.phone,
+          }).catch(err => console.error('Wati Delivery Officer Handover Error:', err));
+        }
       }
     }
 
@@ -3242,7 +3272,9 @@ const assignRecovery = async (req, res) => {
         ? { recovery_officer_id: null, recovery_assigned_at: null }
         : { recovery_officer_id: parseInt(user_id), recovery_assigned_at: new Date() },
       include: {
-        recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } }
+        recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true, phone: true } },
+        verification: { include: { purchaser: true } },
+        installment_ledger: { select: { ledger_rows: true } },
       }
     });
 
@@ -3250,6 +3282,21 @@ const assignRecovery = async (req, res) => {
     const io = req.app.get('io');
     if (!isUnassign && updatedOrder.recovery_officer) {
       await sendOrderAssignmentNotification(updatedOrder, updatedOrder.recovery_officer, 'recovery', io);
+
+      // Customer-facing heads-up — a recovery officer now owns this account.
+      const customerPhone = updatedOrder.verification?.purchaser?.telephone_number || updatedOrder.whatsapp_number;
+      if (customerPhone) {
+        const rows = Array.isArray(updatedOrder.installment_ledger?.ledger_rows) ? updatedOrder.installment_ledger.ledger_rows : [];
+        const dueAmount = getNormalizedLedger(rows).summary.totalArrears;
+        sendAssignRecoveryOfficer(customerPhone, {
+          customerName: updatedOrder.verification?.purchaser?.name || updatedOrder.customer_name,
+          itemName: updatedOrder.product_name,
+          orderRef: updatedOrder.order_ref,
+          dueAmount,
+          recoveryOfficerName: updatedOrder.recovery_officer.full_name,
+          recoveryOfficerNumber: updatedOrder.recovery_officer.phone,
+        }).catch(err => console.error('Wati Assign Recovery Officer Error:', err));
+      }
     }
 
     return res.status(200).json({
@@ -3284,12 +3331,31 @@ const assignBulkRecovery = async (req, res) => {
       const io = req.app.get('io');
       const updatedOrders = await prisma.order.findMany({
         where: { id: { in: order_ids.map(Number) } },
-        include: { recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true } } }
+        include: {
+          recovery_officer: { select: { id: true, username: true, fcm_token: true, full_name: true, phone: true } },
+          verification: { include: { purchaser: true } },
+          installment_ledger: { select: { ledger_rows: true } },
+        }
       });
 
       for (const order of updatedOrders) {
         if (order.recovery_officer) {
           await sendOrderAssignmentNotification(order, order.recovery_officer, 'recovery', io);
+
+          // Customer-facing heads-up — a recovery officer now owns this account.
+          const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+          if (customerPhone) {
+            const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+            const dueAmount = getNormalizedLedger(rows).summary.totalArrears;
+            sendAssignRecoveryOfficer(customerPhone, {
+              customerName: order.verification?.purchaser?.name || order.customer_name,
+              itemName: order.product_name,
+              orderRef: order.order_ref,
+              dueAmount,
+              recoveryOfficerName: order.recovery_officer.full_name,
+              recoveryOfficerNumber: order.recovery_officer.phone,
+            }).catch(err => console.error('Wati Assign Recovery Officer Error:', err));
+          }
         }
       }
     }
@@ -3653,10 +3719,16 @@ const verifySelfPickupOTP = async (req, res) => {
 
 /**
  * POST /orders/convert/send-otp
- * Sends OTP to a specific phone number for conversion verification
+ * Sends OTP to a specific phone number for conversion verification.
+ * `old_order_id` (optional) is the customer's previous CLEARED order this
+ * repeat purchase is fast-tracked from — its order_ref is the only real
+ * reference that exists at this point, since the new order isn't created
+ * until createConvertedSale runs after OTP verification. `item_name`
+ * (optional) is the new item being purchased. Both are N/A in the message
+ * if the caller doesn't send them.
  */
 const sendIndividualConvertOTP = async (req, res) => {
-  const { phone, name, type } = req.body;
+  const { phone, name, type, item_name, old_order_id } = req.body;
 
   if (!phone) {
     return res.status(400).json({ success: false, message: 'Phone number is required' });
@@ -3668,7 +3740,29 @@ const sendIndividualConvertOTP = async (req, res) => {
     if (type === 'grantor' && name) {
         await sendGuarantorOtp(phone, name, otp);
     } else {
-        await sendOTP(phone, otp);
+        // Repeat-purchase (cleared-account) customer OTP — rich Jazz SMS with
+        // item/reference context; WATI keeps the plain bare-OTP template since
+        // no dedicated WATI template exists for this event yet.
+        let orderRef = null;
+        if (old_order_id) {
+          const oldOrder = await prisma.order.findUnique({
+            where: { id: parseInt(old_order_id) },
+            select: { order_ref: true }
+          });
+          orderRef = oldOrder?.order_ref || null;
+        }
+
+        if (isWatiEnabled()) {
+          await watiService.sendOTP(phone, otp).catch(err => console.error('[ConvertOTP] WATI send failed:', err));
+        }
+        if (isJazzEnabled()) {
+          await jazzSmsService.sendRepeatPurchaseOtpSms(phone, {
+            customerName: name,
+            itemNameModel: item_name,
+            orderRef,
+            otp,
+          }).catch(err => console.error('[ConvertOTP] Jazz send failed:', err));
+        }
     }
 
     return res.status(200).json({ success: true, message: `OTP sent to ${phone}` });

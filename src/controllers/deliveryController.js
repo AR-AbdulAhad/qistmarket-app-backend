@@ -3,8 +3,9 @@ const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
-const { sendDeliveryConfirmation, sendInstallmentLedger } = require('../services/watiService');
-const { sendOtp: sendOTP } = require('../services/otpDispatcher');
+const { sendDeliveryConfirmation } = require('../services/watiService');
+const { sendOtp: sendOTP, isJazzEnabled } = require('../services/otpDispatcher');
+const jazzSmsService = require('../services/jazzSmsService');
 const { updateDeliveryRanking } = require('../services/deliveryRankingService');
 const { notifyUser, notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
@@ -622,6 +623,24 @@ const submitCashToOutlet = async (req, res) => {
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
     const submissionRef = `SUB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
+    // For Online payments, validate the officer has an active gateway consumer
+    // number BEFORE creating any pending records below. Previously this check
+    // ran after the CashSubmissionHistory/OfficerTransaction rows were already
+    // created, so a missing number left a phantom "pending" submission behind
+    // that blocked all future submissions and could never be paid (no QR was
+    // ever generated, so no gateway webhook would ever arrive to clear it).
+    let onlineUserRecord = null;
+    if (payment_method === 'Online') {
+      onlineUserRecord = await prisma.user.findUnique({
+        where: { id: deliveryBoyId },
+        select: { bill_consumer_number: true, smart_pay_consumer_number: true }
+      });
+
+      if (!onlineUserRecord?.bill_consumer_number) {
+        return res.status(400).json({ success: false, message: 'Your account does not have an active 1Bill or SmartPay number. Please contact support.' });
+      }
+    }
+
     // 2. Distribute the `amountToSubmit` across `availableEntries` (FIFO logic)
     let remainingToSubmit = amountToSubmit;
     const historyCreations = [];
@@ -726,14 +745,7 @@ const submitCashToOutlet = async (req, res) => {
     const officerPhone = officer?.phone;
 
     if (payment_method === 'Online') {
-      const userRecord = await prisma.user.findUnique({
-        where: { id: deliveryBoyId },
-        select: { bill_consumer_number: true, smart_pay_consumer_number: true }
-      });
-
-      if (!userRecord?.bill_consumer_number) {
-        return res.status(400).json({ success: false, message: 'Your account does not have an active 1Bill or SmartPay number. Please contact support.' });
-      }
+      const userRecord = onlineUserRecord;
 
       const dueDate = new Date();
       dueDate.setHours(dueDate.getHours() + 24);
@@ -916,6 +928,84 @@ const cancelCashSubmission = async (req, res) => {
   }
 };
 
+const verifyOnlineCashSubmission = async (req, res) => {
+  const { submission_ref } = req.params;
+  const deliveryBoyId = req.user?.id;
+
+  try {
+    const submissions = await prisma.cashSubmissionHistory.findMany({
+      where: {
+        submission_ref,
+        status: 'pending',
+        cash_in_hand: { officer_id: deliveryBoyId }
+      }
+    });
+
+    if (submissions.length === 0) {
+      return res.status(404).json({ success: false, message: 'No pending submission found to verify' });
+    }
+
+    await prisma.cashSubmissionHistory.updateMany({
+      where: { submission_ref, status: 'pending' },
+      data: { status: 'paid' }
+    });
+
+    await prisma.officerTransaction.updateMany({
+      where: { submission_ref, type: 'debit', status: 'pending' },
+      data: {
+        status: 'paid',
+        transaction_date: now(),
+        payment_method: 'SmartPay / 1Bill Online Payment'
+      }
+    });
+
+    let totalSubmitted = 0;
+    for (const sub of submissions) {
+      totalSubmitted += sub.amount_submitted;
+      await prisma.cashInHand.update({
+        where: { id: sub.cash_in_hand_id },
+        data: { submitted_amount: { increment: sub.amount_submitted } }
+      });
+    }
+
+    await prisma.consumerNumber.updateMany({
+      where: {
+        OR: [
+          { cash_submission_ref: submission_ref },
+          { user_id: deliveryBoyId, type: 'officer_cash' }
+        ]
+      },
+      data: {
+        bill_status: 'P',
+        amount_due: 0,
+        cash_submission_ref: null,
+        amount_paid: totalSubmitted,
+        date_paid: now(),
+        tran_auth_id: 'VERIFIED-ONLINE',
+        bank_mnemonic: 'SMARTPAY',
+        updated_at: now()
+      }
+    });
+
+    const io = req.app.get('io');
+    if (io && deliveryBoyId) {
+      io.to(`user_${deliveryBoyId}`).emit('online_cash_submission_completed', {
+        status: 'paid',
+        amount: totalSubmitted,
+        submission_ref
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Online cash submission verified successfully'
+    });
+  } catch (error) {
+    console.error('verifyOnlineCashSubmission error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 const generateDeliveryOtp = async (req, res) => {
   const { order_id, phone } = req.body;
 
@@ -952,6 +1042,24 @@ const generateDeliveryOtp = async (req, res) => {
 
     const otp = await saveOTP(purchaserNumber, 'delivery');
     await sendOTP(purchaserNumber, otp);
+
+    // Rich item-handover message — item/installment details, terms, the
+    // delivering officer as "representative", and the SAME OTP above. Jazz
+    // SMS only (moved off WATI) — fire-and-forget alongside the generic OTP
+    // dispatch above, never instead of it.
+    if (isJazzEnabled()) {
+      jazzSmsService.sendItemHandoverSms(purchaserNumber, {
+        customerName: order.verification.purchaser.name || order.customer_name,
+        itemName: order.product_name,
+        advanceAmount: order.advance_amount,
+        installmentAmount: order.monthly_amount,
+        installmentDate: String(new Date().getDate()),
+        totalInstallments: order.months,
+        representativeName: req.user?.full_name,
+        representativeNumber: req.user?.phone,
+        otp,
+      }).catch(err => console.error('Jazz Item Handover Error:', err));
+    }
 
     const io = req.app.get('io');
     await notifyAdmins(
@@ -2131,6 +2239,7 @@ module.exports = {
   unpickOrder,
   submitCashToOutlet,
   cancelCashSubmission,
+  verifyOnlineCashSubmission,
   initiateReturnExchange,
   getDeliveryOfficerOTPLogs,
   submitSelfPickupDelivery,

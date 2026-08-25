@@ -1,7 +1,9 @@
 const prisma = require('../../lib/prisma');
 const qrcode = require('qrcode');
 const jwt = require('jsonwebtoken');
-const { sendInstallmentPaymentReceipt, sendNextInstallmentReminder, sendInstallmentLedger } = require('../services/watiService');
+const { sendNextInstallmentReminder, sendCustomerLedger } = require('../services/watiService');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
+const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
@@ -332,12 +334,38 @@ const notifyPayment = async (req, res) => {
     // Optional auth check since middleware usually handles it, but let's be safe
     const authHeader = req.headers.authorization;
     if (!authHeader) {
+        console.error('[SmartPay Webhook] Rejected: missing Authorization header. Body:', req.body);
+        await prisma.smartPayPaymentLog.create({
+            data: {
+                consumer_number: String(billnumber || ''),
+                transactionId: String(transactionId || ''),
+                amount: parseFloat(amount) || 0,
+                timestamp: String(timestamp || ''),
+                billnumber: String(billnumber || ''),
+                status: 'unauthorized_missing_header',
+                is_duplicate: false,
+                created_at: now()
+            }
+        }).catch(e => console.error('[SmartPay Webhook] Failed to log missing-auth attempt:', e));
         return res.status(401).json({ statusCode: "401", statusMessage: "Unauthorized" });
     }
 
     try {
         jwt.verify(authHeader.replace('Bearer ', ''), process.env.JWT_SECRET);
     } catch (err) {
+        console.error('[SmartPay Webhook] Rejected: JWT verify failed:', err.message, 'Body:', req.body);
+        await prisma.smartPayPaymentLog.create({
+            data: {
+                consumer_number: String(billnumber || ''),
+                transactionId: String(transactionId || ''),
+                amount: parseFloat(amount) || 0,
+                timestamp: String(timestamp || ''),
+                billnumber: String(billnumber || ''),
+                status: 'invalid_token',
+                is_duplicate: false,
+                created_at: now()
+            }
+        }).catch(e => console.error('[SmartPay Webhook] Failed to log invalid-token attempt:', e));
         return res.status(401).json({ statusCode: "401", statusMessage: "Invalid Token" });
     }
 
@@ -447,15 +475,21 @@ const notifyPayment = async (req, res) => {
                }
             }
 
-            await prisma.consumerNumber.update({
-                where: { id: consumer.id },
+            await prisma.consumerNumber.updateMany({
+                where: {
+                    OR: [
+                        { id: consumer.id },
+                        { user_id: consumer.user_id, type: 'officer_cash' },
+                        { cash_submission_ref: consumer.cash_submission_ref }
+                    ]
+                },
                 data: {
                     bill_status: 'P',
                     amount_due: 0,
                     cash_submission_ref: null,
                     amount_paid: parsedAmountFinal,
                     date_paid: paidDateParsed,
-                    tran_auth_id: transactionId,
+                    tran_auth_id: String(transactionId),
                     updated_at: now()
                 }
             });
@@ -528,10 +562,12 @@ const notifyPayment = async (req, res) => {
             let rows = [...ledger.ledger_rows];
             let remainingAmount = parsedAmountFinal;
             let paymentApplied = false;
+            let lastTouchedRowIndex = -1;
 
             for (let i = 0; i < rows.length; i++) {
                 if (rows[i].status !== 'paid' && remainingAmount > 0) {
                     paymentApplied = true;
+                    lastTouchedRowIndex = i;
                     const expected = parseFloat(rows[i].amount || rows[i].dueAmount || 0);
                     const alreadyPaid = parseFloat(rows[i].paid_amount || 0);
                     const remainingForThisRow = expected - alreadyPaid;
@@ -621,13 +657,34 @@ const notifyPayment = async (req, res) => {
                     }
 
                     if (phone) {
-                        sendInstallmentPaymentReceipt(phone, {
-                            customerName,
-                            amount: parsedAmountFinal,
-                            productName,
-                            orderRef: order.order_ref,
-                            date: paidDateParsed.toLocaleDateString('en-PK')
-                        }).catch(err => console.error('[SmartPay Webhook] Wati Receipt Error:', err));
+                        const lastRow = lastTouchedRowIndex >= 0 ? rows[lastTouchedRowIndex] : null;
+                        if (lastRow && lastRow.status === 'paid') {
+                            sendQistReceivingForPayment(phone, {
+                                order,
+                                ledger,
+                                rows,
+                                rowIndex: lastTouchedRowIndex,
+                                customerName,
+                                productName,
+                                paidAmount: parsedAmountFinal,
+                                paymentMethod: 'SmartPay QR',
+                                paymentDate: paidDateParsed.toLocaleDateString('en-PK'),
+                                transactionId,
+                            }).catch(err => console.error('[SmartPay Webhook] Wati Qist Receiving Error:', err));
+                        } else if (lastRow) {
+                            sendPartialPaymentForRow(phone, {
+                                order,
+                                ledger,
+                                rows,
+                                rowIndex: lastTouchedRowIndex,
+                                customerName,
+                                productName,
+                                paidAmount: parsedAmountFinal,
+                                paymentMethod: 'SmartPay QR',
+                                paymentDate: paidDateParsed.toLocaleDateString('en-PK'),
+                                transactionId,
+                            }).catch(err => console.error('[SmartPay Webhook] Wati Partial Payment Error:', err));
+                        }
 
                         sendAccountAwarenessForOrder(order.id, phone, { itemName: productName });
                     }
@@ -677,6 +734,9 @@ const notifyPayment = async (req, res) => {
             }
 
             const newPendingIndex = rows.findIndex(r => r.status !== 'paid');
+            // sendQistReceivingForPayment already carries the next-installment info
+            // when the last touched row was fully settled — skip the separate reminder then.
+            const lastRowWasFullyPaid = lastTouchedRowIndex >= 0 && rows[lastTouchedRowIndex].status === 'paid';
 
             if (newPendingIndex !== -1) {
                 const nextRow = rows[newPendingIndex];
@@ -686,35 +746,25 @@ const notifyPayment = async (req, res) => {
                     if (phone) {
                         let productName = order.product_name;
                         const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
-                        
-                        sendNextInstallmentReminder(phone, {
-                            customerName: order.verification?.purchaser?.name || order.customer_name,
-                            productName,
-                            monthlyAmount: nextRow.amount || nextRow.dueAmount,
-                            dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-                            ledgerUrl
-                        }).catch(err => console.error('[SmartPay Webhook] Wati Reminder Error:', err));
 
-                        // Send Installment Ledger
-                        const totalRemain = rows.reduce((s, r) => s + (r.amount || 0), 0);
-                        let firstRowAmount = 0;
-                        let dueDateStr = 'N/A';
-                        if (rows.length > 1) {
-                            firstRowAmount = rows[1].amount || rows[1].dueAmount || 0;
-                            const firstRowDate = new Date(rows[1].due_date || rows[1].dueDate);
-                            if (!isNaN(firstRowDate.getTime())) {
-                                dueDateStr = firstRowDate.toLocaleDateString('en-PK');
-                            }
+                        if (!lastRowWasFullyPaid) {
+                            sendNextInstallmentReminder(phone, {
+                                customerName: order.verification?.purchaser?.name || order.customer_name,
+                                productName,
+                                monthlyAmount: nextRow.amount || nextRow.dueAmount,
+                                dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
+                                ledgerUrl
+                            }).catch(err => console.error('[SmartPay Webhook] Wati Reminder Error:', err));
                         }
 
-                        sendInstallmentLedger(phone, {
+                        // Send Customer Ledger
+                        const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
+
+                        sendCustomerLedger(phone, {
                             customerName: order.verification?.purchaser?.name || order.customer_name,
-                            productName,
                             orderRef: order.order_ref,
-                            nextMonthLabel: 'Mahina 1',
-                            monthlyAmount: firstRowAmount,
-                            dueDate: dueDateStr,
-                            totalRemaining: totalRemain,
+                            itemName: productName,
+                            remainingBalance,
                             ledgerUrl
                         }).catch(e => console.error('[WATI] Ledger send error on online payment:', e));
                     }

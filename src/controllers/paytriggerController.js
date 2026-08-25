@@ -2,7 +2,7 @@ const prisma = require('../../lib/prisma');
 const pt = require('../services/paytriggerService');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
-const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones } = require('../services/watiService');
+const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones, sendOverdueInstallment, sendGuarantorOverdue } = require('../services/watiService');
 const { completePendingPaytriggerDelivery } = require('../services/deliveryCompletionService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
@@ -25,7 +25,10 @@ async function notifyLockStatusChange(device, previousLockStatus, io) {
   try {
     const order = await prisma.order.findUnique({
       where: { id: device.order_id },
-      select: { order_ref: true, customer_name: true, product_name: true, outlet_id: true },
+      include: {
+        verification: { include: { purchaser: true, grantors: true } },
+        installment_ledger: true,
+      },
     });
     if (!order) return;
 
@@ -36,6 +39,60 @@ async function notifyLockStatusChange(device, previousLockStatus, io) {
     await notifyAdmins(title, message, 'paytrigger_lock_status', device.order_id, io);
     if (order.outlet_id) {
       await notifyOutlet(order.outlet_id, title, message, 'paytrigger_lock_status', device.order_id, io);
+    }
+
+    // Customer + guarantor notices — only on the LOCK transition, not unlock
+    // (no template was given for that side, and it isn't the alarming event).
+    if (action === 'Locked') {
+      const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+      if (rows.length > 0) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const overdueRow = rows
+          .filter((r) => r.month && (r.status || '').toLowerCase() !== 'paid')
+          .find((r) => {
+            const d = r.due_date || r.dueDate;
+            const dDate = d ? new Date(d) : null;
+            return dDate && !isNaN(dDate.getTime()) && dDate < today;
+          });
+
+        const customerName = order.verification?.purchaser?.name || order.customer_name;
+        const itemName = order.product_name || device.product_model;
+        const installmentAmount = overdueRow ? (overdueRow.amount || overdueRow.dueAmount) : null;
+        const installmentDueDate = overdueRow
+          ? new Date(overdueRow.due_date || overdueRow.dueDate).toLocaleDateString('en-PK')
+          : null;
+        const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
+        const ledgerUrl = order.installment_ledger?.short_id;
+
+        const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+        if (phone) {
+          sendOverdueInstallment(phone, {
+            customerName,
+            itemName,
+            installmentAmount,
+            installmentDueDate,
+            orderRef: order.order_ref,
+            remainingBalance,
+            ledgerUrl,
+          }).catch((err) => console.error('[PayTrigger] Wati overdue installment error:', err));
+        }
+
+        const grantors = Array.isArray(order.verification?.grantors) ? order.verification.grantors : [];
+        for (const grantor of grantors) {
+          if (!grantor.telephone_number) continue;
+          sendGuarantorOverdue(grantor.telephone_number, {
+            guarantorName: grantor.name,
+            customerName,
+            itemName,
+            installmentAmount,
+            installmentDueDate,
+            orderRef: order.order_ref,
+            remainingBalance,
+            ledgerUrl,
+          }).catch((err) => console.error('[PayTrigger] Wati guarantor overdue error:', err));
+        }
+      }
     }
   } catch (e) {
     console.error('[PayTrigger] notifyLockStatusChange failed:', e.message);
@@ -185,11 +242,12 @@ async function manualLock(req, res) {
     });
 
     if (result?.code === 200) {
-      await prisma.payTriggerDevice.update({
+      const updatedDevice = await prisma.payTriggerDevice.update({
         where: { imei },
         data: { lock_status: 'locked', last_sync_at: now(), raw_state: result },
       });
       await logAction(req, 'PAYTRIGGER_LOCK', `Device ${imei} manually locked`, device.order_id, 'Order');
+      notifyLockStatusChange(updatedDevice, device.lock_status, req.app.get('io')).catch(() => {});
     }
 
     return res.json({ success: true, data: result });
