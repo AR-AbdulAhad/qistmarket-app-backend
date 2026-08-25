@@ -267,6 +267,15 @@ const verifyLoginOTP = async (req, res) => {
           }
         } catch (fcmErr) {
           console.error('FCM force_logout push failed:', fcmErr);
+          // Token is dead (app uninstalled / reinstalled elsewhere) — clear it
+          // so every future login for this user doesn't keep retrying a push
+          // that can never succeed.
+          if (fcmErr?.code === 'messaging/registration-token-not-registered') {
+            await prisma.user.update({
+              where: { id: user.id },
+              data: { fcm_token: null }
+            }).catch(() => {});
+          }
         }
       }
     }
@@ -1312,6 +1321,15 @@ const respondDeviceLoginRequest = async (req, res) => {
           }
         } catch (fcmErr) {
           console.error('FCM force_logout push failed:', fcmErr);
+          // Token is dead (app uninstalled / reinstalled elsewhere) — clear it
+          // so every future login for this user doesn't keep retrying a push
+          // that can never succeed.
+          if (fcmErr?.code === 'messaging/registration-token-not-registered') {
+            await prisma.user.update({
+              where: { id: user.id },
+              data: { fcm_token: null }
+            }).catch(() => {});
+          }
         }
       }
 

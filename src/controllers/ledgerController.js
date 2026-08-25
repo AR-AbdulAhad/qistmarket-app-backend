@@ -316,7 +316,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
 
   // ── Ledger rows, computed once and rendered into both a compact (mobile) and full (desktop) table ──
   const rowsMeta = installmentRows.map((row, idx) => {
-    const priorInstallments = installmentRows.filter(r => r.month < row.month);
+    const priorInstallments = installmentRows.filter(r => r.monthNumber < row.monthNumber);
     const isNext = row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
     const displayStatus = isNext ? 'pending' : row.status;
     return {
@@ -324,12 +324,12 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       isAdvance: false,
       isNext,
       rowClass: isNext ? 'current-month' : '',
-      dueDateText: formatDate(row.due_date),
+      dueDateText: formatDate(row.dueDate),
       dueAmountText: formatPKR(row.dueAmount),
       arrearsText: row.arrears ? formatPKR(row.arrears) : null,
       paidText: row.paidAmount > 0 ? formatPKR(row.paidAmount) : '—',
-      paymentDateText: row.paid_at ? formatDate(row.paid_at) : '—',
-      paymentMethodText: row.payment_method || '—',
+      paymentDateText: row.paidAt ? formatDate(row.paidAt) : '—',
+      paymentMethodText: row.paymentMethod || '—',
       statusHtml: statusBadge(displayStatus),
       extra: idx >= 6,
     };
@@ -387,9 +387,9 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   const accountSummaryRows = `
       <div class="summary-item"><span class="info-label">Total Product Price</span><span class="info-val">${formatPKR(totalAmount)}</span></div>
       <div class="summary-item"><span class="info-label">Total Paid</span><span class="info-val" style="color:#16a34a;">${formatPKR(totalPaidAmount)}</span></div>
-      <div class="summary-item"><span class="info-label">Total Outstanding</span><span class="info-val" style="color:#dc2626;">${formatPKR(remainingAmount)}</span></div>
+      <div class="summary-item"><span class="info-label">Total Outstanding</span><span class="info-val" style="color:#f59e0b;">${formatPKR(remainingAmount)}</span></div>
       <div class="summary-item"><span class="info-label">Current Installment</span><span class="info-val" style="color:#2563eb;">${formatPKR(monthlyInstallment)}</span></div>
-      <div class="summary-item"><span class="info-label">Overdue Amount</span><span class="info-val" style="color:#f59e0b;">${formatPKR(overdueAmount)}</span></div>
+      <div class="summary-item"><span class="info-label">Overdue Amount</span><span class="info-val" style="color:#dc2626;">${formatPKR(overdueAmount)}</span></div>
       <div class="summary-item"><span class="info-label">Next Due Date</span><span class="info-val">${nextDueDate}</span></div>`;
 
   const hirerDetailsRows = `
@@ -456,16 +456,6 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
         <div class="inline-complaint-status-result"></div>
       </div>`;
 
-  // Only lists items that actually go somewhere on this page — "Terms &
-  // Conditions" and "Payment Receipts Guide" were removed because no such
-  // page/document exists anywhere in the app yet, so they were dead text.
-  const docsListHtml = `
-      <div class="section-title" style="color:#0f172a;">IMPORTANT DOCUMENTS</div>
-      <ul class="doc-list">
-        <li><a href="javascript:void(0)" onclick="showTab('dashboard')">📄 Order Details</a></li>
-        <li><a href="https://api.qistmarket.pk/api/ledger/pdf/${ledger.short_id}" target="_blank" rel="noopener">📄 Invoice / Agreement</a></li>
-      </ul>`;
-
   // ── Documents tab: the actual uploaded verification documents for the
   // purchaser and every guarantor on this order — not the placeholder list
   // above, which has no backing file for any of its four items yet.
@@ -523,21 +513,19 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       <a href="${submitComplaintUrl}" target="_blank" class="btn-primary no-print" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box;">Submit a Complaint</a>`;
 
   // "Payment Guide", "Terms & Conditions" and "Privacy Policy" were removed —
-  // no such page exists anywhere in the app yet, so they were dead text.
-  const quickLinksHtml = `
-      <div class="section-title" style="color:#0f172a;">QUICK LINKS</div>
-      <ul class="doc-list">
-        <li><a href="tel:${QIST_SUPPORT_PHONE.replace(/[^\d+]/g, '')}">📞 Contact Branch</a></li>
-      </ul>`;
+  // no such page exists anywhere in the app yet, so they were dead text. The
+  // one remaining item, "Contact Branch", was dropped too — it just duplicated
+  // the phone number already shown in the CONTACT US column next to this one —
+  // leaving no content for this whole QUICK LINKS block, so it's gone entirely.
 
   const contactUsHtml = `
-      <div class="section-title" style="color:#0f172a;">CONTACT US</div>
-      <p style="font-size:0.8rem;color:#334155;line-height:1.7;">
+      <div class="section-title" style="color:#0f172a;text-align:center;">CONTACT US</div>
+      <p style="font-size:0.8rem;color:#334155;line-height:1.7;text-align:center;">
         📞 ${QIST_SUPPORT_PHONE}<br/>
         📍 ${branchAddress}<br/>
         🕒 Mon - Sat (11:00 AM - 08:30 PM)
       </p>
-      ${mapsUrl ? `<a class="btn-outline" style="margin-top:6px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a>` : ''}`;
+      ${mapsUrl ? `<div style="text-align:center;"><a class="btn-outline" style="margin-top:6px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a></div>` : ''}`;
 
   // FOLLOW US removed — no real Qist Market social media URLs exist anywhere
   // in the codebase; all four icons pointed to "#" (dead links).
@@ -743,7 +731,6 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     @media (min-width: 1024px) { .summary-bar { grid-template-columns: repeat(6, 1fr); } }
 
     .footer-cols { display: grid; grid-template-columns: 1fr; gap: 24px; }
-    @media (min-width: 900px) { .footer-cols { grid-template-columns: repeat(3, 1fr); } }
 
     /* Print */
     @media print {
@@ -921,8 +908,6 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     </div>
 
     <div class="card footer-cols">
-      <div>${docsListHtml}</div>
-      <div>${quickLinksHtml}</div>
       <div>${contactUsHtml}</div>
     </div>
 

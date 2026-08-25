@@ -2707,18 +2707,6 @@ const assignDelivery = async (req, res) => {
     }
     if (updatedOrder.delivery_officer) {
       await sendOrderAssignmentNotification(updatedOrder, updatedOrder.delivery_officer, 'delivery', io);
-
-      // Customer-facing heads-up — stock has been handed to this officer.
-      const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
-      if (customerPhone) {
-        sendDeliveryOfficerHandover(customerPhone, {
-          customerName: order.verification?.purchaser?.name || order.customer_name,
-          itemName: order.product_name,
-          orderRef: updatedOrder.order_ref,
-          deliveryOfficerName: updatedOrder.delivery_officer.full_name,
-          deliveryOfficerNumber: updatedOrder.delivery_officer.phone,
-        }).catch(err => console.error('Wati Delivery Officer Handover Error:', err));
-      }
     }
     io?.to(`officer_${user_id}`).emit('delivery_data_updated', { reason: 'order_assigned', orderId: updatedOrder.id });
 
@@ -2820,18 +2808,6 @@ const assignBulkDelivery = async (req, res) => {
     for (const order of updatedOrders) {
       if (order.delivery_officer) {
         await sendOrderAssignmentNotification(order, order.delivery_officer, 'delivery', io);
-
-        // Customer-facing heads-up — stock has been handed to this officer.
-        const customerPhone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
-        if (customerPhone) {
-          sendDeliveryOfficerHandover(customerPhone, {
-            customerName: order.verification?.purchaser?.name || order.customer_name,
-            itemName: order.product_name,
-            orderRef: order.order_ref,
-            deliveryOfficerName: order.delivery_officer.full_name,
-            deliveryOfficerNumber: order.delivery_officer.phone,
-          }).catch(err => console.error('Wati Delivery Officer Handover Error:', err));
-        }
       }
     }
 
@@ -3392,27 +3368,7 @@ const initiateHandover = async (req, res) => {
     const otp = await saveOTP(order.delivery_officer.phone, 'handover');
 
     // Send via WATI
-    const WATI_BASE_URL = process.env.WATI_BASE_URL;
-    const WATI_ACCESS_TOKEN = process.env.WATI_ACCESS_TOKEN;
-    const WATI_TEMPLATE_NAME = process.env.WATI_TEMPLATE_NAME;
-
-    if (WATI_BASE_URL && WATI_ACCESS_TOKEN) {
-      const url = `${WATI_BASE_URL}/api/v2/sendTemplateMessage?whatsappNumber=+92${order.delivery_officer.phone.slice(1)}`;
-      try {
-        await axios.post(url, {
-          template_name: WATI_TEMPLATE_NAME || 'otp_verification',
-          broadcast_name: 'Handover_OTP',
-          parameters: [{ name: '1', value: otp }]
-        }, {
-          headers: {
-            Authorization: `Bearer ${WATI_ACCESS_TOKEN}`,
-            'Content-Type': 'application/json'
-          }
-        });
-      } catch (watiErr) {
-        console.error('WATI Error details:', watiErr.response?.data || watiErr.message);
-      }
-    }
+    await watiService.sendOTP(order.delivery_officer.phone, otp).catch(err => console.error('[HandoverOTP] WATI send failed:', err));
 
     return res.status(200).json({
       success: true,

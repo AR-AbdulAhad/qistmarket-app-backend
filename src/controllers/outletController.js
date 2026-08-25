@@ -18,6 +18,73 @@ const { logLoginAction } = require('../utils/auditLogger');
 
 const now = () => new Date();
 
+const getRepresentativeOfficerDetails = async (user, outletId) => {
+    let name = user?.full_name;
+    let phone = user?.phone;
+
+    if (user?.id) {
+        try {
+            const dbUser = await prisma.user.findUnique({
+                where: { id: parseInt(user.id) },
+                select: {
+                    full_name: true,
+                    phone: true,
+                    employee_profile: { select: { full_name: true, phone: true } }
+                }
+            });
+            if (dbUser) {
+                if (dbUser.full_name && dbUser.full_name.toLowerCase() !== 'testoutlet') {
+                    name = dbUser.full_name;
+                }
+                if (dbUser.phone) phone = dbUser.phone;
+                if (dbUser.employee_profile) {
+                    if (dbUser.employee_profile.full_name) name = dbUser.employee_profile.full_name;
+                    if (dbUser.employee_profile.phone) phone = dbUser.employee_profile.phone;
+                }
+            }
+        } catch (err) {
+            console.error('Error fetching dbUser in getRepresentativeOfficerDetails:', err);
+        }
+    }
+
+    if ((!phone || phone === 'N/A') && outletId) {
+        try {
+            const employee = await prisma.employee.findFirst({
+                where: {
+                    outlet_id: parseInt(outletId),
+                    status: 'active',
+                    phone: { not: null }
+                },
+                select: { full_name: true, phone: true }
+            });
+            if (employee && employee.phone) {
+                if (!name || name.toLowerCase() === 'testoutlet') name = employee.full_name;
+                phone = employee.phone;
+            } else {
+                const branchUser = await prisma.user.findFirst({
+                    where: {
+                        outlet_id: parseInt(outletId),
+                        status: 'active',
+                        phone: { not: null }
+                    },
+                    select: { full_name: true, phone: true }
+                });
+                if (branchUser && branchUser.phone) {
+                    if (!name || name.toLowerCase() === 'testoutlet') name = branchUser.full_name;
+                    phone = branchUser.phone;
+                }
+            }
+        } catch (err) {
+            console.error('Error fetching outlet officer in getRepresentativeOfficerDetails:', err);
+        }
+    }
+
+    return {
+        name: name || 'Outlet Representative',
+        phone: phone || 'N/A'
+    };
+};
+
 const createOutlet = async (req, res) => {
     const { code, name, address } = req.body;
 
@@ -1021,13 +1088,14 @@ const verifyReturnExchangeOtp = async (req, res) => {
             // not Exchange (order stays open there, no closure messaging fits).
             const returnPhone = record.order.verification?.purchaser?.telephone_number || record.order.whatsapp_number;
             if (returnPhone) {
+                const rep = await getRepresentativeOfficerDetails(req.user, outlet_id);
                 sendItemReturnConfirmation(returnPhone, {
                     customerName: record.order.verification?.purchaser?.name || record.order.customer_name,
                     itemName: record.product_name || record.order.product_name,
                     orderRef: record.order.order_ref,
                     returnDate: nowDate.toLocaleDateString('en-PK'),
-                    representativeName: req.user?.full_name,
-                    representativeNumber: req.user?.phone,
+                    representativeName: rep.name,
+                    representativeNumber: rep.phone,
                     ledgerUrl: record.order.installment_ledger?.short_id || null,
                 }).catch(err => console.error('Wati Item Return Confirmation Error:', err));
             }
@@ -1340,13 +1408,14 @@ const initiateDirectReturn = async (req, res) => {
             // delivery/ledger archive step above ran and deleted the live
             // ledger row — a dead link would be worse than showing nothing.
             try {
+                const rep = await getRepresentativeOfficerDetails(req.user, outlet_id);
                 await sendItemReturnConfirmation(phoneToUse, {
                     customerName: order.customer_name || 'Customer',
                     itemName: productName,
                     orderRef: order.order_ref,
                     returnDate: nowDate.toLocaleDateString('en-PK'),
-                    representativeName: req.user?.full_name,
-                    representativeNumber: req.user?.phone,
+                    representativeName: rep.name,
+                    representativeNumber: rep.phone,
                     ledgerUrl: returnedLedgerShortId,
                 });
             } catch (err) {
@@ -1491,11 +1560,18 @@ const searchDeliveredOrders = async (req, res) => {
         const refinedOrders = orders.map(order => {
             const delivery = order.delivery;
             const cashRecord = order.cash_in_hand?.[0]; // The official financial snapshot of delivery
-            const plan = delivery?.selected_plan
-                ? (typeof delivery.selected_plan === 'string'
-                    ? JSON.parse(delivery.selected_plan)
-                    : delivery.selected_plan)
-                : null;
+            let plan = null;
+            if (delivery?.selected_plan) {
+                if (typeof delivery.selected_plan === 'string') {
+                    try {
+                        plan = JSON.parse(delivery.selected_plan);
+                    } catch (e) {
+                        console.error(`searchDeliveredOrders: corrupt selected_plan for order ${order.id}:`, e.message);
+                    }
+                } else {
+                    plan = delivery.selected_plan;
+                }
+            }
 
             // Advance: Prioritize the actual cash collected in CashInHand
             const deliveredAdvance = cashRecord ? cashRecord.amount : (plan?.advance_payment || plan?.advance_amount || plan?.advancePayment || 0);

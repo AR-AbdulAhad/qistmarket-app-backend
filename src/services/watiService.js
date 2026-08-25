@@ -60,8 +60,8 @@ const sendOTP = async (phone, otp) => sendOTPWhatsApp(phone, otp);
 // Grantor (guarantor) OTP — named template with the guarantor's name inserted,
 // consolidated from what used to be duplicated inline in appVerificationOtp.js
 // and ordersController.js's convert-sale grantor branch.
-const WATI_GRANTORS_OTP_TEMPLATE = process.env.WATI_GRANTORS_OTP_TEMPLATE_NAME || 'grantors_otp';
-const WATI_GRANTORS_OTP_BROADCAST = process.env.WATI_GRANTORS_OTP_BROADCAST_NAME || 'grantors_otp';
+const WATI_GRANTORS_OTP_TEMPLATE = process.env.WATI_GRANTORS_OTP_TEMPLATE_NAME || 'grantors_ot_template';
+const WATI_GRANTORS_OTP_BROADCAST = process.env.WATI_GRANTORS_OTP_BROADCAST_NAME || 'grantors_ot_template';
 
 const sendGrantorOTP = async (phone, name, otp) => {
   return sendTemplate(phone, WATI_GRANTORS_OTP_TEMPLATE, WATI_GRANTORS_OTP_BROADCAST, [
@@ -148,8 +148,8 @@ const sendReturnConfirmation = async (phone, {
 // Params: customer_name, product_name, order_ref, next_month_label,
 //         monthly_amount, due_date, total_remaining, ledger_url
 
-const WATI_LEDGER_TEMPLATE = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_ledger';
-const WATI_LEDGER_BROADCAST = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_ledger';
+const WATI_LEDGER_TEMPLATE = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_status_ledger';
+const WATI_LEDGER_BROADCAST = process.env.WATI_INSTALLMENT_LEDGER_TEMPLATE || 'installment_status_ledger';
 
 const sendInstallmentLedger = async (phone, {
   customerName,
@@ -341,8 +341,8 @@ const sendComplaintResolved = async (phone, {
 };
 
 // ─── Template 7: Generic Order Status Update ─────────────────────────────
-const WATI_ORDER_STATUS_TEMPLATE = process.env.WATI_ORDER_STATUS_TEMPLATE || 'order_status_update';
-const WATI_ORDER_STATUS_BROADCAST = process.env.WATI_ORDER_STATUS_TEMPLATE || 'order_status_update';
+const WATI_ORDER_STATUS_TEMPLATE = process.env.WATI_ORDER_STATUS_TEMPLATE || 'order_status_notification';
+const WATI_ORDER_STATUS_BROADCAST = process.env.WATI_ORDER_STATUS_TEMPLATE || 'order_status_notification';
 
 const sendOrderStatusNotification = async (phone, { customerName, message }) => {
   const parameters = [

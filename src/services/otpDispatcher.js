@@ -30,7 +30,16 @@ const isJazzEnabled = () => process.env.JAZZ_OTP_ENABLED === 'true';
  * the client's full "Purchaser Verification OTP" template. WATI is
  * unaffected either way — this only changes the SMS channel.
  */
+// Dev convenience: print the OTP straight to the terminal so it can be typed
+// in during local testing without waiting on a real WhatsApp/SMS delivery.
+// Never runs in production — an OTP in server logs would be a security hole.
+const logOtpForDev = (phone, otp) => {
+  if (process.env.NODE_ENV === 'production') return;
+  console.log(`[OTP][DEV] ${phone} -> ${otp}`);
+};
+
 const sendOtp = async (phone, otp, context = null) => {
+  logOtpForDev(phone, otp);
   const result = { success: false, wati: null, jazz: null };
 
   if (isWatiEnabled()) {
@@ -68,6 +77,7 @@ const sendOtp = async (phone, otp, context = null) => {
  * JAZZ_OTP_ENABLED flags as the generic OTP so both flows switch together.
  */
 const sendGuarantorOtp = async (phone, name, otp, context = null) => {
+  logOtpForDev(phone, otp);
   const result = { success: false, wati: null, jazz: null };
 
   if (isWatiEnabled()) {

@@ -945,6 +945,25 @@ const verifyOnlineCashSubmission = async (req, res) => {
       return res.status(404).json({ success: false, message: 'No pending submission found to verify' });
     }
 
+    // This endpoint only checks whether the real SmartPay/1Bill webhook
+    // (smartPayController.notifyPayment) already confirmed the payment —
+    // it must never mark a submission paid on its own. Without this check,
+    // tapping "Check/Verify Payment Status" would mark unpaid bills as paid.
+    const paidConsumer = await prisma.consumerNumber.findFirst({
+      where: {
+        cash_submission_ref: submission_ref,
+        type: 'officer_cash',
+        bill_status: 'P'
+      }
+    });
+
+    if (!paidConsumer) {
+      return res.status(200).json({
+        success: false,
+        message: 'Payment not received yet. Please complete the payment via 1Bill / SmartPay first.'
+      });
+    }
+
     await prisma.cashSubmissionHistory.updateMany({
       where: { submission_ref, status: 'pending' },
       data: { status: 'paid' }

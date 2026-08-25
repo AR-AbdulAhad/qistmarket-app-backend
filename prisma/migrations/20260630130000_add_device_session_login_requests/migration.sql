@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE `user` ADD COLUMN `session_token` VARCHAR(64) NULL;
+ALTER TABLE `User` ADD COLUMN `session_token` VARCHAR(64) NULL;
 
 -- CreateTable
 CREATE TABLE `device_login_requests` (
@@ -17,4 +17,4 @@ CREATE TABLE `device_login_requests` (
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- AddForeignKey
-ALTER TABLE `device_login_requests` ADD CONSTRAINT `device_login_requests_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE `device_login_requests` ADD CONSTRAINT `device_login_requests_user_id_fkey` FOREIGN KEY (`user_id`) REFERENCES `User`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;

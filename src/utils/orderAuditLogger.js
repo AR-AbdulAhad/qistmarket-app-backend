@@ -1,5 +1,5 @@
 const prisma = require('../../lib/prisma');
-const { sendOrderStatusNotification } = require('../services/watiService');
+const { sendOrderStatusNotification, sendDeliveryOfficerHandover } = require('../services/watiService');
 const { updateCsrRanking } = require('../services/rankingService');
 
 // Helper for current timestamp
@@ -25,13 +25,15 @@ async function logOrderStatusChange(order_id, old_status, new_status, user, rema
         id: true,
         whatsapp_number: true,
         customer_name: true,
+        product_name: true,
         order_ref: true,
         cancelled_reason: true,
         postponed_feedback: true,
         assigned_to: { select: { full_name: true } },
-        delivery_officer: { select: { full_name: true } },
+        delivery_officer: { select: { full_name: true, phone: true } },
         recovery_officer: { select: { full_name: true } },
-        outlet: { select: { name: true } }
+        outlet: { select: { name: true } },
+        verification: { include: { purchaser: true } },
       }
     });
 
@@ -70,48 +72,20 @@ async function logOrderStatusChange(order_id, old_status, new_status, user, rema
     const orderRef = freshOrder.order_ref;
 
     switch (new_status.toLowerCase()) {
-      case 'new':
-        message = `Aapka order ${orderRef} kamyabi se create ho chuka hai. Hum jald hi isay process karenge. Qist Market muntakhib karne ka shukriya!`;
-        break;
-
-      case 'pending':
-        if (freshOrder.assigned_to) {
-          message = `Aapka order ${orderRef} hamare Verification Officer ${freshOrder.assigned_to.full_name} ko assign kar diya gaya hai. Woh jald hi aapse mazeed maloomat ke liye raabta karenge.`;
-        }
-        break;
-
-      case 'in_progress':
-        if (freshOrder.assigned_to) {
-          message = `Aapke order ${orderRef} ki verification shuru ho chuki hai. Hamare officer ${freshOrder.assigned_to.full_name} aapki maloomat ka jaiza le rahe hain.`;
-        }
-        break;
-
-      case 'transferred':
-        if (freshOrder.outlet) {
-          message = `Aapka order ${orderRef} mazeed processing ke liye hamare ${freshOrder.outlet.name} outlet ko transfer kar diya gaya hai.`;
-        }
-        break;
-
       case 'picked':
         if (freshOrder.delivery_officer) {
-          message = `Aapka order ${orderRef} Delivery Officer ${freshOrder.delivery_officer.full_name} ko assign kar diya gaya hai. Aapko aapka product jald mil jayega!`;
+          const customerPhone = freshOrder.verification?.purchaser?.telephone_number || freshOrder.whatsapp_number;
+          if (customerPhone) {
+            sendDeliveryOfficerHandover(customerPhone, {
+              customerName: freshOrder.verification?.purchaser?.name || freshOrder.customer_name,
+              itemName: freshOrder.product_name,
+              orderRef: freshOrder.order_ref,
+              deliveryOfficerName: freshOrder.delivery_officer.full_name,
+              deliveryOfficerNumber: freshOrder.delivery_officer.phone || 'N/A',
+            }).catch(err => console.error('[WATI] Delivery Officer Handover Error:', err));
+          }
         }
-        break;
-
-      case 'approved':
-        message = `Mubarak ho! Aapka order ${orderRef} approve ho chuka hai. Isay jald hi delivery ke liye assign kar diya jayega.`;
-        break;
-
-      case 'completed':
-        message = `Mubarak ho! Aapke order ${orderRef} ki verification kamyabi se mukammal ho chuki hai. Ab yeh aage ki processing ke liye bhej diya gaya hai.`;
-        break;
-
-      case 'delivered':
-        message = `Aapka order ${orderRef} kamyabi se deliver ho chuka hai. Umeed hai aapko aapki kharidari pasand aayegi! Qist Market ka shukriya.`;
-        break;
-
-      case 'cancelled':
-        message = `Aapka order ${orderRef} cancel kar diya gaya hai. Wajah: ${freshOrder.cancelled_reason || 'N/A'}. Agar aapka koi sawal hai to hamari support team se raabta karein.`;
+        // Note: Dedicated WATI_DELIVERY_OFFICER_HANDOVER_TEMPLATE sent above, no generic message needed.
         break;
 
       case 'postponed':
@@ -123,7 +97,8 @@ async function logOrderStatusChange(order_id, old_status, new_status, user, rema
         break;
 
       default:
-        // No message for unknown statuses
+        // Statuses with dedicated WATI templates (new, pending, in_progress, transferred, approved, completed, delivered, cancelled)
+        // are handled by customerNotificationService / watiService dedicated functions to avoid sending generic legacy templates.
         break;
     }
 

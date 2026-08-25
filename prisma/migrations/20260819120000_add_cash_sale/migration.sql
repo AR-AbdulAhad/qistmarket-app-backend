@@ -24,7 +24,7 @@ CREATE TABLE `cash_sales` (
   INDEX `cash_sales_created_at_idx` (`created_at`),
   CONSTRAINT `cash_sales_outlet_id_fkey` FOREIGN KEY (`outlet_id`) REFERENCES `outlets`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `cash_sales_inventory_id_fkey` FOREIGN KEY (`inventory_id`) REFERENCES `outlet_inventories`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
-  CONSTRAINT `cash_sales_sold_by_user_id_fkey` FOREIGN KEY (`sold_by_user_id`) REFERENCES `user`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+  CONSTRAINT `cash_sales_sold_by_user_id_fkey` FOREIGN KEY (`sold_by_user_id`) REFERENCES `User`(`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 ALTER TABLE `cash_registers` ADD COLUMN `cash_sale` DOUBLE NOT NULL DEFAULT 0 AFTER `vendor_receipts`;
