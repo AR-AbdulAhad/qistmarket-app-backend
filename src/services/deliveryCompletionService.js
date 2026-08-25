@@ -675,6 +675,21 @@ async function initiateGatedDelivery({ mode, order, payload, io, productNameSnap
     },
   });
 
+  try {
+    const licRes = await pt.checkLicense().catch(() => null);
+    const licData = licRes?.data || licRes || {};
+    const total = parseInt(licData?.totalNum ?? licData?.totalCount ?? 0) || 0;
+    const used = parseInt(licData?.usedNum ?? licData?.usedCount ?? 0) || 0;
+    const unused = parseInt(licData?.unusedNum ?? licData?.availableNum ?? licData?.availableCount ?? (total - used));
+    if (!isNaN(unused) && unused <= 0) {
+      const err = new Error('Licence Exceed. PayTrigger available licenses count is 0. Cannot enroll device until licenses are added.');
+      err.paytriggerFailure = true;
+      throw err;
+    }
+  } catch (licErr) {
+    if (licErr.paytriggerFailure) throw licErr;
+  }
+
   let enrollResult;
   try {
     enrollResult = await pt.preEnrollImei(payload.product_imei, order.order_ref, productNameSnapshot, firstInstallmentDueDate);
