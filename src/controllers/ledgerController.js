@@ -17,6 +17,7 @@ const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils
 // same file the dashboard/complaint page use — so this backend never needs
 // to host or deploy a copy of it itself.
 const logoDataURI = 'https://qms.qistmarket.pk/images/logo/qist-market-logo.png';
+const faviconURI = 'https://qms.qistmarket.pk/images/favicon.ico';
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
 
@@ -543,8 +544,8 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Installment Ledger — ${order.order_ref}</title>
-  <link rel="icon" type="image/png" href="${logoDataURI}" />
-  <link rel="shortcut icon" type="image/png" href="${logoDataURI}" />
+  <link rel="icon" type="image/x-icon" href="${faviconURI}" />
+  <link rel="shortcut icon" type="image/x-icon" href="${faviconURI}" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
