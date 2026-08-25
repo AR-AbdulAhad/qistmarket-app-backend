@@ -258,9 +258,7 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
   let qrImageSrc = smartPayQr?.qr_image_base64 || null;
   if (!qrImageSrc && consumerNumber) {
-    qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(consumerNumber)}`;
-  } else if (!qrImageSrc) {
-    qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent('1BILL-' + order.order_ref)}`;
+    qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(consumerNumber)}`;
   }
 
   // ── Guarantor cards (real data from GrantorVerification, if any exist) ──
