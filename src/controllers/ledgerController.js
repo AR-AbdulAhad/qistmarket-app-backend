@@ -254,7 +254,11 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   };
   const purchaserMapUrl = purchaser ? verificationMapUrl('purchaser', purchaser.id) : null;
 
-  const consumerNumber = ledger.consumer_numbers?.[0]?.consumer_number || order.consumer_numbers?.[0]?.consumer_number || null;
+  let consumerNumber = ledger.consumer_numbers?.[0]?.consumer_number || order.consumer_numbers?.[0]?.consumer_number || null;
+  if (!consumerNumber && order?.id) {
+    consumerNumber = `1017100015${String(order.id).slice(-6).padStart(6, '0')}`;
+  }
+
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
   let qrImageSrc = smartPayQr?.qr_image_base64 || null;
   if (!qrImageSrc && consumerNumber) {
@@ -377,11 +381,10 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
         <span id="billId-${ledger.id}">${consumerNumber}</span>
         <button class="copy-btn no-print" onclick="navigator.clipboard.writeText('${consumerNumber}').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);})">Copy</button>
       </div>` : ''}
-      ${qrImageSrc ? `
       <div class="qr-box">
         <img src="${qrImageSrc}" alt="Scan & Pay QR" />
         <p>Powered by <strong>1BILL</strong></p>
-      </div>` : `<p style="font-size:0.75rem;color:#94a3b8;margin-top:10px;">QR abhi generate nahi hui.</p>`}
+      </div>
       <div class="section-title" style="color:#0f172a;margin-top:20px;">PAYMENT METHODS</div>
       <ul class="payment-methods-list">
         <li><span class="pm-dot" style="background:#16a34a;"></span>1Bill</li>
