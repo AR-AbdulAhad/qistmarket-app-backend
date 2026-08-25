@@ -68,7 +68,7 @@ const accountStatusMeta = (status) => {
   return ACCOUNT_STATUS_STYLES[key] || { label: (status || 'N/A').replace(/_/g, ' '), color: '#475569', bg: '#f1f5f9' };
 };
 
-const QIST_SUPPORT_PHONE = '021-111-11-7747';
+const QIST_SUPPORT_PHONE = '0304-1111144';
 // Support tab specific — a real mobile UAN and a separate WhatsApp (WATI)
 // number, plus the head office address, distinct from the outlet's own
 // branch phone/address shown in Branch Details.
@@ -224,7 +224,7 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   const paidInstallmentCount = summary.paidInstallments;
   const overdueAmount = summary.totalArrears;
 
-  const monthlyInstallment = order.monthly_amount || installmentRows[0]?.dueAmount || 0;
+  const monthlyInstallment = installmentRows[0]?.dueAmount || order.monthly_amount || 0;
 
   const nextDueRow = installmentRows.find(r => r.status !== 'paid');
   const nextDueDate = nextDueRow ? formatDate(nextDueRow.dueDate) : 'N/A';
@@ -253,9 +253,14 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   };
   const purchaserMapUrl = purchaser ? verificationMapUrl('purchaser', purchaser.id) : null;
 
-  const consumerNumber = ledger.consumer_numbers?.[0]?.consumer_number || null;
+  const consumerNumber = ledger.consumer_numbers?.[0]?.consumer_number || order.consumer_numbers?.[0]?.consumer_number || null;
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
-  const qrImageSrc = smartPayQr?.qr_image_base64 || null;
+  let qrImageSrc = smartPayQr?.qr_image_base64 || null;
+  if (!qrImageSrc && consumerNumber) {
+    qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(consumerNumber)}`;
+  } else if (!qrImageSrc) {
+    qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent('1BILL-' + order.order_ref)}`;
+  }
 
   // ── Guarantor cards (real data from GrantorVerification, if any exist) ──
   const guarantorCardsHtml = grantors.length
@@ -281,7 +286,7 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
     const isNext = !isAdvance && row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
     const displayStatus = isNext ? 'pending' : row.status;
     return {
-      rowNum: String(idx + 1).padStart(2, '0'),
+      rowNum: isAdvance ? 'ADV' : String(row.month).padStart(2, '0'),
       isAdvance,
       isNext,
       rowClass: `${isAdvance ? 'advance-row' : ''} ${isNext ? 'current-month' : ''}`,
@@ -382,10 +387,7 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
       <div class="section-title" style="color:#0f172a;margin-top:20px;">PAYMENT METHODS</div>
       <ul class="payment-methods-list">
         <li><span class="pm-dot" style="background:#16a34a;"></span>1Bill</li>
-        <li><span class="pm-dot" style="background:#334155;"></span>Bank / Online Payment</li>
         <li><span class="pm-dot" style="background:#0ea5e9;"></span>QR Payment</li>
-        <li><span class="pm-dot" style="background:#22c55e;"></span>EasyPaisa</li>
-        <li><span class="pm-dot" style="background:#dc2626;"></span>JazzCash</li>
       </ul>
       <button class="btn-primary no-print" style="width:100%;margin-top:14px;" disabled>Payment Karne ka Tareeqa</button>`;
 
@@ -542,6 +544,8 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Installment Ledger — ${order.order_ref}</title>
+  <link rel="icon" type="image/png" href="${logoDataURI}" />
+  <link rel="shortcut icon" type="image/png" href="${logoDataURI}" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
