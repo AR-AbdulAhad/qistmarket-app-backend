@@ -4,6 +4,7 @@ const puppeteer = require('puppeteer');
 const axios = require('axios');
 const qrcode = require('qrcode');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
+const { generateDqr } = require('../utils/smartPayGateway');
 const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services/watiService');
 const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
@@ -262,15 +263,37 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
 
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
   let qrImageSrc = smartPayQr?.qr_image_base64 || null;
+
+  // 1. Try SmartPay Gateway API DQR generation to get the exact SmartPay QR image
   if (!qrImageSrc && consumerNumber) {
     try {
-      qrImageSrc = await qrcode.toDataURL(consumerNumber, {
+      const dqrRes = await generateDqr({
+        consumerNumber,
+        consumerDetail: customerName,
+        amount: monthlyInstallment || 0,
+        cellNo: phone || '',
+        referenceInfo: `QIST-${order.id}-${Date.now()}`.substring(0, 30),
+      });
+      if (dqrRes?.success && dqrRes?.qrImageBase64) {
+        qrImageSrc = dqrRes.qrImageBase64;
+      }
+    } catch (dqrErr) {
+      console.error('[LedgerController] SmartPay generateDqr error:', dqrErr);
+    }
+  }
+
+  // 2. High-density EMVCo 1Bill DQR Payload String fallback (matches Picture 1 matrix density)
+  if (!qrImageSrc && consumerNumber) {
+    try {
+      const formattedAmount = parseFloat(monthlyInstallment || 0).toFixed(2);
+      const emvCoPayload = `00020101021226580016A0000006770101110216${consumerNumber}5204599953035865405${formattedAmount}5802PK5911Qist Market6007Karachi6304`;
+      qrImageSrc = await qrcode.toDataURL(emvCoPayload, {
         errorCorrectionLevel: 'H',
         margin: 2,
-        width: 350
+        width: 350,
       });
     } catch (qrErr) {
-      console.error('qrcode.toDataURL error:', qrErr);
+      console.error('qrcode.toDataURL fallback error:', qrErr);
     }
   }
 
