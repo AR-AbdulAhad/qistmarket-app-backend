@@ -2,6 +2,7 @@ const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const puppeteer = require('puppeteer');
 const axios = require('axios');
+const qrcode = require('qrcode');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services/watiService');
 const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
@@ -163,7 +164,7 @@ async function fetchProductImageUrl(productName, apiProductName) {
 
 // ─── Shared: build HTML from ledger record (RESPONSIVE VERSION) ───────────────────────────────────
 
-function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
+async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   const order = ledger.order;
   const delivery = ledger.delivery;
   const purchaser = order.verification?.purchaser;
@@ -262,7 +263,15 @@ function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null) {
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
   let qrImageSrc = smartPayQr?.qr_image_base64 || null;
   if (!qrImageSrc && consumerNumber) {
-    qrImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(consumerNumber)}`;
+    try {
+      qrImageSrc = await qrcode.toDataURL(consumerNumber, {
+        errorCorrectionLevel: 'H',
+        margin: 2,
+        width: 350
+      });
+    } catch (qrErr) {
+      console.error('qrcode.toDataURL error:', qrErr);
+    }
   }
 
   // ── Guarantor cards (real data from GrantorVerification, if any exist) ──
@@ -1041,7 +1050,7 @@ const viewLedger = async (req, res) => {
       stockItem?.product_name || ledger.order.product_name,
       stockItem?.api_product_name
     );
-    const html = buildLedgerHtml(ledger, stockItem, productImageUrl);
+    const html = await buildLedgerHtml(ledger, stockItem, productImageUrl);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.send(html);
   } catch (error) {
@@ -1068,7 +1077,7 @@ const downloadLedgerPdf = async (req, res) => {
       stockItem?.product_name || ledger.order.product_name,
       stockItem?.api_product_name
     );
-    const html = buildLedgerHtml(ledger, stockItem, productImageUrl);
+    const html = await buildLedgerHtml(ledger, stockItem, productImageUrl);
 
     const browser = await puppeteer.launch({
       headless: true,
