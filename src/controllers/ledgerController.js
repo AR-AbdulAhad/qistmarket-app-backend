@@ -263,6 +263,11 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
 
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
   let qrImageSrc = smartPayQr?.qr_image_base64 || null;
+  // Tracks which gateway actually produced qrImageSrc, so the "Powered by"
+  // branding and payment-method labels below reflect the real source instead
+  // of always claiming 1Bill — SmartPay is the live/working gateway, 1Bill is
+  // only a last-resort EMVCo QR built locally when SmartPay is unreachable.
+  let qrProvider = smartPayQr ? 'SmartPay' : null;
 
   // 1. Try SmartPay Gateway API DQR generation to get the exact SmartPay QR image
   if (!qrImageSrc && consumerNumber) {
@@ -276,6 +281,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       });
       if (dqrRes?.success && dqrRes?.qrImageBase64) {
         qrImageSrc = dqrRes.qrImageBase64;
+        qrProvider = 'SmartPay';
       }
     } catch (dqrErr) {
       console.error('[LedgerController] SmartPay generateDqr error:', dqrErr);
@@ -292,6 +298,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
         margin: 2,
         width: 350,
       });
+      qrProvider = '1Bill';
     } catch (qrErr) {
       console.error('qrcode.toDataURL fallback error:', qrErr);
     }
@@ -405,21 +412,23 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       <div class="info-row"><span class="info-label">Phone</span><span class="info-val">${QIST_SUPPORT_PHONE}</span></div>
       ${mapsUrl ? `<a class="btn-outline" style="margin-top:10px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a>` : ''}`;
 
+  const paymentProviderLabel = qrProvider || 'SmartPay';
+
   const paymentBoxHtml = `
       <div class="section-title" style="color:#0f172a;">SCAN & PAY</div>
       ${consumerNumber ? `
-      <div class="info-label" style="margin-top:4px;">Your 1Bill ID</div>
+      <div class="info-label" style="margin-top:4px;">Your ${paymentProviderLabel} ID</div>
       <div class="bill-id-box">
         <span id="billId-${ledger.id}">${consumerNumber}</span>
         <button class="copy-btn no-print" onclick="navigator.clipboard.writeText('${consumerNumber}').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);})">Copy</button>
       </div>` : ''}
       <div class="qr-box">
         <img src="${qrImageSrc}" alt="Scan & Pay QR" />
-        <p>Powered by <strong>1BILL</strong></p>
+        <p>Powered by <strong>${paymentProviderLabel.toUpperCase()}</strong></p>
       </div>
       <div class="section-title" style="color:#0f172a;margin-top:20px;">PAYMENT METHODS</div>
       <ul class="payment-methods-list">
-        <li><span class="pm-dot" style="background:#16a34a;"></span>1Bill</li>
+        <li><span class="pm-dot" style="background:#16a34a;"></span>${paymentProviderLabel}</li>
         <li><span class="pm-dot" style="background:#0ea5e9;"></span>QR Payment</li>
       </ul>
       <button class="btn-primary no-print" style="width:100%;margin-top:14px;" disabled>Payment Karne ka Tareeqa</button>`;
@@ -428,10 +437,10 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       <div class="note-box">
         <div class="info-label" style="color:#b45309;margin-bottom:8px;">⚠ IMPORTANT NOTE</div>
         <ul>
-          <li>Sirf 1Bill ID aur QR par hi payment karein.</li>
+          <li>Sirf ${paymentProviderLabel} ID aur QR par hi payment karein.</li>
           <li>Agar aap cash payment karte hain to receiving message zaroor check karein.</li>
           <li>Payment ka message na aaye to hamare bande ko payment bilkul bhi na dein.</li>
-          <li>Apni payment sirf official 1Bill ID ya QR se hi karein.</li>
+          <li>Apni payment sirf official ${paymentProviderLabel} ID ya QR se hi karein.</li>
         </ul>
       </div>`;
 
