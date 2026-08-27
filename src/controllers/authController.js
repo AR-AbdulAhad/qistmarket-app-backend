@@ -101,7 +101,10 @@ const sendLoginOTP = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: `OTP sent successfully.`,
-      expiresIn: '10 minutes'
+      expiresIn: '10 minutes',
+      // Dev convenience only — lets the app print the OTP to its own console
+      // instead of waiting on real WhatsApp/SMS delivery. Never sent in prod.
+      ...(process.env.NODE_ENV !== 'production' ? { otp } : {})
     });
 
   } catch (error) {
