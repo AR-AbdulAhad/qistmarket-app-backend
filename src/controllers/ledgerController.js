@@ -6,12 +6,11 @@ const qrcode = require('qrcode');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { generateDqr } = require('../utils/smartPayGateway');
 const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services/watiService');
-const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow, getRepresentativeOfficerDetails } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { logAction } = require('../utils/auditLogger');
-const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 // Was left as an empty string, so both <img src="${logoDataURI}"> spots below
 // rendered as a broken-image icon next to the "QistMarket" alt text on every
 // ledger page and PDF. Points at the frontend's own already-deployed static
@@ -1245,6 +1244,7 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
 
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const paymentTxnId = `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`;
+    const rep = await getRepresentativeOfficerDetails(req.user, outlet_id);
     if (totalPaid >= dueAmount) {
       sendQistReceivingForPayment(phone, {
         order,
@@ -1257,8 +1257,8 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         paymentMethod: payment_method,
         paymentDate: new Date().toLocaleDateString('en-PK'),
         transactionId: paymentTxnId,
-        representativeName: req.user?.full_name,
-        representativeNumber: req.user?.phone,
+        representativeName: rep.name,
+        representativeNumber: rep.phone,
       }).catch(err => console.error('Wati Qist Receiving Error:', err));
     } else {
       sendPartialPaymentForRow(phone, {
@@ -1272,12 +1272,10 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         paymentMethod: payment_method,
         paymentDate: new Date().toLocaleDateString('en-PK'),
         transactionId: paymentTxnId,
-        representativeName: req.user?.full_name,
-        representativeNumber: req.user?.phone,
+        representativeName: rep.name,
+        representativeNumber: rep.phone,
       }).catch(err => console.error('Wati Partial Payment Error:', err));
     }
-
-    sendAccountAwarenessForOrder(order.id, phone, { itemName: order.product_name });
 
     // Send Next Month Reminder if exists — skipped on the full-paid branch
     // above since sendQistReceiving already carries the next-installment info.
@@ -1292,23 +1290,6 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
         ledgerUrl
       });
-    }
-
-    // Send Customer Ledger
-    const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
-
-    const altPhone = order.verification?.purchaser?.alternate_phone_number;
-    const targetPhones = [phone];
-    if (altPhone && altPhone.trim() !== '') targetPhones.push(altPhone.trim());
-
-    for (const targetPhone of targetPhones) {
-        sendCustomerLedger(targetPhone, {
-            customerName,
-            orderRef: order.order_ref,
-            itemName: order.product_name,
-            remainingBalance,
-            ledgerUrl
-        }).catch(e => console.error('[WATI] Ledger send error on payment:', e));
     }
 
     await logAction(

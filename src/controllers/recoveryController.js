@@ -6,13 +6,11 @@ const {
   sendPtpConfirmation,
   sendToMany,
   getCompanyNotifyPhones,
-  sendCustomerLedger
 } = require('../services/watiService');
-const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow, getRepresentativeOfficerDetails } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger, normalizeLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
-const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
 const { updateRecoveryRanking } = require('../services/recoveryRankingService');
 const { notifyAdmins, notifyOutlet, notifyUser } = require('../utils/notificationUtils');
@@ -678,6 +676,8 @@ const submitBranchPayment = async (req, res) => {
       syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, month_number, phone });
     }
 
+    const rep = await getRepresentativeOfficerDetails(req.user, order.outlet_id);
+
     if (totalPaid >= dueAmount) {
       sendToMany(notifyPhones, (p) => sendQistReceivingForPayment(p, {
         order,
@@ -690,8 +690,8 @@ const submitBranchPayment = async (req, res) => {
         paymentMethod: payment_method,
         paymentDate: new Date().toLocaleDateString('en-PK'),
         transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
-        representativeName: req.user?.full_name,
-        representativeNumber: req.user?.phone,
+        representativeName: rep.name,
+        representativeNumber: rep.phone,
       })).catch(err => console.error('Wati Qist Receiving Error:', err));
     } else {
       sendToMany(notifyPhones, (p) => sendPartialPaymentForRow(p, {
@@ -705,14 +705,10 @@ const submitBranchPayment = async (req, res) => {
         paymentMethod: payment_method,
         paymentDate: new Date().toLocaleDateString('en-PK'),
         transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
-        representativeName: req.user?.full_name,
-        representativeNumber: req.user?.phone,
+        representativeName: rep.name,
+        representativeNumber: rep.phone,
       })).catch(err => console.error('Wati Partial Payment Error:', err));
     }
-
-    [...new Set([phone, altPhone].filter(Boolean))].forEach((p) =>
-      sendAccountAwarenessForOrder(order.id, p, { itemName: finalProductName })
-    );
 
     // ── Transaction notification — Admin/Super Admin + the officer's outlet ──
     const io = req.app.get('io');
@@ -1266,6 +1262,8 @@ const submitInstallment = async (req, res) => {
       syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, month_number, phone });
     }
 
+    const rep = await getRepresentativeOfficerDetails(req.user, order.outlet_id);
+
     if (totalPaid >= dueAmount) {
       sendToMany(notifyPhones, (p) => sendQistReceivingForPayment(p, {
         order,
@@ -1278,8 +1276,8 @@ const submitInstallment = async (req, res) => {
         paymentMethod: payment_method,
         paymentDate: new Date().toLocaleDateString('en-PK'),
         transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
-        representativeName: req.user?.full_name,
-        representativeNumber: req.user?.phone,
+        representativeName: rep.name,
+        representativeNumber: rep.phone,
       })).catch(err => console.error('Wati Qist Receiving Error:', err));
     } else {
       sendToMany(notifyPhones, (p) => sendPartialPaymentForRow(p, {
@@ -1293,14 +1291,10 @@ const submitInstallment = async (req, res) => {
         paymentMethod: payment_method,
         paymentDate: new Date().toLocaleDateString('en-PK'),
         transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
-        representativeName: req.user?.full_name,
-        representativeNumber: req.user?.phone,
+        representativeName: rep.name,
+        representativeNumber: rep.phone,
       })).catch(err => console.error('Wati Partial Payment Error:', err));
     }
-
-    [...new Set([phone, altPhone].filter(Boolean))].forEach((p) =>
-      sendAccountAwarenessForOrder(order.id, p, { itemName: finalProductName })
-    );
 
     // Send Next Month Reminder if exists — skipped on the full-paid branch
     // above since sendQistReceiving already carries the next-installment info.
@@ -1328,17 +1322,6 @@ const submitInstallment = async (req, res) => {
         amountDue: Math.max(0, dueAmount - totalPaid),
       })).catch(err => console.error('Wati PTP Confirmation Error:', err));
     }
-
-    // Send Customer Ledger
-    const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
-
-    sendToMany(notifyPhones, (p) => sendCustomerLedger(p, {
-        customerName,
-        orderRef: order.order_ref,
-        itemName: finalProductName,
-        remainingBalance,
-        ledgerUrl
-    })).catch(e => console.error('[WATI] Ledger send error on payment:', e));
 
     // await logAction(...) commented out
 

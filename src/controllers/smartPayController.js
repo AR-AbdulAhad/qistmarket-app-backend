@@ -1,10 +1,8 @@
 const prisma = require('../../lib/prisma');
 const qrcode = require('qrcode');
 const jwt = require('jsonwebtoken');
-const { sendNextInstallmentReminder, sendCustomerLedger } = require('../services/watiService');
+const { sendNextInstallmentReminder } = require('../services/watiService');
 const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
-const { getNormalizedLedger } = require('../utils/ledgerUtils');
-const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
 const now = () => new Date();
@@ -685,8 +683,6 @@ const notifyPayment = async (req, res) => {
                                 transactionId,
                             }).catch(err => console.error('[SmartPay Webhook] Wati Partial Payment Error:', err));
                         }
-
-                        sendAccountAwarenessForOrder(order.id, phone, { itemName: productName });
                     }
 
                     // --- Create Notification for Outlet ---
@@ -756,17 +752,6 @@ const notifyPayment = async (req, res) => {
                                 ledgerUrl
                             }).catch(err => console.error('[SmartPay Webhook] Wati Reminder Error:', err));
                         }
-
-                        // Send Customer Ledger
-                        const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
-
-                        sendCustomerLedger(phone, {
-                            customerName: order.verification?.purchaser?.name || order.customer_name,
-                            orderRef: order.order_ref,
-                            itemName: productName,
-                            remainingBalance,
-                            ledgerUrl
-                        }).catch(e => console.error('[WATI] Ledger send error on online payment:', e));
                     }
                 }
 

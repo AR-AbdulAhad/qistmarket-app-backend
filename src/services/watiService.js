@@ -752,13 +752,21 @@ const sendQistReceiving = async (phone, {
 };
 
 // ─── Template 19: Partial Payment Confirmation ──────────────────────────────
-// Named body variables (WATI live template `partial_payment`) plus one named
-// *button* variable (Ledger_Link — same dynamic "Complete Ledger" button as
-// qist_receiving). Sent when a ledger row is only PARTIALLY paid — replaces
-// sendPartialInstallmentPaymentReceipt above, same way sendQistReceiving
-// replaced sendInstallmentPaymentReceipt for the full-paid case.
+// Two separate approved WATI templates depending on how the money came in:
+//   - Cash  -> `partial_payment` (WATI_PARTIAL_PAYMENT_V2_TEMPLATE) — shows
+//     who physically received it (Representative_Name/Number).
+//   - Online -> `partial_payment_online` (WATI_PARTIAL_PAYMENT_V3_TEMPLATE) —
+//     no representative fields; shows which online channel it went through
+//     instead (Payment_Channel, e.g. "SmartPay QR - TXN123").
+// Both share one named *button* variable (Ledger_Link — same dynamic
+// "Complete Ledger" button as qist_receiving). Sent when a ledger row is only
+// PARTIALLY paid — replaces sendPartialInstallmentPaymentReceipt above, same
+// way sendQistReceiving replaced sendInstallmentPaymentReceipt for the
+// full-paid case.
 const WATI_PARTIAL_PAYMENT_V2_TEMPLATE = process.env.WATI_PARTIAL_PAYMENT_V2_TEMPLATE || 'partial_payment';
 const WATI_PARTIAL_PAYMENT_V2_BROADCAST = process.env.WATI_PARTIAL_PAYMENT_V2_TEMPLATE || 'partial_payment';
+const WATI_PARTIAL_PAYMENT_V3_TEMPLATE = process.env.WATI_PARTIAL_PAYMENT_V3_TEMPLATE || 'partial_payment_online';
+const WATI_PARTIAL_PAYMENT_V3_BROADCAST = process.env.WATI_PARTIAL_PAYMENT_V3_TEMPLATE || 'partial_payment_online';
 
 const sendPartialPayment = async (phone, {
   customerName,
@@ -777,6 +785,27 @@ const sendPartialPayment = async (phone, {
   dueDate,
   ledgerUrl,
 }) => {
+  const isOnline = /online/i.test(paymentMode || '');
+
+  if (isOnline) {
+    const parameters = [
+      { name: 'Customer_Name', value: customerName || 'Customer' },
+      { name: 'Product_Name', value: productName || 'N/A' },
+      { name: 'Paid_Amount', value: String(paidAmount || 0) },
+      { name: 'Payment_Mode', value: paymentMode || 'N/A' },
+      { name: 'Payment_Date', value: paymentDate || new Date().toLocaleDateString('en-PK') },
+      { name: 'Transaction_ID', value: transactionId || 'N/A' },
+      { name: 'Order_Ref', value: orderRef || 'N/A' },
+      { name: 'Installment_Amount', value: String(installmentAmount ?? 0) },
+      { name: 'Installment_Remaining', value: String(installmentRemaining ?? 0) },
+      { name: 'Remaining_Balance', value: String(remainingBalance ?? 0) },
+      { name: 'Payment_Channel', value: paymentChannel || 'N/A' },
+      { name: 'Due_Date', value: dueDate || 'N/A' },
+      { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
+    ];
+    return sendTemplate(phone, WATI_PARTIAL_PAYMENT_V3_TEMPLATE, WATI_PARTIAL_PAYMENT_V3_BROADCAST, parameters);
+  }
+
   const parameters = [
     { name: 'Customer_Name', value: customerName || 'Customer' },
     { name: 'Product_Name', value: productName || 'N/A' },

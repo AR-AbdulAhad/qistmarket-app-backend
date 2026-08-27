@@ -2,7 +2,6 @@ const prisma = require('../../lib/prisma');
 const { parseTpsAmount, formatTpsAmount, formatTpsAmountPaid } = require('../utils/tpsAmountUtils');
 const { sendNextInstallmentReminder } = require('../services/watiService');
 const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
-const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 
 const now = () => new Date();
@@ -519,8 +518,6 @@ const billPayment = async (req, res) => {
                                 transactionId: tran_auth_id,
                             }).catch(err => console.error('[TPS BillPayment] Wati Partial Payment Error:', err));
                         }
-
-                        sendAccountAwarenessForOrder(order.id, phone, { itemName: productName });
                     }
 
                     // ── Online payment notification — Admin/Super Admin + outlet ──

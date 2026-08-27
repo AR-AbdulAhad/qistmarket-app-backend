@@ -5,9 +5,8 @@ const jwtConfig = require('../config/jwtConfig');
 const bcrypt = require('bcrypt');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { computeMetricsForPeriod } = require('./cashRegisterController');
-const { sendCustomerLedger, sendNextInstallmentReminder, sendItemReturnConfirmation } = require('../services/watiService');
-const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
-const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
+const { sendNextInstallmentReminder, sendItemReturnConfirmation } = require('../services/watiService');
+const { sendQistReceivingForPayment, sendPartialPaymentForRow, getRepresentativeOfficerDetails } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
@@ -17,73 +16,6 @@ const { notifyUser } = require('../utils/notificationUtils');
 const { logLoginAction } = require('../utils/auditLogger');
 
 const now = () => new Date();
-
-const getRepresentativeOfficerDetails = async (user, outletId) => {
-    let name = user?.full_name;
-    let phone = user?.phone;
-
-    if (user?.id) {
-        try {
-            const dbUser = await prisma.user.findUnique({
-                where: { id: parseInt(user.id) },
-                select: {
-                    full_name: true,
-                    phone: true,
-                    employee_profile: { select: { full_name: true, phone: true } }
-                }
-            });
-            if (dbUser) {
-                if (dbUser.full_name && dbUser.full_name.toLowerCase() !== 'testoutlet') {
-                    name = dbUser.full_name;
-                }
-                if (dbUser.phone) phone = dbUser.phone;
-                if (dbUser.employee_profile) {
-                    if (dbUser.employee_profile.full_name) name = dbUser.employee_profile.full_name;
-                    if (dbUser.employee_profile.phone) phone = dbUser.employee_profile.phone;
-                }
-            }
-        } catch (err) {
-            console.error('Error fetching dbUser in getRepresentativeOfficerDetails:', err);
-        }
-    }
-
-    if ((!phone || phone === 'N/A') && outletId) {
-        try {
-            const employee = await prisma.employee.findFirst({
-                where: {
-                    outlet_id: parseInt(outletId),
-                    status: 'active',
-                    phone: { not: null }
-                },
-                select: { full_name: true, phone: true }
-            });
-            if (employee && employee.phone) {
-                if (!name || name.toLowerCase() === 'testoutlet') name = employee.full_name;
-                phone = employee.phone;
-            } else {
-                const branchUser = await prisma.user.findFirst({
-                    where: {
-                        outlet_id: parseInt(outletId),
-                        status: 'active',
-                        phone: { not: null }
-                    },
-                    select: { full_name: true, phone: true }
-                });
-                if (branchUser && branchUser.phone) {
-                    if (!name || name.toLowerCase() === 'testoutlet') name = branchUser.full_name;
-                    phone = branchUser.phone;
-                }
-            }
-        } catch (err) {
-            console.error('Error fetching outlet officer in getRepresentativeOfficerDetails:', err);
-        }
-    }
-
-    return {
-        name: name || 'Outlet Representative',
-        phone: phone || 'N/A'
-    };
-};
 
 const createOutlet = async (req, res) => {
     const { code, name, address } = req.body;
@@ -2119,6 +2051,8 @@ const verifyInstallmentPayment = async (req, res) => {
             targetPhones.push(alternate_number.trim());
         }
 
+        const rep = await getRepresentativeOfficerDetails(req.user, outlet_id);
+
         for (const targetPhone of targetPhones) {
             if (totalPaid >= dueAmount) {
                 sendQistReceivingForPayment(targetPhone, {
@@ -2132,8 +2066,8 @@ const verifyInstallmentPayment = async (req, res) => {
                     paymentMethod: payment_method,
                     paymentDate: new Date().toLocaleDateString('en-PK'),
                     transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
-                    representativeName: req.user?.full_name,
-                    representativeNumber: req.user?.phone,
+                    representativeName: rep.name,
+                    representativeNumber: rep.phone,
                 }).catch(err => console.error('Wati Qist Receiving Error for', targetPhone, ':', err));
             } else {
                 sendPartialPaymentForRow(targetPhone, {
@@ -2147,11 +2081,10 @@ const verifyInstallmentPayment = async (req, res) => {
                     paymentMethod: payment_method,
                     paymentDate: new Date().toLocaleDateString('en-PK'),
                     transactionId: `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`,
-                    representativeName: req.user?.full_name,
-                    representativeNumber: req.user?.phone,
+                    representativeName: rep.name,
+                    representativeNumber: rep.phone,
                 }).catch(err => console.error('Wati Partial Payment Error for', targetPhone, ':', err));
             }
-            sendAccountAwarenessForOrder(order.id, targetPhone, { itemName: finalProductName });
         }
 
         // Send Next Month Reminder if exists — skipped on the full-paid branch
@@ -2167,18 +2100,6 @@ const verifyInstallmentPayment = async (req, res) => {
                 dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
                 ledgerUrl
             }).catch(err => console.error('Wati Reminder Error:', err));
-        }
-
-        // Send Customer Ledger to all target phones
-        const remainingBalance = getNormalizedLedger(rows).summary.grandTotalRemaining;
-        for (const targetPhone of targetPhones) {
-            sendCustomerLedger(targetPhone, {
-                customerName,
-                orderRef: order.order_ref,
-                itemName: finalProductName,
-                remainingBalance,
-                ledgerUrl
-            }).catch(e => console.error('[WATI] Ledger send error on payment:', e));
         }
 
         // ── PayTrigger: push the lock forward / remove it once this month is paid (non-blocking) ──

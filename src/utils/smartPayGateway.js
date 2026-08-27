@@ -24,6 +24,12 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
+      // Without a timeout, a slow/unresponsive gateway hangs this request past
+      // the reverse proxy's own timeout, which returns an HTML 502/504 page —
+      // the frontend then fails to JSON-parse that and shows an opaque generic
+      // error instead of a real message. Failing fast here keeps the response
+      // a proper JSON error well within that window.
+      signal: AbortSignal.timeout(15000),
     });
     const textResp = await tokenReq.text();
     try {
@@ -34,7 +40,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
     }
   } catch (e) {
     console.error('[smartPayGateway] Token fetch error:', e);
-    return { success: false, message: 'Failed to authenticate with Payment Gateway' };
+    return { success: false, message: e.name === 'TimeoutError' ? 'Payment Gateway timed out. Please try again.' : 'Failed to authenticate with Payment Gateway' };
   }
 
   if (tokenResponse?.statusCode !== '200' || !tokenResponse?.dist?.jwtToken) {
@@ -68,6 +74,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
         Authorization: `${jwtToken}`,
       },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000),
     });
     const textResp = await dqrReq.text();
     try {
@@ -78,7 +85,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
     }
   } catch (e) {
     console.error('[smartPayGateway] DQR fetch error:', e);
-    return { success: false, message: 'Failed to generate QR string from Gateway' };
+    return { success: false, message: e.name === 'TimeoutError' ? 'Payment Gateway timed out. Please try again.' : 'Failed to generate QR string from Gateway' };
   }
 
   if (dqrResponse?.statusCode !== '200' || !dqrResponse?.QrString) {

@@ -7,12 +7,97 @@
  * officer, SmartPay, 1LINK TPS) needs the same remaining-balance lookups from
  * the ledger rows.
  */
+const prisma = require('../../lib/prisma');
 const { sendQistReceiving, sendPartialPayment, sendLastInstallment } = require('../services/watiService');
+
+/**
+ * Resolves the "Received By" name/phone shown on Cash payment receipts.
+ * `req.user` from the JWT usually only carries id/role_id/outlet_id — its
+ * own `full_name`/`phone` are frequently blank or a placeholder like the
+ * literal string "testoutlet" (a seeded test account's login name, not a
+ * real person), so this always re-fetches the DB user, prefers the linked
+ * Employee profile's real name/phone, and finally falls back to any active
+ * employee/user at the outlet with a phone on file.
+ */
+const getRepresentativeOfficerDetails = async (user, outletId) => {
+    let name = user?.full_name;
+    let phone = user?.phone;
+
+    if (user?.id) {
+        try {
+            const dbUser = await prisma.user.findUnique({
+                where: { id: parseInt(user.id) },
+                select: {
+                    full_name: true,
+                    phone: true,
+                    employee_profile: { select: { full_name: true, phone: true } }
+                }
+            });
+            if (dbUser) {
+                if (dbUser.full_name && dbUser.full_name.toLowerCase() !== 'testoutlet') {
+                    name = dbUser.full_name;
+                }
+                if (dbUser.phone) phone = dbUser.phone;
+                if (dbUser.employee_profile) {
+                    if (dbUser.employee_profile.full_name) name = dbUser.employee_profile.full_name;
+                    if (dbUser.employee_profile.phone) phone = dbUser.employee_profile.phone;
+                }
+            }
+        } catch (err) {
+            console.error('Error fetching dbUser in getRepresentativeOfficerDetails:', err);
+        }
+    }
+
+    if ((!phone || phone === 'N/A') && outletId) {
+        try {
+            const employee = await prisma.employee.findFirst({
+                where: {
+                    outlet_id: parseInt(outletId),
+                    status: 'active',
+                    phone: { not: null }
+                },
+                select: { full_name: true, phone: true }
+            });
+            if (employee && employee.phone) {
+                if (!name || name.toLowerCase() === 'testoutlet') name = employee.full_name;
+                phone = employee.phone;
+            } else {
+                const branchUser = await prisma.user.findFirst({
+                    where: {
+                        outlet_id: parseInt(outletId),
+                        status: 'active',
+                        phone: { not: null }
+                    },
+                    select: { full_name: true, phone: true }
+                });
+                if (branchUser && branchUser.phone) {
+                    if (!name || name.toLowerCase() === 'testoutlet') name = branchUser.full_name;
+                    phone = branchUser.phone;
+                }
+            }
+        } catch (err) {
+            console.error('Error fetching outlet officer in getRepresentativeOfficerDetails:', err);
+        }
+    }
+
+    return {
+        name: name || 'Outlet Representative',
+        phone: phone || 'N/A'
+    };
+};
 
 // The template always renders both the "Online" and "Cash" lines (WhatsApp
 // templates have no conditionals), so whichever side doesn't apply is filled
 // with 'N/A' by leaving it out here and letting sendQistReceiving default it.
 const derivePaymentMode = (paymentMethod) => (/cash/i.test(paymentMethod || '') ? 'Cash' : 'Online');
+
+// "Through" line on the online receipt: the channel/gateway name plus the
+// transaction ID that went through it, so the customer can see exactly
+// which online payment this receipt matches (e.g. "SmartPay QR - TXN123").
+const deriveOnlineChannel = (channel, method, transactionId) => {
+  const label = channel || method || 'Online';
+  return transactionId ? `${label} - ${transactionId}` : label;
+};
 
 async function sendQistReceivingForPayment(phone, {
   order,
@@ -75,7 +160,7 @@ async function sendQistReceivingForPayment(phone, {
       transactionId,
       orderRef: order.order_ref,
       remainingBalance,
-      paymentChannel: mode === 'Online' ? (paymentChannel || paymentMethod) : null,
+      paymentChannel: mode === 'Online' ? deriveOnlineChannel(paymentChannel, paymentMethod, transactionId) : null,
       representativeName: mode === 'Cash' ? representativeName : null,
       representativeNumber: mode === 'Cash' ? representativeNumber : null,
       nextInstallmentAmount: nextRow.amount || nextRow.dueAmount,
@@ -135,7 +220,7 @@ async function sendPartialPaymentForRow(phone, {
       installmentAmount,
       installmentRemaining,
       remainingBalance,
-      paymentChannel: mode === 'Online' ? (paymentChannel || paymentMethod) : null,
+      paymentChannel: mode === 'Online' ? deriveOnlineChannel(paymentChannel, paymentMethod, transactionId) : null,
       representativeName: mode === 'Cash' ? representativeName : null,
       representativeNumber: mode === 'Cash' ? representativeNumber : null,
       dueDate: dueDateRaw ? new Date(dueDateRaw).toLocaleDateString('en-PK') : null,
@@ -148,4 +233,4 @@ async function sendPartialPaymentForRow(phone, {
   }
 }
 
-module.exports = { sendQistReceivingForPayment, sendPartialPaymentForRow };
+module.exports = { sendQistReceivingForPayment, sendPartialPaymentForRow, getRepresentativeOfficerDetails };
