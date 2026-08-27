@@ -765,6 +765,10 @@ const getCustomerLedger = async (req, res) => {
           },
         },
         installment_ledger: true,
+        archived_deliveries: {
+          orderBy: { archived_at: 'desc' },
+          take: 1,
+        },
         cash_in_hand: {
           take: 1,
           orderBy: { created_at: 'desc' },
@@ -783,7 +787,8 @@ const getCustomerLedger = async (req, res) => {
     }
 
     // ── Pre-fetch Inventory details based on IMEI ──────────────────
-    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+    const archivedDelivery = order.archived_deliveries?.[0] || null;
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || archivedDelivery?.product_imei || order.imei_serial || null;
 
     let invInfo = null;
     if (imeiSerial) {
@@ -794,10 +799,13 @@ const getCustomerLedger = async (req, res) => {
     }
 
     const purchaser = order.verification?.purchaser || null;
-    const ledgerModel = order.installment_ledger || order.delivery?.installment_ledger;
+    // For a returned order, the live ledger was cascade-deleted along with
+    // its Delivery row — the only surviving snapshot is the Json blob
+    // captured on the ArchivedDelivery at return time.
+    const ledgerModel = order.installment_ledger || order.delivery?.installment_ledger || archivedDelivery?.installment_ledger;
     const cashRecord = order.cash_in_hand?.[0] || null;
 
-    let plan = order.delivery?.selected_plan || null;
+    let plan = order.delivery?.selected_plan || archivedDelivery?.selected_plan || null;
     if (typeof plan === 'string') {
       try { plan = JSON.parse(plan); } catch (e) { plan = null; }
     }
