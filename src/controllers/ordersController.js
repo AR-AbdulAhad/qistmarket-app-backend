@@ -73,6 +73,15 @@ async function sendOrderAssignmentNotification(order, user, type, io = null) {
     });
   } catch (fcmError) {
     console.error('FCM send failed:', fcmError);
+    // Token is dead (app uninstalled / reinstalled elsewhere) — clear it so
+    // every future assignment notification for this user doesn't keep
+    // retrying a push that can never succeed.
+    if (fcmError?.code === 'messaging/registration-token-not-registered') {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { fcm_token: null }
+      }).catch(() => {});
+    }
   }
 
 }

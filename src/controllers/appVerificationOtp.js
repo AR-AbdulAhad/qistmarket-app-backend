@@ -10,7 +10,7 @@ const fmt = (n) => Math.round(Number(n) || 0);
 // callers that don't send `order_id` still get the short OTP SMS via
 // otpDispatcher's context-less fallback. Never throws: a lookup failure
 // just means the short SMS gets sent instead of the detailed one.
-const buildOtpContext = async (orderId, phone, isGuarantor) => {
+const buildOtpContext = async (orderId, phone, isGuarantor, typedName) => {
   try {
     const order = await prisma.order.findUnique({
       where: { id: orderId },
@@ -37,10 +37,14 @@ const buildOtpContext = async (orderId, phone, isGuarantor) => {
     };
 
     if (isGuarantor) {
+      // At this point in the flow the guarantor's form hasn't been submitted/
+      // saved yet, so there's usually no GrantorVerification row to match by
+      // phone — fall back to the name the officer just typed in the app
+      // rather than the generic "Guarantor" placeholder.
       const grantor = order.verification?.grantors?.find((g) => g.telephone_number === phone);
       return {
         ...base,
-        guarantorName: grantor?.name || 'Guarantor',
+        guarantorName: grantor?.name || typedName || 'Guarantor',
         price: base.totalInstallmentPrice,
       };
     }
@@ -83,7 +87,7 @@ const sendCode = async (req, res) => {
   try {
     console.log(`[OTP] ${name ? `Guarantor (${name})` : 'Purchaser'} — phone=${phone} order_id=${order_id || 'n/a'} code=${code}`);
 
-    const context = order_id ? await buildOtpContext(parseInt(order_id), phone, Boolean(name)) : null;
+    const context = order_id ? await buildOtpContext(parseInt(order_id), phone, Boolean(name), name) : null;
 
     const result = name
       ? await sendGuarantorOtp(phone, name, code, context)

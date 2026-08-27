@@ -16,16 +16,31 @@ const normalizePhone = (phone) => {
   return p;
 };
 
+// WATI rejects any parameter value containing newlines/tabs or 4+ consecutive
+// spaces ("Sample Content param text cannot have new-line/tab characters or
+// more than 4 consecutive spaces"). Several templates pass through free text
+// a staff member typed (rejection reasons, complaint resolution remarks,
+// analyzer feedback) which can easily contain either, so every parameter is
+// sanitized here — the one place every template send passes through — rather
+// than at each of the ~30 call sites.
+const sanitizeWatiParamValue = (value) => {
+  if (typeof value !== 'string') return value;
+  return value.replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
+};
+
 const sendTemplate = async (phone, templateName, broadcastName, parameters) => {
   try {
     const whatsappNumber = normalizePhone(phone);
     if (!whatsappNumber) return { success: false, error: 'Invalid phone number' };
 
     const url = `${WATI_BASE_URL}/api/v2/sendTemplateMessage`;
+    const sanitizedParameters = Array.isArray(parameters)
+      ? parameters.map((p) => ({ ...p, value: sanitizeWatiParamValue(p.value) }))
+      : parameters;
     const payload = {
       template_name: templateName,
       broadcast_name: broadcastName,
-      parameters,
+      parameters: sanitizedParameters,
     };
 
     const response = await axios.post(url, payload, {
@@ -225,8 +240,8 @@ const sendPartialInstallmentPaymentReceipt = async (phone, {
 
 // ─── Template 4: Next Month Reminder ──────────────────────────────────────
 // Params: customer_name, product_name, monthly_amount, due_date, ledger_url
-const WATI_REMINDER_TEMPLATE = process.env.WATI_INSTALLMENT_REMINDER_TEMPLATE || 'installment_reminder';
-const WATI_REMINDER_BROADCAST = process.env.WATI_INSTALLMENT_REMINDER_TEMPLATE || 'installment_reminder';
+const WATI_REMINDER_TEMPLATE = process.env.WATI_INSTALLMENT_REMINDER_TEMPLATE || 'next_installment_reminder';
+const WATI_REMINDER_BROADCAST = process.env.WATI_INSTALLMENT_REMINDER_TEMPLATE || 'next_installment_reminder';
 
 const sendNextInstallmentReminder = async (phone, {
   customerName,
