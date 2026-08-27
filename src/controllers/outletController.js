@@ -1159,8 +1159,12 @@ const initiateDirectReturn = async (req, res) => {
                 delivery: {
                     include: { delivery_agent: { select: { full_name: true, phone: true } } }
                 },
+                customer: { select: { is_blacklisted: true } },
                 verification: {
-                    include: { purchaser: true }
+                    include: {
+                        purchaser: true,
+                        grantors: { select: { is_blacklisted: true } }
+                    }
                 },
                 cash_in_hand: {
                     take: 1,
@@ -1175,6 +1179,15 @@ const initiateDirectReturn = async (req, res) => {
 
         if (order.outlet_id !== outlet_id) {
             return res.status(403).json({ success: false, error: 'This order does not belong to your outlet.' });
+        }
+
+        const isAlreadyBlacklisted = !!(
+            order.customer?.is_blacklisted ||
+            order.verification?.purchaser?.is_blacklisted ||
+            order.verification?.grantors?.some(g => g.is_blacklisted)
+        );
+        if (isAlreadyBlacklisted) {
+            return res.status(400).json({ success: false, error: 'This customer/account is already blacklisted and cannot be returned via this flow.' });
         }
 
         // Duplicate check: no pending or verified return for this order already

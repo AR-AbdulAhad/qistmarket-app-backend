@@ -486,6 +486,36 @@ const getClearedCustomers = async (req, res) => {
       },
     });
 
+    // Fetch returned orders that were NOT blacklisted on return — these are
+    // also "cleared" (account settled via return rather than full payment),
+    // but their Delivery/InstallmentLedger rows were deleted at return time,
+    // so their ledger snapshot only survives in archived_deliveries.
+    const returnedOrdersRaw = await prisma.order.findMany({
+      where: { status: 'Returned' },
+      include: {
+        customer: { select: { is_blacklisted: true } },
+        verification: {
+          include: {
+            purchaser: true,
+            grantors: true,
+            documents: {
+              orderBy: { uploaded_at: 'desc' },
+            },
+          },
+        },
+        archived_deliveries: {
+          orderBy: { archived_at: 'desc' },
+          take: 1,
+        },
+      },
+    });
+
+    const returnedOrders = returnedOrdersRaw.filter(order => !(
+      order.customer?.is_blacklisted ||
+      order.verification?.purchaser?.is_blacklisted ||
+      order.verification?.grantors?.some(g => g.is_blacklisted)
+    ));
+
     const allImeis = orders
       .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
       .filter(Boolean);
@@ -557,7 +587,9 @@ const getClearedCustomers = async (req, res) => {
             area: order.area,
             profile_photo: profilePhoto,
             is_cleared: true,
+            clear_reason: 'completed',
             created_at: order.created_at,
+            cleared_at: order.updated_at,
           },
           orders: [],
           ledgerSummary: {
@@ -589,6 +621,7 @@ const getClearedCustomers = async (req, res) => {
         order_id: order.id,
         order_ref: order.order_ref,
         status: order.status,
+        clear_reason: 'completed',
         customer_name: order.customer_name,
         verification: order.verification,
         product_details: {
@@ -608,8 +641,93 @@ const getClearedCustomers = async (req, res) => {
       group.ledgerSummary.totalRemaining += grandTotalRemaining;
     }
 
+    // ── Group returned (non-blacklisted) orders — cleared via return ────
+    for (const order of returnedOrders) {
+      const key = `order-${order.id}`;
+
+      const purchaser = order.verification?.purchaser || null;
+      const archivedDelivery = order.archived_deliveries?.[0] || null;
+      const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
+
+      const customerName = purchaser?.name || order.customer_name;
+      const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
+
+      let archivedPlan = archivedDelivery?.selected_plan || null;
+      if (typeof archivedPlan === 'string') {
+        try { archivedPlan = JSON.parse(archivedPlan); } catch (e) { archivedPlan = null; }
+      }
+
+      if (!customerMap.has(key)) {
+        customerMap.set(key, {
+          customer: {
+            name: customerName,
+            father_husband_name: purchaser?.father_husband_name || null,
+            cnic_number: purchaser?.cnic_number || null,
+            whatsapp_number: order.whatsapp_number,
+            telephone_number: telephoneNumber,
+            present_address: purchaser?.present_address || order.address || null,
+            permanent_address: purchaser?.permanent_address || null,
+            nearest_location: purchaser?.nearest_location || null,
+            city: order.city,
+            area: order.area,
+            profile_photo: profilePhoto,
+            is_cleared: true,
+            clear_reason: 'returned',
+            created_at: order.created_at,
+            cleared_at: order.updated_at,
+          },
+          orders: [],
+          ledgerSummary: {
+            totalOrders: 0,
+            totalAdvanceReceived: 0,
+            totalPaid: 0,
+            totalRemaining: 0,
+          },
+        });
+      }
+
+      const group = customerMap.get(key);
+
+      const imeiSerial = archivedDelivery?.product_imei || order.imei_serial || null;
+      const invInfo = imeiSerial ? inventoryMap.get(imeiSerial) : null;
+
+      const productName = invInfo?.product_name || archivedPlan?.productName || order.product_name;
+      const colorVariant = invInfo?.color_variant || archivedPlan?.delivered_color || archivedPlan?.color || null;
+
+      const normalized = getNormalizedLedger(archivedDelivery?.installment_ledger?.ledger_rows);
+      const { advance_payment: advancePayment, installment_ledger: installmentLedger, summary } = normalized;
+
+      const advanceAmount = advancePayment.amount || 0;
+      const grandTotalPaid = summary.grandTotalPaid;
+      const grandTotalRemaining = summary.grandTotalRemaining;
+
+      group.orders.push({
+        order_id: order.id,
+        order_ref: order.order_ref,
+        status: order.status,
+        clear_reason: 'returned',
+        customer_name: order.customer_name,
+        verification: order.verification,
+        product_details: {
+          product_name: productName,
+          imei_serial: imeiSerial,
+          color_variant: colorVariant,
+        },
+        ledger: {
+          summary: summary,
+          installment_ledger: installmentLedger,
+        },
+      });
+
+      group.ledgerSummary.totalOrders += 1;
+      group.ledgerSummary.totalAdvanceReceived += advanceAmount;
+      group.ledgerSummary.totalPaid += grandTotalPaid;
+      group.ledgerSummary.totalRemaining += grandTotalRemaining;
+    }
+
+    // Newest-cleared-first, so a just-processed return/payoff shows at the top
     const allCleared = Array.from(customerMap.values()).sort((a, b) =>
-      a.customer.name.localeCompare(b.customer.name)
+      new Date(b.customer.cleared_at).getTime() - new Date(a.customer.cleared_at).getTime()
     );
 
     return res.status(200).json({
