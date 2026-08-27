@@ -10,7 +10,7 @@ const fmt = (n) => Math.round(Number(n) || 0);
 // callers that don't send `order_id` still get the short OTP SMS via
 // otpDispatcher's context-less fallback. Never throws: a lookup failure
 // just means the short SMS gets sent instead of the detailed one.
-const buildOtpContext = async (orderId, phone, isGuarantor, typedName) => {
+const buildOtpContext = async (orderId, phone, isGuarantor, guarantorTypedName, purchaserTypedName) => {
   try {
     const order = await prisma.order.findUnique({
       where: { id: orderId },
@@ -27,7 +27,14 @@ const buildOtpContext = async (orderId, phone, isGuarantor, typedName) => {
     if (!order) return null;
 
     const base = {
-      customerName: order.customer_name,
+      // The verification flow's Purchaser step lets the officer correct the
+      // name the order was originally booked under, but that correction
+      // isn't saved back to the Order row until later in the flow — so
+      // order.customer_name can still be stale here (e.g. a placeholder name
+      // used at booking time). Prefer whatever the app just sent, which is
+      // used both for the purchaser's own OTP message AND inside every
+      // guarantor's "Aap {customerName} ki purchase ke liye..." line below.
+      customerName: purchaserTypedName || order.customer_name,
       orderNumber: order.order_ref,
       itemNameModel: order.product_name,
       totalInstallmentPrice: fmt(order.total_amount),
@@ -37,26 +44,21 @@ const buildOtpContext = async (orderId, phone, isGuarantor, typedName) => {
     };
 
     if (isGuarantor) {
-      // At this point in the flow the guarantor's form hasn't been submitted/
-      // saved yet, so there's usually no GrantorVerification row to match by
-      // phone — fall back to the name the officer just typed in the app
-      // rather than the generic "Guarantor" placeholder.
+      // Same staleness issue for the guarantor's own name — their form
+      // hasn't been submitted/saved yet, so there's usually no
+      // GrantorVerification row to match by phone — fall back to the name
+      // the officer just typed in the app rather than the generic
+      // "Guarantor" placeholder.
       const grantor = order.verification?.grantors?.find((g) => g.telephone_number === phone);
       return {
         ...base,
-        guarantorName: grantor?.name || typedName || 'Guarantor',
+        guarantorName: grantor?.name || guarantorTypedName || 'Guarantor',
         price: base.totalInstallmentPrice,
       };
     }
 
     return {
       ...base,
-      // Same staleness issue as the guarantor branch above: at this point in
-      // the flow the purchaser step's form (with the name the officer is
-      // right now confirming/correcting) hasn't been saved back to the Order
-      // yet, so order.customer_name can still be whatever placeholder name
-      // the order was originally booked under. Prefer the freshly-typed one.
-      customerName: typedName || base.customerName,
       outletName: order.outlet?.name || 'N/A',
       verificationOfficerName: order.verification?.verification_officer?.full_name,
       verificationOfficerNumber: order.verification?.verification_officer?.phone,
@@ -93,7 +95,7 @@ const sendCode = async (req, res) => {
   try {
     console.log(`[OTP] ${name ? `Guarantor (${name})` : 'Purchaser'} — phone=${phone} order_id=${order_id || 'n/a'} code=${code}`);
 
-    const context = order_id ? await buildOtpContext(parseInt(order_id), phone, Boolean(name), name || purchaser_name) : null;
+    const context = order_id ? await buildOtpContext(parseInt(order_id), phone, Boolean(name), name, purchaser_name) : null;
 
     const result = name
       ? await sendGuarantorOtp(phone, name, code, context)
