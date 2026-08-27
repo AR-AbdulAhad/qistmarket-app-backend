@@ -7,7 +7,7 @@ const { logAction } = require('../utils/auditLogger');
 const watiService = require('../services/watiService');
 const { sendOrderStatusNotification, sendDeliveryOfficerHandover, sendAssignRecoveryOfficer } = watiService;
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
-const { sendOtp: sendOTP, sendGuarantorOtp, isWatiEnabled, isJazzEnabled } = require('../services/otpDispatcher');
+const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const jazzSmsService = require('../services/jazzSmsService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const customerNotify = require('../services/customerNotificationService');
@@ -3702,12 +3702,22 @@ const sendIndividualConvertOTP = async (req, res) => {
   try {
     const otp = await saveOTP(phone, 'convert_sale');
 
+    // Dev convenience: print the OTP straight to the terminal (same
+    // convention as otpDispatcher's logOtpForDev) so it can be typed in
+    // during local testing without waiting on a real Jazz SMS delivery.
+    // Never runs in production.
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[OTP][DEV] ${phone} -> ${otp}`);
+    }
+
+    // Convert Sale OTP always goes out over Jazz SMS, never WhatsApp/WATI —
+    // this is a hard requirement for this flow specifically, independent of
+    // the global WATI_OTP_ENABLED/JAZZ_OTP_ENABLED switches used elsewhere.
     if (type === 'grantor' && name) {
-        await sendGuarantorOtp(phone, name, otp);
+        await jazzSmsService.sendGuarantorOTPSms(phone, name, otp).catch(err => console.error('[ConvertOTP] Jazz guarantor send failed:', err));
     } else {
         // Repeat-purchase (cleared-account) customer OTP — rich Jazz SMS with
-        // item/reference context; WATI keeps the plain bare-OTP template since
-        // no dedicated WATI template exists for this event yet.
+        // item/reference context.
         let orderRef = null;
         if (old_order_id) {
           const oldOrder = await prisma.order.findUnique({
@@ -3717,17 +3727,12 @@ const sendIndividualConvertOTP = async (req, res) => {
           orderRef = oldOrder?.order_ref || null;
         }
 
-        if (isWatiEnabled()) {
-          await watiService.sendOTP(phone, otp).catch(err => console.error('[ConvertOTP] WATI send failed:', err));
-        }
-        if (isJazzEnabled()) {
-          await jazzSmsService.sendRepeatPurchaseOtpSms(phone, {
-            customerName: name,
-            itemNameModel: item_name,
-            orderRef,
-            otp,
-          }).catch(err => console.error('[ConvertOTP] Jazz send failed:', err));
-        }
+        await jazzSmsService.sendRepeatPurchaseOtpSms(phone, {
+          customerName: name,
+          itemNameModel: item_name,
+          orderRef,
+          otp,
+        }).catch(err => console.error('[ConvertOTP] Jazz send failed:', err));
     }
 
     return res.status(200).json({ success: true, message: `OTP sent to ${phone}` });
@@ -3770,7 +3775,8 @@ const createConvertedSale = async (req, res) => {
     orderData,
     purchaserData,
     grantorsData,
-    otpVerified
+    otpVerified,
+    oldOrderId
   } = req.body;
 
   if (!otpVerified) {
@@ -3779,15 +3785,37 @@ const createConvertedSale = async (req, res) => {
 
   try {
     const currentUser = await prisma.user.findUnique({ where: { id: req.user.id } });
-    
+
+    // Look up the ORIGINAL (now-returned/cleared) order this conversion is
+    // based on, so the new sale can be attributed to whoever actually
+    // sourced the customer — a CSR (Sales Officer) if that's who created the
+    // original order, or the person performing the conversion otherwise —
+    // rather than always crediting whoever clicks Authorize.
+    let oldOrder = null;
+    if (oldOrderId) {
+      oldOrder = await prisma.order.findUnique({
+        where: { id: Number(oldOrderId) },
+        select: {
+          outlet_id: true,
+          created_by_user_id: true,
+          created_by: { select: { id: true, role: { select: { name: true } } } }
+        }
+      });
+    }
+    const isCsrOrigin = oldOrder?.created_by?.role?.name === 'Sales Officer';
+    const attributedUserId = isCsrOrigin ? oldOrder.created_by_user_id : req.user.id;
+
     // Generate references
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const randomNum = Math.floor(1000 + Math.random() * 9000);
     const order_ref = `QIST-${dateStr}-${randomNum}`;
     const token_number = crypto.randomBytes(4).toString('hex').toUpperCase();
 
-    // The new order starts as 'completed'
-    const status = 'completed';
+    // The new order starts as 'approved' — OTP verification of the
+    // purchaser and every guarantor already stands in for the normal
+    // 2-approval verification review, so it lands directly in Approved
+    // Orders instead of skipping straight to 'completed'.
+    const status = 'approved';
 
     const newOrder = await prisma.order.create({
       data: {
@@ -3804,7 +3832,7 @@ const createConvertedSale = async (req, res) => {
         street: orderData.street || null,
         house_no: orderData.house_no || null,
         order_notes: 'Repeat Customer Sale',
-        
+
         gender: orderData.gender || null,
         marital_status: orderData.marital_status || null,
         residential_type: orderData.residential_type || null,
@@ -3818,23 +3846,25 @@ const createConvertedSale = async (req, res) => {
         status: status,
         created_at: new Date(),
         updated_at: new Date(),
-        created_by_user_id: req.user.id,
-        outlet_id: orderData.outlet_id || currentUser?.outlet_id || null,
+        created_by_user_id: attributedUserId,
+        outlet_id: oldOrder?.outlet_id || orderData.outlet_id || currentUser?.outlet_id || null,
         is_repeat_customer: true
       }
     });
 
-    // Link customer for ranking
+    // Link customer for repeat-purchase detection. CSR ranking/score credit
+    // is NOT triggered here — it happens automatically later via the normal
+    // logOrderStatusChange -> updateCsrRanking pipeline (keyed off
+    // created_by_user_id above) once the order actually reaches a
+    // ranking-triggering status (delivered/completed/cancelled/expired),
+    // exactly like any other order.
     try {
         await getOrCreateCustomer(newOrder.id);
-        await updateCsrRanking(req.user.id, 'month');
-        await updateCsrRanking(req.user.id, 'today');
     } catch (rankingError) {
-        console.error('Ranking update failed in conversion:', rankingError);
+        console.error('Customer link failed in conversion:', rankingError);
     }
 
     // Fetch old verification to clone documents and locations
-    const { oldOrderId } = req.body;
     let oldVerification = null;
     if (oldOrderId) {
         oldVerification = await prisma.verification.findUnique({
@@ -3902,7 +3932,7 @@ const createConvertedSale = async (req, res) => {
       { old: null, new: 'new' },
       { old: 'new', new: 'pending' },
       { old: 'pending', new: 'in_progress' },
-      { old: 'in_progress', new: 'completed' }
+      { old: 'in_progress', new: 'approved' }
     ];
 
     for (const step of historySteps) {
