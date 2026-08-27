@@ -51,6 +51,12 @@ const buildOtpContext = async (orderId, phone, isGuarantor, typedName) => {
 
     return {
       ...base,
+      // Same staleness issue as the guarantor branch above: at this point in
+      // the flow the purchaser step's form (with the name the officer is
+      // right now confirming/correcting) hasn't been saved back to the Order
+      // yet, so order.customer_name can still be whatever placeholder name
+      // the order was originally booked under. Prefer the freshly-typed one.
+      customerName: typedName || base.customerName,
       outletName: order.outlet?.name || 'N/A',
       verificationOfficerName: order.verification?.verification_officer?.full_name,
       verificationOfficerNumber: order.verification?.verification_officer?.phone,
@@ -68,7 +74,7 @@ const buildOtpContext = async (orderId, phone, isGuarantor, typedName) => {
 // additionally upgrades the Jazz SMS from a short generic OTP to the full,
 // order-detail-rich template — see buildOtpContext above.
 const sendCode = async (req, res) => {
-  const { code, phone, name, order_id } = req.body;
+  const { code, phone, name, order_id, purchaser_name } = req.body;
 
   if (!/^\d{5}$/.test(code)) {
     return res.status(400).json({
@@ -87,7 +93,7 @@ const sendCode = async (req, res) => {
   try {
     console.log(`[OTP] ${name ? `Guarantor (${name})` : 'Purchaser'} — phone=${phone} order_id=${order_id || 'n/a'} code=${code}`);
 
-    const context = order_id ? await buildOtpContext(parseInt(order_id), phone, Boolean(name), name) : null;
+    const context = order_id ? await buildOtpContext(parseInt(order_id), phone, Boolean(name), name || purchaser_name) : null;
 
     const result = name
       ? await sendGuarantorOtp(phone, name, code, context)
