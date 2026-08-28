@@ -939,20 +939,25 @@ async function checkCompanyLicense(req, res) {
     if (!pt.ENABLED()) return res.json({ success: false, message: 'PayTrigger disabled', skipped: true, availableLicenses: 0, isLicenseExceeded: true });
     const result = await pt.checkLicense();
     const data = result?.data || result || {};
-    const totalNum = parseInt(data.totalNum ?? data.totalCount ?? 0) || 0;
-    const usedNum = parseInt(data.usedNum ?? data.usedCount ?? 0) || 0;
-    let unusedNum = parseInt(data.unusedNum ?? data.availableNum ?? data.availableCount ?? (totalNum - usedNum));
+    const totalNum = parseInt(data.totalAmountOfLicense ?? data.totalNum ?? data.totalCount ?? 0) || 0;
+    const usedNum = parseInt(data.amountUsedOfLicense ?? data.usedNum ?? data.usedCount ?? 0) || 0;
+    let unusedNum = parseInt(data.remainingAmountOfLicense ?? data.unusedNum ?? data.availableNum ?? data.availableCount ?? (totalNum - usedNum));
     if (isNaN(unusedNum) || unusedNum < 0) unusedNum = 0;
+
+    const isLicenseExceeded = unusedNum <= 0;
 
     return res.json({
       success: true,
       data: {
         ...data,
+        totalAmountOfLicense: data.totalAmountOfLicense ?? totalNum,
+        remainingAmountOfLicense: data.remainingAmountOfLicense ?? unusedNum,
+        amountUsedOfLicense: data.amountUsedOfLicense ?? usedNum,
         totalNum,
         usedNum,
         unusedNum,
         availableLicenses: unusedNum,
-        isLicenseExceeded: unusedNum <= 0,
+        isLicenseExceeded,
       }
     });
   } catch (error) {

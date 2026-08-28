@@ -28,8 +28,14 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
       // the reverse proxy's own timeout, which returns an HTML 502/504 page —
       // the frontend then fails to JSON-parse that and shows an opaque generic
       // error instead of a real message. Failing fast here keeps the response
-      // a proper JSON error well within that window.
-      signal: AbortSignal.timeout(15000),
+      // a proper JSON error well within that window. Kept well under the
+      // platform's own ~30s proxy timeout even combined with the DQR call
+      // below (worst case 10s + 10s = 20s, leaving headroom for our own
+      // DB/QR-rendering work) — at 15s+15s this used to lose the race against
+      // the proxy, which then drops the connection before we can respond,
+      // surfacing to the browser as a generic "network error" instead of the
+      // real message below.
+      signal: AbortSignal.timeout(10000),
     });
     const textResp = await tokenReq.text();
     try {
@@ -74,7 +80,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
         Authorization: `${jwtToken}`,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(10000),
     });
     const textResp = await dqrReq.text();
     try {
