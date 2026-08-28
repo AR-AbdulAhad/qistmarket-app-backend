@@ -295,6 +295,7 @@ const getRecoveryCustomers = async (req, res) => {
             city: order.city,
             area: order.area,
             profile_photo: profilePhoto,
+            is_blacklisted: purchaser?.is_blacklisted || false,
             grantors: order.verification?.grantors || [],
           },
           orders: [],
@@ -1446,7 +1447,12 @@ const getCustomerFullProfile = async (req, res) => {
             verification_locations: true, // richer, labeled location captures
           },
         },
-        delivery: true,
+        delivery: {
+          include: {
+            delivery_agent: { select: { id: true, full_name: true, phone: true, username: true } },
+            uploads: true,
+          }
+        },
         installment_ledger: true,
         paytrigger_devices: true,
       },
@@ -1545,6 +1551,8 @@ const getCustomerFullProfile = async (req, res) => {
 
     timeline.sort((a, b) => new Date(b.date) - new Date(a.date));
 
+    const deliveryUploads = order.delivery?.uploads || [];
+
     return res.json({
       success: true,
       data: {
@@ -1585,12 +1593,31 @@ const getCustomerFullProfile = async (req, res) => {
             timestamp: l.created_at,
           })),
         ],
+        delivery_info: order.delivery ? {
+          id: order.delivery.id,
+          status: order.delivery.status,
+          delivered_by_name: order.delivery.delivery_agent?.full_name || order.delivery.delivery_agent?.username || null,
+          delivered_by_phone: order.delivery.delivery_agent?.phone || null,
+          delivered_at: order.delivered_at || order.delivery.end_time || order.delivery.updated_at,
+          photos: deliveryUploads.map(u => ({
+            id: u.id,
+            upload_type: u.upload_type,
+            file_url: u.file_url || u.link,
+            link: u.link,
+            tag: u.tag,
+            uploaded_at: u.uploaded_at
+          }))
+        } : null,
         delivery_location: null, // not captured anywhere in the system today
         device: device ? {
           imei: device.imei,
+          is_enrolled: true,
+          enrollment_status: device.enrollment_status || 'enrolled',
           ptp_status: device.ptp_status,
           promised_date: device.promised_date,
-          lock_status: device.lock_status,
+          lock_status: device.lock_status || 'unknown',
+          device_tag: device.device_tag || null,
+          enrolled_at: device.created_at,
         } : null,
         timeline,
       },
@@ -1874,7 +1901,7 @@ const getRecoveryDashboardStats = async (req, res) => {
     const activeRecoveryOrders = await prisma.order.findMany({
       where: {
         recovery_officer_id: userId,
-        status: { in: ['pending', 'in_progress', 'delivered'] },
+        status: { in: ['pending', 'in_progress', 'delivered', 'completed'] },
         is_delivered: true
       },
       include: {
@@ -2091,6 +2118,69 @@ const getRecoveryDashboardStats = async (req, res) => {
       console.error('[Overdue/Defaulter/Blacklist] Error:', classifyError.message);
     }
 
+    // ── CURRENT MONTH PAID: accounts whose current month installment is paid (excluding cleared accounts) ──
+    const currentMonthPaidAccounts = [];
+    const nowPaidDt = new Date();
+    const currentYear = nowPaidDt.getFullYear();
+    const currentMonth = nowPaidDt.getMonth();
+
+    try {
+      activeRecoveryOrders.forEach(order => {
+        if (!order.installment_ledger?.ledger_rows) return;
+
+        let rawRows = order.installment_ledger.ledger_rows;
+        if (typeof rawRows === 'string') rawRows = JSON.parse(rawRows);
+        if (!Array.isArray(rawRows)) return;
+
+        const normalized = getNormalizedLedger(rawRows);
+
+        // Exclude cleared accounts (fully paid off / 0 remaining balance)
+        if (normalized.summary.grandTotalRemaining === 0 || order.status === 'completed') return;
+
+        const installments = normalized.installment_ledger; // array of month > 0 rows
+
+        const customerName = order.verification?.purchaser?.name || order.customer_name || '';
+        const cnicNumber = order.verification?.purchaser?.cnic_number || null;
+        const itemName = getDeliveredProductName(order);
+        const orderRef = order.order_ref || '';
+        const orderId = order.id;
+
+        let paidAmountCurrentMonth = 0;
+        let isPaidThisMonth = false;
+
+        installments.forEach(row => {
+          const d = row.dueDate ? new Date(row.dueDate) : null;
+          const isCurrentMonthDueDate = d && !isNaN(d.getTime()) && d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+
+          if (isCurrentMonthDueDate && (row.status === 'paid' || (row.paidAmount || 0) > 0)) {
+            isPaidThisMonth = true;
+            paidAmountCurrentMonth += (row.paidAmount || 0);
+          }
+        });
+
+        if (isPaidThisMonth) {
+          currentMonthPaidAccounts.push({
+            orderId,
+            orderRef,
+            customerName,
+            cnicNumber,
+            itemName,
+            installmentAmount: paidAmountCurrentMonth,
+            remainingBalance: normalized.summary.totalInstallmentRemaining,
+            totalRemaining: normalized.summary.totalInstallmentRemaining,
+            dueAmount: 0,
+            currentAmount: paidAmountCurrentMonth,
+            whatsappNumber: order.whatsapp_number || order.verification?.purchaser?.telephone_number || '',
+            address: order.address || order.verification?.purchaser?.present_address || '',
+            city: order.city || '',
+            area: order.area || order.verification?.purchaser?.present_area || ''
+          });
+        }
+      });
+    } catch (paidClassifyError) {
+      console.error('[Current Month Paid] Error:', paidClassifyError.message);
+    }
+
     // Target Tracking (variables used in response below)
     const currentMonthStr = `${nowDt.getFullYear()}-${String(nowDt.getMonth() + 1).padStart(2, '0')}`;
     const targetRecord = await prisma.officerTarget.findUnique({
@@ -2157,6 +2247,12 @@ const getRecoveryDashboardStats = async (req, res) => {
         cleared: {
           count: clearedAccounts.length,
           accounts: clearedAccounts
+        },
+        currentMonthPaid: {
+          count: currentMonthPaidAccounts.length,
+          accounts: currentMonthPaidAccounts,
+          dueAmount: currentMonthPaidAccounts.reduce((s, a) => s + (a.installmentAmount || 0), 0),
+          currentAmount: currentMonthPaidAccounts.reduce((s, a) => s + (a.installmentAmount || 0), 0)
         },
         visitStats,
         ptp: ptpStats,

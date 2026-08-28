@@ -45,23 +45,34 @@ const globalSearch = async (req, res) => {
             baseWhere.status = { not: 'delivered' };
         }
 
+        const orderInclude = {
+            verification: {
+                include: {
+                    purchaser: true,
+                    grantors: true,
+                    documents: true,
+                    verification_locations: {
+                        include: { photos: true }
+                    }
+                }
+            },
+            delivery: {
+                include: {
+                    delivery_agent: {
+                        select: { id: true, full_name: true, phone: true, username: true }
+                    },
+                    uploads: true,
+                    paytrigger_devices: true
+                }
+            },
+            paytrigger_devices: true,
+            installment_ledger: true
+        };
+
         // Base search in Orders
         const orders = await prisma.order.findMany({
             where: baseWhere,
-            include: {
-                verification: {
-                    include: {
-                        purchaser: true,
-                        grantors: true,
-                        documents: true,
-                        verification_locations: {
-                            include: { photos: true }
-                        }
-                    }
-                },
-                delivery: true,
-                installment_ledger: true
-            },
+            include: orderInclude,
             take: 100
         });
 
@@ -78,11 +89,7 @@ const globalSearch = async (req, res) => {
                 verification: {
                     include: {
                         order: {
-                            include: {
-                                installment_ledger: true,
-                                delivery: true,
-                                verification: { include: { purchaser: true, grantors: true, documents: true, verification_locations: { include: { photos: true } } } }
-                            }
+                            include: orderInclude
                         }
                     }
                 }
@@ -102,11 +109,7 @@ const globalSearch = async (req, res) => {
                 verification: {
                     include: {
                         order: {
-                            include: {
-                                installment_ledger: true,
-                                delivery: true,
-                                verification: { include: { purchaser: true, grantors: true, documents: true, verification_locations: { include: { photos: true } } } }
-                            }
+                            include: orderInclude
                         }
                     }
                 }
@@ -158,6 +161,45 @@ const globalSearch = async (req, res) => {
                 }
             }
 
+            // Delivery Info
+            let delivery_info = null;
+            if (order.delivery) {
+                const uploads = (order.delivery.uploads || []).map(u => ({
+                    id: u.id,
+                    upload_type: u.upload_type,
+                    file_url: u.file_url || u.link,
+                    link: u.link,
+                    tag: u.tag,
+                    uploaded_at: u.uploaded_at
+                }));
+                delivery_info = {
+                    id: order.delivery.id,
+                    status: order.delivery.status,
+                    delivered_by_name: order.delivery.delivery_agent?.full_name || order.delivery.delivery_agent?.username || null,
+                    delivered_by_phone: order.delivery.delivery_agent?.phone || null,
+                    delivered_at: order.delivered_at || order.delivery.end_time || order.delivery.updated_at,
+                    photos: uploads
+                };
+            }
+
+            // PayTrigger Info
+            let paytrigger_info = null;
+            const ptpDevices = (order.paytrigger_devices && order.paytrigger_devices.length > 0)
+                ? order.paytrigger_devices
+                : (order.delivery?.paytrigger_devices || []);
+            if (ptpDevices.length > 0) {
+                const dev = ptpDevices[0];
+                paytrigger_info = {
+                    is_enrolled: true,
+                    imei: dev.imei,
+                    enrollment_status: dev.enrollment_status,
+                    lock_status: dev.lock_status,
+                    ptp_status: dev.ptp_status,
+                    device_tag: dev.device_tag,
+                    enrolled_at: dev.created_at
+                };
+            }
+
             return {
                 id: order.id,
                 order_ref: order.order_ref,
@@ -171,6 +213,8 @@ const globalSearch = async (req, res) => {
                 address: purchaser?.present_address || order.address,
                 ledger_short_id: order.installment_ledger?.short_id || null,
                 is_ledger_cleared,
+                delivery_info,
+                paytrigger_info,
                 verification: order.verification ? {
                     cnic: purchaser?.cnic_number,
                     purchaser: purchaser,
