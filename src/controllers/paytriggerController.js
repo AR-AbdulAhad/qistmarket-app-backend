@@ -5,6 +5,7 @@ const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones, sendOverdueInstallment, sendGuarantorOverdue } = require('../services/watiService');
 const { completePendingPaytriggerDelivery } = require('../services/deliveryCompletionService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
+const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 
 const now = () => new Date();
 
@@ -299,6 +300,8 @@ async function promiseToPay(req, res) {
 
     const promisedAt = new Date(promised_date);
     if (promisedAt <= now()) return res.status(400).json({ success: false, message: 'Promised date must be in future' });
+    const maxPtpDate = new Date(now().getTime() + 10 * 24 * 60 * 60 * 1000);
+    if (promisedAt > maxPtpDate) return res.status(400).json({ success: false, message: 'Promised date cannot be more than 10 days from today' });
 
     // 1. Temp unlock
     const unlockResult = await pt.tempUnlock({ imei, deviceTag: device.device_tag || '' });
@@ -379,6 +382,58 @@ async function promiseToPay(req, res) {
     return res.json({ success: true, message: 'PTP activated, device temporarily unlocked' });
   } catch (error) {
     console.error('[PayTrigger] promiseToPay error:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+// Cancels a pending PayTrigger enrollment for an order stuck in
+// 'awaiting_paytrigger_enrollment' — removes the pre-enrolled device from
+// PayTrigger, deletes the placeholder Delivery row (which otherwise blocks
+// re-submission), and moves the order back to 'approved' so the outlet can
+// retry delivery from the Approved Order List.
+async function cancelPendingEnrollment(req, res) {
+  try {
+    const { order_id } = req.params;
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(order_id) },
+      include: { delivery: true },
+    });
+
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.status !== 'awaiting_paytrigger_enrollment') {
+      return res.status(400).json({ success: false, message: 'Order is not awaiting PayTrigger enrollment' });
+    }
+
+    const delivery = order.delivery;
+    const imei = delivery?.product_imei;
+
+    if (imei && pt.ENABLED()) {
+      try {
+        await pt.unenroll(imei);
+      } catch (e) {
+        console.error(`[PayTrigger] unenroll during cancel failed for ${imei} (continuing):`, e.message);
+      }
+      // Device row references the placeholder delivery — clear it first so
+      // the delivery row below can be deleted without a foreign-key error.
+      await prisma.payTriggerDevice.deleteMany({ where: { imei } }).catch(() => {});
+    }
+
+    if (delivery) {
+      await prisma.deliveryUpload.deleteMany({ where: { delivery_id: delivery.id } }).catch(() => {});
+      await prisma.delivery.delete({ where: { id: delivery.id } }).catch(() => {});
+    }
+
+    await prisma.order.update({
+      where: { id: order.id },
+      data: { status: 'approved', updated_at: now() },
+    });
+
+    await logOrderStatusChange(order.id, order.status, 'approved', req.user, 'PayTrigger enrollment cancelled by outlet — moved back to Approved');
+    await logAction(req, 'PAYTRIGGER_CANCEL_ENROLLMENT', `PayTrigger enrollment cancelled for order ${order.order_ref}, reverted to Approved`, order.id, 'Order');
+
+    return res.json({ success: true, message: 'Enrollment cancelled. Order moved back to Approved.' });
+  } catch (error) {
+    console.error('[PayTrigger] cancelPendingEnrollment error:', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 }
@@ -935,6 +990,7 @@ module.exports = {
   manualLock,
   manualUnlock,
   promiseToPay,
+  cancelPendingEnrollment,
   handleCallback,
   listDevices,
   getDeviceSummary,

@@ -8,6 +8,7 @@ const {
   manualLock,
   manualUnlock,
   promiseToPay,
+  cancelPendingEnrollment,
   handleCallback,
   listDevices,
   getDeviceSummary,
@@ -36,6 +37,7 @@ router.post('/paytrigger/device/:imei/sync', authenticateJWT, syncDeviceStatus);
 router.post('/paytrigger/device/:imei/lock', authenticateJWT, manualLock);
 router.post('/paytrigger/device/:imei/unlock', authenticateJWT, manualUnlock);
 router.post('/paytrigger/device/:imei/ptp', authenticateJWT, promiseToPay);
+router.post('/paytrigger/order/:order_id/cancel-enrollment', authenticateJWT, cancelPendingEnrollment);
 router.post('/paytrigger/device/:imei/unenroll', authenticateJWT, unenrollDevice);
 router.post('/paytrigger/device/:imei/temp-unlock', authenticateJWT, tempUnlockDevice);
 router.post('/paytrigger/device/:imei/set-rule', authenticateJWT, setDeviceRule);

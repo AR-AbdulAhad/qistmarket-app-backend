@@ -657,12 +657,40 @@ const getCashRegisterHistory = async (req, res) => {
     const { outlet_id } = req.user;
     if (!outlet_id) return res.status(403).json({ success: false, message: 'Not an outlet user.' });
 
+    const { filter = 'today', startDate, endDate } = req.query;
+
     try {
+        // Same date-range convention as getCashRegister above, so the
+        // Transaction History list always matches whatever range the Master
+        // Ledger Cards filter bar is currently set to, instead of always
+        // showing every transaction ever recorded.
+        let start = new Date();
+        start.setHours(0, 0, 0, 0);
+        let end = new Date();
+        end.setHours(23, 59, 59, 999);
+
+        if (filter === 'week') {
+            start = new Date();
+            start.setDate(start.getDate() - 7);
+            start.setHours(0, 0, 0, 0);
+        } else if (filter === 'month') {
+            start = new Date();
+            start.setDate(1);
+            start.setHours(0, 0, 0, 0);
+        } else if (filter === 'custom' && startDate && endDate) {
+            start = new Date(startDate);
+            start.setHours(0, 0, 0, 0);
+            end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+        }
+        const dateFilter = { gte: start, lte: end };
+
         // ── Down Payments (Cash channel only) ──────────────────────────
         const downPaymentOrders = await prisma.order.findMany({
             where: {
                 outlet_id,
                 advance_amount: { gt: 0 },
+                created_at: dateFilter,
             },
             select: { id: true, order_ref: true, customer_name: true, advance_amount: true, channel: true, created_at: true },
             orderBy: { created_at: 'desc' },
@@ -685,7 +713,8 @@ const getCashRegisterHistory = async (req, res) => {
         const installmentPayments = await prisma.orderPayment.findMany({
             where: {
                 paymentType: 'installment',
-                order: { outlet_id }
+                order: { outlet_id },
+                paidAt: dateFilter
             },
             select: {
                 id: true, amount: true, paymentMethod: true, paidAt: true, monthNumber: true,
@@ -709,7 +738,7 @@ const getCashRegisterHistory = async (req, res) => {
 
         // ── Cash from Recovery / Delivery Officers ─────────────────────
         const verifiedSubmissions = await prisma.cashSubmissionHistory.findMany({
-            where: { outlet_id, status: 'paid' },
+            where: { outlet_id, status: 'paid', submission_date: dateFilter },
             include: {
                 cash_in_hand: {
                     include: { officer: { select: { full_name: true, username: true, role_id: true, role: { select: { name: true } } } } }
@@ -745,7 +774,7 @@ const getCashRegisterHistory = async (req, res) => {
 
         if (usingFallback) {
             const cashInHandRecords = await prisma.cashInHand.findMany({
-                where: { outlet_id, status: { in: ['paid', 'accepted', 'approved', 'submitted', 'completed'] } },
+                where: { outlet_id, status: { in: ['paid', 'accepted', 'approved', 'submitted', 'completed'] }, updated_at: dateFilter },
                 include: { officer: { select: { full_name: true, username: true, role_id: true, role: { select: { name: true } } } } },
                 orderBy: { updated_at: 'desc' },
                 take: MAX_HISTORY_PER_CATEGORY
@@ -767,7 +796,7 @@ const getCashRegisterHistory = async (req, res) => {
 
         // ── Expenses ────────────────────────────────────────────────────
         const expenseVouchers = await prisma.expenseVoucher.findMany({
-            where: { outlet_id, status: { in: ['approved', 'paid'] } },
+            where: { outlet_id, status: { in: ['approved', 'paid'] }, created_at: dateFilter },
             select: {
                 id: true, voucher_number: true, total_amount: true, payment_method: true, notes: true, created_at: true,
                 items: { select: { category: true } }
@@ -793,13 +822,13 @@ const getCashRegisterHistory = async (req, res) => {
 
         // ── Vendor Payments (out): VendorPayment + debit VendorCashTransaction ──
         const vendorPaymentsRaw = await prisma.vendorPayment.findMany({
-            where: { outlet_id },
+            where: { outlet_id, created_at: dateFilter },
             select: { id: true, amount: true, payment_method: true, vendor_name: true, created_at: true },
             orderBy: { created_at: 'desc' },
             take: MAX_HISTORY_PER_CATEGORY
         });
         const vendorCashTransactions = await prisma.vendorCashTransaction.findMany({
-            where: { vendor: { outlet_id } },
+            where: { vendor: { outlet_id }, created_at: dateFilter },
             select: { id: true, type: true, amount: true, description: true, created_at: true, vendor: { select: { name: true } } },
             orderBy: { created_at: 'desc' },
             take: MAX_HISTORY_PER_CATEGORY
@@ -842,7 +871,7 @@ const getCashRegisterHistory = async (req, res) => {
 
         // ── Cash Sale (walk-in outright sales against outlet stock) ────
         const cashSaleRecords = await prisma.cashSale.findMany({
-            where: { outlet_id },
+            where: { outlet_id, created_at: dateFilter },
             select: { id: true, product_name: true, imei_serial: true, customer_name: true, final_price: true, created_at: true },
             orderBy: { created_at: 'desc' },
             take: MAX_HISTORY_PER_CATEGORY

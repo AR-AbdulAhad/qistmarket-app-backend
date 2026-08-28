@@ -1,6 +1,21 @@
 const prisma = require('../../lib/prisma');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 
+// CNIC is stored dashed (12345-1234567-1). Let users search with or without
+// dashes by re-inserting them into a digits-only query before matching.
+const toDashedCnic = (digitsOnly) => {
+    if (digitsOnly.length <= 5) return digitsOnly;
+    if (digitsOnly.length <= 12) return `${digitsOnly.slice(0, 5)}-${digitsOnly.slice(5)}`;
+    return `${digitsOnly.slice(0, 5)}-${digitsOnly.slice(5, 12)}-${digitsOnly.slice(12, 13)}`;
+};
+
+const getCnicQueryVariants = (query) => {
+    const digitsOnly = query.replace(/\D/g, '');
+    if (digitsOnly.length < 5) return [query];
+    const dashed = toDashedCnic(digitsOnly);
+    return dashed === query ? [query] : [query, dashed];
+};
+
 const globalSearch = async (req, res) => {
     const { query, type = 'all' } = req.query;
     if (!query || query.length < 3) {
@@ -8,6 +23,7 @@ const globalSearch = async (req, res) => {
     }
 
     try {
+        const cnicVariants = getCnicQueryVariants(query);
         const baseWhere = {
             OR: [
                 { order_ref: { contains: query } },
@@ -17,7 +33,7 @@ const globalSearch = async (req, res) => {
                 { imei_serial: { contains: query } },
                 { address: { contains: query } },
                 { verification: { purchaser: { name: { contains: query } } } },
-                { verification: { purchaser: { cnic_number: { contains: query } } } },
+                ...cnicVariants.map(v => ({ verification: { purchaser: { cnic_number: { contains: v } } } })),
                 { verification: { purchaser: { telephone_number: { contains: query } } } },
                 { delivery: { product_imei: { contains: query } } },
             ]
@@ -54,7 +70,7 @@ const globalSearch = async (req, res) => {
             where: {
                 OR: [
                     { name: { contains: query } },
-                    { cnic_number: { contains: query } },
+                    ...cnicVariants.map(v => ({ cnic_number: { contains: v } })),
                     { telephone_number: { contains: query } }
                 ]
             },
@@ -78,7 +94,7 @@ const globalSearch = async (req, res) => {
             where: {
                 OR: [
                     { name: { contains: query } },
-                    { cnic_number: { contains: query } },
+                    ...cnicVariants.map(v => ({ cnic_number: { contains: v } })),
                     { telephone_number: { contains: query } }
                 ]
             },

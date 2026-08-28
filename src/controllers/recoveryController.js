@@ -582,33 +582,54 @@ const submitBranchPayment = async (req, res) => {
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
+    // Sequential collection only — see submitInstallment above for the same rule.
+    const firstUnpaidIdx = rows.findIndex(r => (r.month ?? r.monthNumber ?? -1) > 0 && r.status !== 'paid');
+    if (firstUnpaidIdx !== -1 && firstUnpaidIdx !== rowIndex) {
+      const blockingRow = rows[firstUnpaidIdx];
+      return res.status(400).json({ success: false, message: `Please collect Month ${blockingRow.month ?? blockingRow.monthNumber} first before this installment.` });
+    }
+
     const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
     const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
     const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
-    const totalPaid = existingPaid + payingNow;
-
-    if (totalPaid > dueAmount + 1) {
-      return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
-    }
 
     const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
     const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
 
-    await prisma.$transaction(async (tx) => {
-      rows[rowIndex].paid_amount = totalPaid;
-      rows[rowIndex].paid_at = now();
-      rows[rowIndex].payment_method = payment_method;
-      rows[rowIndex].feedback = feedback || 'Branch payment';
-      rows[rowIndex].collected_by = officerId;
-      rows[rowIndex].collection_source = 'recovery_officer';
+    // Overpayment cascades forward into the next unpaid month(s) — see
+    // submitInstallment above for the full rationale.
+    let remainingToApply = payingNow;
+    let cascadeIdx = rowIndex;
+    while (remainingToApply > 0.01 && cascadeIdx < rows.length) {
+      const row = rows[cascadeIdx];
+      if ((row.month ?? row.monthNumber ?? -1) <= 0 || row.status === 'paid') { cascadeIdx++; continue; }
 
-      if (totalPaid >= dueAmount) {
-        rows[rowIndex].status = 'paid';
-      } else if (totalPaid > 0) {
-        rows[rowIndex].status = 'partial';
-      } else {
-        rows[rowIndex].status = 'pending';
-      }
+      const rowDue = parseFloat(row.amount || row.dueAmount || 0);
+      const rowExistingPaid = parseFloat(row.paid_amount || 0);
+      const rowRemaining = Math.max(0, rowDue - rowExistingPaid);
+      const applyAmt = Math.min(remainingToApply, rowRemaining);
+      const rowNewTotal = rowExistingPaid + applyAmt;
+
+      row.paid_amount = rowNewTotal;
+      row.paid_at = now();
+      row.payment_method = payment_method;
+      row.feedback = feedback || 'Branch payment';
+      row.collected_by = officerId;
+      row.collection_source = 'recovery_officer';
+      row.status = rowNewTotal >= rowDue ? 'paid' : rowNewTotal > 0 ? 'partial' : 'pending';
+
+      remainingToApply -= applyAmt;
+      cascadeIdx++;
+    }
+
+    if (remainingToApply > 1) {
+      return res.status(400).json({ success: false, message: `Payment exceeds total remaining balance by PKR ${Math.round(remainingToApply).toLocaleString()}.` });
+    }
+
+    const totalPaid = rows[rowIndex].paid_amount;
+
+    await prisma.$transaction(async (tx) => {
+      // rows[] status/paid_amount already fully set by the cascade loop above
 
       await tx.installmentLedger.update({
         where: { id: ledger.id },
@@ -1129,37 +1150,60 @@ const submitInstallment = async (req, res) => {
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
+    // Sequential collection only: months must be paid in order — you can't
+    // pay Month 3 while Month 1/2 still has an outstanding balance. Month 0
+    // (advance) is excluded from this ordering, it's tracked separately.
+    const firstUnpaidIdx = rows.findIndex(r => (r.month ?? r.monthNumber ?? -1) > 0 && r.status !== 'paid');
+    if (firstUnpaidIdx !== -1 && firstUnpaidIdx !== rowIndex) {
+      const blockingRow = rows[firstUnpaidIdx];
+      return res.status(400).json({ success: false, message: `Please collect Month ${blockingRow.month ?? blockingRow.monthNumber} first before this installment.` });
+    }
+
     const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
     const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
     const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
-    const totalPaid = existingPaid + payingNow;
-
-    if (totalPaid > dueAmount + 1) { // 1 PKR margin for rounding
-      return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
-    }
 
     const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
     const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
     const parsedPromisedDate = promised_date ? new Date(promised_date) : null;
 
+    // Overpayment cascades forward: any amount beyond what's owed on this row
+    // automatically settles the next unpaid month(s) instead of being
+    // rejected outright — only reject if it exceeds the entire remaining loan
+    // balance. Computed before the transaction since it's pure in-memory math.
+    let remainingToApply = payingNow;
+    let cascadeIdx = rowIndex;
+    while (remainingToApply > 0.01 && cascadeIdx < rows.length) {
+      const row = rows[cascadeIdx];
+      if ((row.month ?? row.monthNumber ?? -1) <= 0 || row.status === 'paid') { cascadeIdx++; continue; }
+
+      const rowDue = parseFloat(row.amount || row.dueAmount || 0);
+      const rowExistingPaid = parseFloat(row.paid_amount || 0);
+      const rowRemaining = Math.max(0, rowDue - rowExistingPaid);
+      const applyAmt = Math.min(remainingToApply, rowRemaining);
+      const rowNewTotal = rowExistingPaid + applyAmt;
+
+      row.paid_amount = rowNewTotal;
+      row.paid_at = now();
+      row.payment_method = payment_method;
+      row.feedback = feedback;
+      row.collected_by = officerId;
+      row.collection_source = 'recovery_officer';
+      row.fuel_charges = parseFloat(fuelCharges || 0);
+      row.status = rowNewTotal >= rowDue ? 'paid' : rowNewTotal > 0 ? 'partial' : 'pending';
+
+      remainingToApply -= applyAmt;
+      cascadeIdx++;
+    }
+
+    if (remainingToApply > 1) {
+      return res.status(400).json({ success: false, message: `Payment exceeds total remaining balance by PKR ${Math.round(remainingToApply).toLocaleString()}.` });
+    }
+
+    const totalPaid = rows[rowIndex].paid_amount;
+
     // DB Transaction
     await prisma.$transaction(async (tx) => {
-      rows[rowIndex].paid_amount = totalPaid;
-      rows[rowIndex].paid_at = now();
-      rows[rowIndex].payment_method = payment_method;
-      rows[rowIndex].feedback = feedback;
-      rows[rowIndex].collected_by = officerId;
-      rows[rowIndex].collection_source = 'recovery_officer';
-      rows[rowIndex].fuel_charges = parseFloat(fuelCharges || 0);
-
-      if (totalPaid >= dueAmount) {
-        rows[rowIndex].status = 'paid';
-      } else if (totalPaid > 0) {
-        rows[rowIndex].status = 'partial';
-      } else {
-        rows[rowIndex].status = 'pending';
-      }
-
       await tx.installmentLedger.update({
         where: { id: ledger.id },
         data: {

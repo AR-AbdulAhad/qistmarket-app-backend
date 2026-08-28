@@ -462,6 +462,19 @@ const getDashboardStats = async (req, res) => {
         const thisMonthDaily = await getDailyStats(thisMonthStart, now);
         const lastMonthDaily = await getDailyStats(lastMonthStart, lastMonthEnd);
 
+        // ─── Stock Snapshot (live, not period-scoped) ───────────────────────
+        // Exact same convention as the "Stock List" page's own stats card
+        // (inventoryController.js getInventory) so the numbers shown here
+        // always match what "Inventory" shows — is_used: false is required
+        // here too, otherwise Used Stock items (a separate bucket, tracked
+        // on its own "Used Stock" page) get double-counted into this figure.
+        const [stockTotal, stockInStock, stockSold, stockDistinctProducts] = await Promise.all([
+            prisma.outletInventory.count({ where: { outlet_id, is_used: false, status: { not: 'Used Stock' } } }),
+            prisma.outletInventory.count({ where: { outlet_id, is_used: false, status: 'In Stock' } }),
+            prisma.outletInventory.count({ where: { outlet_id, is_used: false, status: 'Sold' } }),
+            prisma.outletInventory.groupBy({ by: ['product_name'], where: { outlet_id, is_used: false, status: 'In Stock' } }).then(rows => rows.length)
+        ]);
+
         const graphData = {
             days: Array.from({ length: 31 }, (_, i) => i + 1),
             sales: {
@@ -512,6 +525,12 @@ const getDashboardStats = async (req, res) => {
                     ordersWithPendingInstallments
                 },
                 financials: financialsSnapshot,
+                stock: {
+                    totalItems: stockTotal,
+                    inStock: stockInStock,
+                    sold: stockSold,
+                    distinctProducts: stockDistinctProducts
+                },
                 todayIncrement,
                 graphData
             }
@@ -1962,47 +1981,68 @@ const verifyInstallmentPayment = async (req, res) => {
         if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
         if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
+        // Sequential collection only: months must be paid in order — you can't
+        // pay Month 3 while Month 1/2 still has an outstanding balance. Month 0
+        // (advance) is excluded from this ordering, it's tracked separately.
+        const firstUnpaidIdx = rows.findIndex(r => (r.month ?? r.monthNumber ?? -1) > 0 && r.status !== 'paid');
+        if (firstUnpaidIdx !== -1 && firstUnpaidIdx !== rowIndex) {
+            const blockingRow = rows[firstUnpaidIdx];
+            return res.status(400).json({ success: false, message: `Please collect Month ${blockingRow.month ?? blockingRow.monthNumber} first before this installment.` });
+        }
+
         // Update row details
         const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
         const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
         const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
-        const totalPaid = existingPaid + payingNow;
 
-        if (totalPaid > dueAmount + 1) {
-            return res.status(400).json({ success: false, message: `Payment exceeds due amount. Remaining is ${dueAmount - existingPaid}` });
-        }
+        // Overpayment cascades forward: any amount beyond what's owed on this
+        // row automatically settles the next unpaid month(s) instead of being
+        // rejected outright — only reject if it exceeds the entire remaining
+        // loan balance.
+        let remainingToApply = payingNow;
+        let cascadeIdx = rowIndex;
+        while (remainingToApply > 0.01 && cascadeIdx < rows.length) {
+            const row = rows[cascadeIdx];
+            if ((row.month ?? row.monthNumber ?? -1) <= 0 || row.status === 'paid') { cascadeIdx++; continue; }
 
-        if (!rows[rowIndex].payment_history) {
-            rows[rowIndex].payment_history = [];
-            if (existingPaid > 0) {
-                rows[rowIndex].payment_history.push({
-                    amount: existingPaid,
-                    date: rows[rowIndex].paid_at || new Date(),
-                    method: rows[rowIndex].payment_method || 'Cash'
-                });
+            const rowDue = parseFloat(row.amount || row.dueAmount || 0);
+            const rowExistingPaid = parseFloat(row.paid_amount || 0);
+            const rowRemaining = Math.max(0, rowDue - rowExistingPaid);
+            const applyAmt = Math.min(remainingToApply, rowRemaining);
+            const rowNewTotal = rowExistingPaid + applyAmt;
+
+            if (!row.payment_history) {
+                row.payment_history = [];
+                if (rowExistingPaid > 0) {
+                    row.payment_history.push({
+                        amount: rowExistingPaid,
+                        date: row.paid_at || new Date(),
+                        method: row.payment_method || 'Cash'
+                    });
+                }
             }
-        }
-        rows[rowIndex].payment_history.push({
-            amount: payingNow,
-            date: now(),
-            method: payment_method
-        });
+            if (applyAmt > 0) {
+                row.payment_history.push({ amount: applyAmt, date: now(), method: payment_method });
+            }
 
-        rows[rowIndex].paid_amount = totalPaid;
-        rows[rowIndex].paid_at = now();
-        rows[rowIndex].payment_method = payment_method;
-        rows[rowIndex].feedback = feedback;
-        rows[rowIndex].collected_by = req.user.id;
-        rows[rowIndex].collected_by_outlet_id = outlet_id;
-        rows[rowIndex].collection_source = 'outlet';
+            row.paid_amount = rowNewTotal;
+            row.paid_at = now();
+            row.payment_method = payment_method;
+            row.feedback = feedback;
+            row.collected_by = req.user.id;
+            row.collected_by_outlet_id = outlet_id;
+            row.collection_source = 'outlet';
+            row.status = rowNewTotal >= rowDue ? 'paid' : rowNewTotal > 0 ? 'partial' : 'pending';
 
-        if (totalPaid >= dueAmount) {
-            rows[rowIndex].status = 'paid';
-        } else if (totalPaid > 0) {
-            rows[rowIndex].status = 'partial';
-        } else {
-            rows[rowIndex].status = 'pending';
+            remainingToApply -= applyAmt;
+            cascadeIdx++;
         }
+
+        if (remainingToApply > 1) {
+            return res.status(400).json({ success: false, message: `Payment exceeds total remaining balance by PKR ${Math.round(remainingToApply).toLocaleString()}.` });
+        }
+
+        const totalPaid = rows[rowIndex].paid_amount;
 
         // Save Ledger with updated_at
         await prisma.installmentLedger.update({
