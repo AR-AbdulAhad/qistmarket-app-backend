@@ -202,13 +202,32 @@ const getSalesReport = async (req, res) => {
             };
         });
 
+        // "Total Amount Received" must reflect cash actually collected WITHIN
+        // the selected date range, not just paid-ever across each order's
+        // whole ledger history. Filter each paid row by its own paid_at,
+        // mirroring the convention already used in getDaybook above.
+        const rangeStart = startDate ? new Date(startDate) : null;
+        let rangeEnd = null;
+        if (endDate) {
+            rangeEnd = new Date(endDate);
+            rangeEnd.setHours(23, 59, 59, 999);
+        }
+
         const summary = {
             totalOrders: orders.length,
             totalGrossAmount: orders.reduce((acc, o) => acc + o.total_amount, 0),
             totalDownPaymentsReceived: ordersWithDownPayment.reduce((acc, o) => acc + o.down_payment_amount, 0),
             totalReceived: orders.reduce((acc, o) => {
                 const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
-                return acc + rows.filter(r => r.status === 'paid').reduce((pAcc, p) => pAcc + (p.amount || 0), 0);
+                return acc + rows.filter(r => {
+                    if (r.status !== 'paid') return false;
+                    if (!rangeStart && !rangeEnd) return true;
+                    if (!r.paid_at) return false;
+                    const paidDate = new Date(r.paid_at);
+                    if (rangeStart && paidDate < rangeStart) return false;
+                    if (rangeEnd && paidDate > rangeEnd) return false;
+                    return true;
+                }).reduce((pAcc, p) => pAcc + (p.amount || 0), 0);
             }, 0)
         };
 
