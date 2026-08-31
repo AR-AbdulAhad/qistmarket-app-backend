@@ -49,16 +49,22 @@ const SMARTPAY_PREFIX = '6500';
 
 /**
  * Generate a unique SmartPay consumer number.
- * 
+ *
  * Rules:
- * PRIORITY 1: IMEI/Serial. Use last 6 digits. If conflict, append '9'.
- * PRIORITY 2: Mobile. Use last 6 digits. If conflict, append '8'.
+ * PRIORITY 1: IMEI/Serial. Use last 4 digits. If conflict, append '9'.
+ * PRIORITY 2: Mobile. Use last 4 digits. If conflict, append '8'.
+ *
+ * Must total 8 digits ("6500" + 4) to match the format SmartPay actually
+ * accepts — confirmed against smartPayController.generateSmartPayQr's proven
+ * live "6500" + 4-digit order id pattern. A previous 10-digit version
+ * ("6500" + 6 digits) was rejected by SmartPay's DQR API on every call with
+ * {"statusCode":"401","statusMessage":"Failed: 01-Invalid bill data)"}.
  */
 async function generateSmartPayConsumerNumber(imei, mobile) {
     let source = '';
     let conflictDigit = '';
 
-    if (imei && typeof imei === 'string' && imei.replace(/\D/g, '').length >= 6) {
+    if (imei && typeof imei === 'string' && imei.replace(/\D/g, '').length >= 4) {
         source = imei.replace(/\D/g, '');
         conflictDigit = '0';
     } else if (mobile && typeof mobile === 'string') {
@@ -70,8 +76,8 @@ async function generateSmartPayConsumerNumber(imei, mobile) {
         conflictDigit = '0';
     }
 
-    // Take the last 6 digits (SmartPay might prefer 8, let's keep it 6 to match TPS logic, making it 10 digits total)
-    let suffix = source.slice(-6).padStart(6, '0');
+    // Take the last 4 digits — matches SmartPay's accepted 8-digit total format.
+    let suffix = source.slice(-4).padStart(4, '0');
     let candidate = SMARTPAY_PREFIX + suffix;
 
     // Check uniqueness in consumer_numbers table
