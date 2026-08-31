@@ -114,7 +114,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
 
   if (dqrResponse?.statusCode !== '200' || !dqrResponse?.QrString) {
     console.error('[smartPayGateway] DQR rejected — full response:', JSON.stringify(dqrResponse));
-    const gatewayReason = dqrResponse?.message || dqrResponse?.Message || dqrResponse?.error || dqrResponse?.statusDesc;
+    const gatewayReason = dqrResponse?.statusMessage || dqrResponse?.message || dqrResponse?.Message || dqrResponse?.error || dqrResponse?.statusDesc;
     return { success: false, message: gatewayReason ? `Payment Gateway: ${gatewayReason}` : 'Gateway refused to map the QR payload' };
   }
 

@@ -556,7 +556,12 @@ const submitBankDeposit = async (req, res) => {
                             cash_submission_ref: beforeRow.cash_submission_ref
                         }
                     });
-                    return res.status(502).json({ success: false, message: dqr.message || 'Failed to generate QR code.' });
+                    // Intentionally HTTP 200 (not 502) — a non-2xx status from this
+                    // specific endpoint was observed being swallowed by the hosting
+                    // proxy in front of this app, reaching the browser as a raw
+                    // "network error" with the real message lost. success:false in
+                    // the body still signals failure correctly to the frontend.
+                    return res.status(200).json({ success: false, message: dqr.message || 'Failed to generate QR code.' });
                 }
                 qrImageBase64 = dqr.qrImageBase64;
             }
