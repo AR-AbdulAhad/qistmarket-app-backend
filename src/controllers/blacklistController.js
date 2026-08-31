@@ -95,8 +95,11 @@ const setBlacklistStatus = async (req, res) => {
         if (!cnic || !['blacklist', 'whitelist'].includes(action)) {
             return res.status(400).json({ success: false, message: 'cnic and a valid action (blacklist/whitelist) are required.' });
         }
-        if (action === 'blacklist' && !reason?.trim()) {
-            return res.status(400).json({ success: false, message: 'Please provide a reason for blacklisting the customer.' });
+        if (!reason?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: `Please provide a reason for ${action === 'whitelist' ? 'whitelisting' : 'blacklisting'} the customer.`,
+            });
         }
 
         const cleanCnic = cnic.trim();

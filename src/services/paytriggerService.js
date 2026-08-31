@@ -257,16 +257,16 @@ function fuzzyBrandMatch(productName, brand) {
   if (!normalized || !normalizedBrand) return false;
   if (normalized.includes(normalizedBrand)) return true;
 
+  // Word-level typo tolerance only (e.g. "Infinx" ~ "Infinix"). Deliberately
+  // does NOT slide a fixed-width window across the whole string — that used
+  // to compare arbitrary cross-word substrings (e.g. "nite" out of "united")
+  // against the brand name, which let unrelated brands like "United Mobile"
+  // false-match "itel" and get wrongly PayTrigger-enrolled.
   const words = normalized.split(/\s+/).filter(Boolean);
   const maxDistance = normalizedBrand.length <= 4 ? 1 : 2;
 
   for (const word of words) {
     if (levensteinMatch(word, normalizedBrand, maxDistance)) return true;
-  }
-
-  for (let i = 0; i + normalizedBrand.length <= normalized.length; i += 1) {
-    const snippet = normalized.slice(i, i + normalizedBrand.length);
-    if (levensteinMatch(snippet, normalizedBrand, 1)) return true;
   }
 
   return false;

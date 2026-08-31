@@ -919,7 +919,21 @@ const getOrders = async (req, res) => {
           } else if (userRole !== 'branch user' && statusList.length === 1 && statusList[0] === 'pending') {
             statusList = ['pending', 'transferred'];
           }
-          if (statusList.length > 1) {
+          // The PayTrigger flow first creates a pending Delivery placeholder
+          // and then updates Order.status. If that second step is interrupted,
+          // recover the order in the Waiting PayTrigger list by its delivery
+          // status, rather than leaving it stranded in Approved Orders.
+          if (statusList.length === 1 && statusList[0] === 'awaiting_paytrigger_enrollment') {
+            where.AND = [
+              ...(where.AND || []),
+              {
+                OR: [
+                  { status: 'awaiting_paytrigger_enrollment' },
+                  { delivery: { is: { status: 'awaiting_paytrigger_enrollment' } } },
+                ],
+              },
+            ];
+          } else if (statusList.length > 1) {
             where.status = { in: statusList };
           } else {
             where.status = { contains: statusList[0] };
@@ -951,6 +965,7 @@ const getOrders = async (req, res) => {
     const include = {
       created_by: { select: { username: true } },
       assigned_to: { select: { username: true, full_name: true } },
+      delivery: { select: { status: true } },
         delivery_officer: { select: { id: true, username: true, full_name: true } },
         recovery_officer: { select: { id: true, username: true, full_name: true } },
       productHistories: {
@@ -984,8 +999,12 @@ const getOrders = async (req, res) => {
     const formattedOrders = orders.map(order => {
       const isDelivered = order.is_delivered || (order.status || '').toLowerCase() === 'delivered';
       const frozenDate = isDelivered ? (order.delivered_at || order.updated_at) : order.updated_at;
+      const isPaytriggerPending = order.delivery?.status === 'awaiting_paytrigger_enrollment';
       return {
         ...order,
+        // The list is read-only: represent the effective pending state without
+        // silently modifying the stored order status.
+        status: isPaytriggerPending ? 'awaiting_paytrigger_enrollment' : order.status,
         delivered_at: isDelivered ? frozenDate : order.delivered_at,
         updated_at: isDelivered ? frozenDate : order.updated_at
       };
@@ -1067,7 +1086,22 @@ const getOrdersWithPagination = async (req, res) => {
           baseWhere.recovery_officer = { username: value };
         } else if (key === 'status') {
           const statusList = value.split(',').map(s => s.trim());
-          if (statusList.length > 1) {
+          // A PayTrigger enrollment is represented by both Order.status and a
+          // placeholder Delivery.status.  If the process is interrupted after
+          // creating the Delivery but before updating the Order, keep that
+          // order visible in Waiting PayTrigger Approval instead of leaving it
+          // stranded in Approved Orders with no recovery action.
+          if (statusList.length === 1 && statusList[0] === 'awaiting_paytrigger_enrollment') {
+            baseWhere.AND = [
+              ...(baseWhere.AND || []),
+              {
+                OR: [
+                  { status: 'awaiting_paytrigger_enrollment' },
+                  { delivery: { is: { status: 'awaiting_paytrigger_enrollment' } } },
+                ],
+              },
+            ];
+          } else if (statusList.length > 1) {
             baseWhere.status = { in: statusList };
           } else {
             baseWhere.status = value;
@@ -1109,6 +1143,7 @@ const getOrdersWithPagination = async (req, res) => {
       include: {
         created_by: { select: { username: true } },
         assigned_to: { select: { username: true } },
+        delivery: { select: { status: true } },
         statusHistories: true,
         productHistories: {
           include: {
@@ -1124,8 +1159,13 @@ const getOrdersWithPagination = async (req, res) => {
     const formattedOrders = orders.map(order => {
       const isDelivered = order.is_delivered || (order.status || '').toLowerCase() === 'delivered';
       const frozenDate = isDelivered ? (order.delivered_at || order.updated_at) : order.updated_at;
+      const isPaytriggerPending = order.delivery?.status === 'awaiting_paytrigger_enrollment';
       return {
         ...order,
+        // Make an interrupted PayTrigger enrollment behave as pending in the
+        // response/UI until it is completed or explicitly cancelled. The
+        // database remains untouched by this read-only list endpoint.
+        status: isPaytriggerPending ? 'awaiting_paytrigger_enrollment' : order.status,
         delivered_at: isDelivered ? frozenDate : order.delivered_at,
         updated_at: isDelivered ? frozenDate : order.updated_at,
         verification_assigned_at: order.verification_assigned_at,
