@@ -1978,6 +1978,16 @@ const updatePurchaserField = async (req, res) => {
       data: { [field_name]: new_value }
     });
 
+    // The purchaser's name is duplicated onto Order.customer_name (shown in
+    // Approved Order List and elsewhere) — keep it in sync so an edit here
+    // doesn't leave those screens showing the old name.
+    if (field_name === 'name') {
+      await prisma.order.update({
+        where: { id: verification.order_id },
+        data: { customer_name: new_value }
+      });
+    }
+
     // Record edit history
     await recordEditHistory(
       verification_id,

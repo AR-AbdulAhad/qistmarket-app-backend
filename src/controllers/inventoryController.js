@@ -483,6 +483,21 @@ const addInventory = async (req, res) => {
                 continue;
             }
 
+            // Mobiles/Laptops are handed over as one specific physical unit at
+            // delivery (self-pickup/agent delivery both need a real IMEI/serial
+            // to record against the order and, for phones, to gate PayTrigger
+            // enrollment) — so a serial-less row here silently becomes
+            // unpickable stock later. Other categories (accessories, generic
+            // goods) aren't individually tracked, so they stay optional.
+            const categoryLower = (category || '').toLowerCase();
+            const requiresSerial = categoryLower === 'mobiles' || categoryLower === 'laptops';
+            if (requiresSerial && (!imei_serial || imei_serial.trim() === '')) {
+                return res.status(400).json({
+                    success: false,
+                    message: `IMEI/Serial is required for ${category} — "${product_name}" was not added.`
+                });
+            }
+
             const purchasePriceNum = parseFloat(purchase_price);
 
             // Check for duplicate IMEI system-wide

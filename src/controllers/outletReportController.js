@@ -1,5 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { getOutletFilter } = require('../utils/outletFilter');
+const { getNormalizedLedger } = require('../utils/ledgerUtils');
 
 /**
  * getDaybook
@@ -184,16 +185,34 @@ const getSalesReport = async (req, res) => {
             orderBy: { updated_at: 'desc' }
         });
 
+        // Down payment (advance) is month 0 on the installment ledger. Read it
+        // from the ledger's normalized advance row rather than the static
+        // Order.advance_amount column, since the actually-paid amount can
+        // diverge from the originally planned advance (partial payments,
+        // manual ledger edits, etc).
+        const ordersWithDownPayment = orders.map(o => {
+            const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
+            const { advance_payment } = getNormalizedLedger(rows);
+            return {
+                ...o,
+                down_payment_amount: advance_payment.paid ? advance_payment.amount : 0,
+                down_payment_planned: advance_payment.amount,
+                down_payment_paid: advance_payment.paid,
+                down_payment_status: advance_payment.status
+            };
+        });
+
         const summary = {
             totalOrders: orders.length,
             totalGrossAmount: orders.reduce((acc, o) => acc + o.total_amount, 0),
+            totalDownPaymentsReceived: ordersWithDownPayment.reduce((acc, o) => acc + o.down_payment_amount, 0),
             totalReceived: orders.reduce((acc, o) => {
                 const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
                 return acc + rows.filter(r => r.status === 'paid').reduce((pAcc, p) => pAcc + (p.amount || 0), 0);
             }, 0)
         };
 
-        res.json({ success: true, data: { summary, orders } });
+        res.json({ success: true, data: { summary, orders: ordersWithDownPayment } });
     } catch (error) {
         console.error('getSalesReport error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
