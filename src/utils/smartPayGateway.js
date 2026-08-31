@@ -14,6 +14,7 @@ const SMARTPAY_DQR_URL = 'https://smartpay.com.pk/services/api/v1/DQR';
  */
 const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, referenceInfo }) => {
   const qrcode = require('qrcode');
+  const t0 = Date.now();
 
   const username = process.env.SMARTPAY_USERNAME || 'test';
   const password = process.env.SMARTPAY_PASSWORD || 'test';
@@ -25,18 +26,18 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
       // Without a timeout, a slow/unresponsive gateway hangs this request past
-      // the reverse proxy's own timeout, which returns an HTML 502/504 page —
-      // the frontend then fails to JSON-parse that and shows an opaque generic
-      // error instead of a real message. Failing fast here keeps the response
-      // a proper JSON error well within that window. Kept well under the
-      // platform's own ~30s proxy timeout even combined with the DQR call
-      // below (worst case 10s + 10s = 20s, leaving headroom for our own
-      // DB/QR-rendering work) — at 15s+15s this used to lose the race against
-      // the proxy, which then drops the connection before we can respond,
-      // surfacing to the browser as a generic "network error" instead of the
-      // real message below.
-      signal: AbortSignal.timeout(10000),
+      // the host's own reverse-proxy timeout, which then drops the connection
+      // before we can respond — the browser sees this as a raw network error
+      // with no message, instead of the real error/message this function
+      // returns. Kept short so both calls combined (token + DQR below) still
+      // finish comfortably inside whatever the hosting platform's own request
+      // timeout is — shared/managed hosting (e.g. Hostinger's Node.js app via
+      // Passenger) can have noticeably tighter limits than a typical VPS/
+      // cloud reverse proxy, so err on the short side rather than assume a
+      // generous window.
+      signal: AbortSignal.timeout(6000),
     });
+    console.log(`[smartPayGateway] Token call took ${Date.now() - t0}ms, status ${tokenReq.status}`);
     const textResp = await tokenReq.text();
     try {
       tokenResponse = JSON.parse(textResp);
@@ -45,7 +46,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
       return { success: false, message: 'Payment gateway returned invalid token response' };
     }
   } catch (e) {
-    console.error('[smartPayGateway] Token fetch error:', e);
+    console.error(`[smartPayGateway] Token fetch error after ${Date.now() - t0}ms:`, e.name, e.message);
     return { success: false, message: e.name === 'TimeoutError' ? 'Payment Gateway timed out. Please try again.' : 'Failed to authenticate with Payment Gateway' };
   }
 
@@ -72,6 +73,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
   };
 
   let dqrResponse;
+  const t1 = Date.now();
   try {
     const dqrReq = await fetch(SMARTPAY_DQR_URL, {
       method: 'POST',
@@ -80,8 +82,9 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
         Authorization: `${jwtToken}`,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(6000),
     });
+    console.log(`[smartPayGateway] DQR call took ${Date.now() - t1}ms, status ${dqrReq.status}`);
     const textResp = await dqrReq.text();
     try {
       dqrResponse = JSON.parse(textResp);
@@ -90,7 +93,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
       return { success: false, message: 'Payment gateway returned invalid DQR response' };
     }
   } catch (e) {
-    console.error('[smartPayGateway] DQR fetch error:', e);
+    console.error(`[smartPayGateway] DQR fetch error after ${Date.now() - t1}ms:`, e.name, e.message);
     return { success: false, message: e.name === 'TimeoutError' ? 'Payment Gateway timed out. Please try again.' : 'Failed to generate QR string from Gateway' };
   }
 
@@ -112,6 +115,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
     return { success: false, message: 'Failed to render QR Code image' };
   }
 
+  console.log(`[smartPayGateway] generateDqr total took ${Date.now() - t0}ms`);
   return { success: true, qrString, qrImageBase64 };
 };
 

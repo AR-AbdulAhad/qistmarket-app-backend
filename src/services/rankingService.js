@@ -105,10 +105,21 @@ async function updateCsrRanking(csrId, periodType = 'month') {
         end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23, 59, 59, 999);
     }
 
+    // Delivered orders are matched on delivered_at (frozen at the moment of
+    // delivery), not updated_at — same convention getOrders' dateRange filter
+    // already uses for the Delivered/Completed Orders lists. Matching on
+    // updated_at alone let an order delivered last month but touched again
+    // this month (or vice versa) count in the wrong period here while the
+    // visible order list — which the CSR compares this "Done" figure
+    // against — used the correct date, producing a mismatch between the two.
     const orders = await prisma.order.findMany({
         where: {
             created_by_user_id: csrId,
-            updated_at: { gte: start, lte: end }
+            OR: [
+                { status: 'delivered', delivered_at: { gte: start, lte: end } },
+                { status: 'delivered', delivered_at: null, updated_at: { gte: start, lte: end } },
+                { status: { not: 'delivered' }, updated_at: { gte: start, lte: end } },
+            ],
         },
         include: {
             customer: true
@@ -119,32 +130,10 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     // contributes once per order, not once overall.
     const uniqueCustomersCount = orders.length;
 
-    // Metrics based on UNIQUE CUSTOMERS
-    const customerStats = {};
-
-    orders.forEach(order => {
-        const cid = order.customer_id || `null-${order.id}`;
-        if (!customerStats[cid]) {
-            customerStats[cid] = {
-                delivered: false,
-                completed: false,
-                cancelled: false,
-                expired: false,
-                repeat: order.is_repeat_customer,
-                sales: 0
-            };
-        }
-
-        if (order.status === 'delivered') customerStats[cid].delivered = true;
-        if (order.status === 'completed') customerStats[cid].completed = true;
-        if (order.status === 'cancelled') customerStats[cid].cancelled = true;
-        if (order.status === 'expired') customerStats[cid].expired = true;
-
-        if (order.status === 'delivered') {
-            customerStats[cid].sales += (order.total_amount || 0);
-        }
-    });
-
+    // Per-order counts (not deduped by customer) — so "Done" etc. always match
+    // the exact number of rows the CSR sees on the corresponding Delivered /
+    // Cancelled / Expired Orders list for the same period, same as
+    // updateDeliveryRanking below already does for delivery officers.
     let deliveredCount = 0;
     let completedCount = 0;
     let repeatCount = 0;
@@ -152,13 +141,15 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     let expiredCount = 0;
     let totalSales = 0;
 
-    Object.values(customerStats).forEach(stat => {
-        if (stat.delivered) deliveredCount++;
-        if (stat.completed) completedCount++;
-        if (stat.repeat) repeatCount++;
-        if (stat.cancelled) cancelledCount++;
-        if (stat.expired) expiredCount++;
-        totalSales += stat.sales;
+    orders.forEach(order => {
+        if (order.status === 'delivered') {
+            deliveredCount++;
+            totalSales += (order.total_amount || 0);
+        }
+        if (order.status === 'completed') completedCount++;
+        if (order.status === 'cancelled') cancelledCount++;
+        if (order.status === 'expired') expiredCount++;
+        if (order.is_repeat_customer) repeatCount++;
     });
 
     // Fetch Solved Complaints for the CSR in the period

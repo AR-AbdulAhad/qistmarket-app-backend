@@ -400,7 +400,15 @@ async function cancelPendingEnrollment(req, res) {
     });
 
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (order.status !== 'awaiting_paytrigger_enrollment') {
+    // Normally order.status and order.delivery.status move together, but a
+    // failed immediate-completion attempt (device already ACTIVE at
+    // pre-enroll time) can leave the Delivery/PayTriggerDevice pair stuck in
+    // 'awaiting_paytrigger_enrollment' while order.status never left
+    // 'approved' — checking either side lets this recover that desynced case
+    // too, not just the normal one.
+    const isPending = order.status === 'awaiting_paytrigger_enrollment'
+      || order.delivery?.status === 'awaiting_paytrigger_enrollment';
+    if (!isPending) {
       return res.status(400).json({ success: false, message: 'Order is not awaiting PayTrigger enrollment' });
     }
 

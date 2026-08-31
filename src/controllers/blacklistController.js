@@ -76,12 +76,18 @@ const searchByCnicOrPhone = async (req, res) => {
  * setBlacklistStatus
  * Manually blacklist or whitelist a CNIC, with structured fraud tagging
  * (category) and an approval gate: blacklisting is immediate (flagging a
- * risk should never wait), but whitelisting starts "pending" and only
+ * risk should never wait). Whitelisting normally starts "pending" and only
  * takes effect once a second call approves it via approveBlacklistAction —
  * a real approval workflow rather than a single person unilaterally
- * clearing someone. A 'whitelist' also protects the CNIC from being
- * re-blacklisted by the automatic 90-day sync (see blacklistUtils.js),
- * but only once approved.
+ * clearing someone — EXCEPT when an Admin/Super Admin requests it: they
+ * already are the final approval authority, so there is nobody "above" them
+ * to approve a second time, and requiring one just made whitelisting from
+ * the admin's own Blacklisted Accounts page silently do nothing until an
+ * accountant separately opened Pending Approvals. For Admin/Super Admin the
+ * whitelist takes effect immediately, same as blacklisting does. A
+ * whitelist also protects the CNIC from being re-blacklisted by the
+ * automatic 90-day sync (see blacklistUtils.js), whether applied instantly
+ * here or via later approval.
  */
 const setBlacklistStatus = async (req, res) => {
     try {
@@ -108,7 +114,23 @@ const setBlacklistStatus = async (req, res) => {
             return res.json({ success: true, message: 'Customer blacklisted.' });
         }
 
-        // Whitelist requests start pending — is_blacklisted is NOT flipped here.
+        const requesterRole = (req.user?.role || '').toLowerCase();
+        const isTopAuthority = ['admin', 'super admin'].includes(requesterRole);
+
+        if (isTopAuthority) {
+            const approvedAction = await prisma.$transaction(async (tx) => {
+                const created = await tx.blacklistAction.create({
+                    data: { cnic: cleanCnic, action: 'whitelist', category: category || null, reason: reason || null, status: 'approved', created_by_id: req.user.id, approved_by_id: req.user.id, approved_at: new Date() },
+                });
+                await tx.purchaserVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
+                await tx.grantorVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
+                return created;
+            });
+            await logAction(req, 'MANUAL_WHITELIST_APPROVED', `CNIC ${cleanCnic} whitelisted immediately by ${requesterRole}. ${reason ? 'Reason: ' + reason : ''}`, approvedAction.id, 'BlacklistAction');
+            return res.json({ success: true, message: 'Customer whitelisted.', data: approvedAction });
+        }
+
+        // Everyone else: whitelist requests start pending — is_blacklisted is NOT flipped here.
         const pendingAction = await prisma.blacklistAction.create({
             data: { cnic: cleanCnic, action: 'whitelist', category: category || null, reason: reason || null, status: 'pending', created_by_id: req.user.id },
         });
@@ -250,6 +272,46 @@ const triggerSync = async (req, res) => {
     }
 };
 
+/**
+ * getBlacklistStatusForCnic
+ * Deliberately NOT gated behind requireAccountant — this is a lightweight,
+ * non-sensitive status check (just booleans + last action date, no reasons/
+ * amounts) that CustomerProfileModal calls from every role/portal that opens
+ * a customer profile, so a whitelisted customer shows a "Previously
+ * Blacklisted" tag wherever their profile is viewed, not only on the
+ * Accountant/Admin blacklist pages.
+ */
+const getBlacklistStatusForCnic = async (req, res) => {
+    try {
+        const { cnic } = req.params;
+        if (!cnic || !cnic.trim()) {
+            return res.status(400).json({ success: false, message: 'cnic is required.' });
+        }
+        const cleanCnic = cnic.trim();
+
+        const [purchaser, lastBlacklistAction] = await Promise.all([
+            prisma.purchaserVerification.findFirst({ where: { cnic_number: cleanCnic }, select: { is_blacklisted: true } }),
+            prisma.blacklistAction.findFirst({
+                where: { cnic: cleanCnic, action: 'blacklist' },
+                orderBy: { created_at: 'desc' },
+                select: { created_at: true },
+            }),
+        ]);
+
+        res.json({
+            success: true,
+            data: {
+                isBlacklisted: purchaser?.is_blacklisted || false,
+                wasEverBlacklisted: !!lastBlacklistAction,
+                lastBlacklistedAt: lastBlacklistAction?.created_at || null,
+            },
+        });
+    } catch (error) {
+        console.error('getBlacklistStatusForCnic error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     searchByCnicOrPhone,
     setBlacklistStatus,
@@ -259,4 +321,5 @@ module.exports = {
     getCustomerRiskScore,
     getBlacklistHistory,
     triggerSync,
+    getBlacklistStatusForCnic,
 };

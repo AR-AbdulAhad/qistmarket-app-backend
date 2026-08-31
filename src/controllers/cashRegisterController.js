@@ -50,14 +50,28 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
     }
 
     // 2. Down Payments (Cash In)
-    const downPaymentOrders = await prisma.order.findMany({
+    // Was summing Order.advance_amount for every order merely CREATED in the
+    // window — that's the quoted/agreed advance, not money actually
+    // collected, so a brand-new 'pending' order with nobody having paid a
+    // rupee yet still inflated this card. The real collection event is the
+    // CashInHand row created when a down payment is physically taken —
+    // 'Down payment (Self Pickup)' is credited straight to status:'paid' at
+    // the outlet counter (no officer-submission step, since it never leaves
+    // the building). Field-collected advances (agent delivery) instead start
+    // 'pending' and only become 'paid' once the officer submits/verifies
+    // them — that flow is already counted under Cash from Recovery/Delivery
+    // below (by submission date), so it's deliberately excluded here to
+    // avoid double-counting the same rupee in two cards.
+    const downPaymentEntries = await prisma.cashInHand.findMany({
         where: {
             outlet_id: outletId,
-            created_at: dateFilter
+            status: 'paid',
+            cash_type: 'Down payment (Self Pickup)',
+            updated_at: dateFilter
         },
         select: {
-            advance_amount: true,
-            channel: true
+            amount: true,
+            payment_method: true
         }
     });
 
@@ -65,13 +79,13 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
     let downPaymentsBank = 0;
     let downPayments1Bill = 0;
 
-    downPaymentOrders.forEach(o => {
-        const amt = parseFloat(o.advance_amount || 0);
-        const ch = (o.channel || 'Cash').toLowerCase();
+    downPaymentEntries.forEach(e => {
+        const amt = parseFloat(e.amount || 0);
+        const pm = (e.payment_method || 'Cash').toLowerCase();
 
-        if (ch.includes('bank') || ch.includes('transfer')) {
+        if (pm.includes('bank') || pm.includes('transfer')) {
             downPaymentsBank += amt;
-        } else if (ch.includes('1bill') || ch.includes('1link')) {
+        } else if (pm.includes('1bill') || pm.includes('1link')) {
             downPayments1Bill += amt;
         } else {
             downPaymentsCash += amt;
@@ -147,7 +161,12 @@ const computeMetricsForPeriod = async (outletId, startDate, endDate) => {
             where: {
                 outlet_id: outletId,
                 updated_at: dateFilter,
-                status: { in: ['paid', 'accepted', 'approved', 'submitted', 'completed'] }
+                status: { in: ['paid', 'accepted', 'approved', 'submitted', 'completed'] },
+                // Self-pickup down payments are already counted in the Down
+                // Payments card above (credited straight to 'paid' with no
+                // officer submission) — exclude them here so this fallback
+                // can't double-count them into Cash from Delivery too.
+                cash_type: { not: 'Down payment (Self Pickup)' }
             },
             include: {
                 officer: { select: { role_id: true, role: { select: { name: true } } } }
@@ -686,27 +705,35 @@ const getCashRegisterHistory = async (req, res) => {
         const dateFilter = { gte: start, lte: end };
 
         // ── Down Payments (Cash channel only) ──────────────────────────
-        const downPaymentOrders = await prisma.order.findMany({
+        // Same fix as computeMetricsForPeriod above: only actually-collected
+        // self-pickup down payments (status 'paid', credited at the outlet
+        // counter with no officer-submission step) — not every order merely
+        // created in the window regardless of whether anyone paid anything.
+        const downPaymentEntries = await prisma.cashInHand.findMany({
             where: {
                 outlet_id,
-                advance_amount: { gt: 0 },
-                created_at: dateFilter,
+                status: 'paid',
+                cash_type: 'Down payment (Self Pickup)',
+                updated_at: dateFilter,
             },
-            select: { id: true, order_ref: true, customer_name: true, advance_amount: true, channel: true, created_at: true },
-            orderBy: { created_at: 'desc' },
+            select: {
+                id: true, amount: true, payment_method: true, customer_name: true, updated_at: true,
+                order: { select: { order_ref: true } }
+            },
+            orderBy: { updated_at: 'desc' },
             take: MAX_HISTORY_PER_CATEGORY
         });
-        const downPayments = downPaymentOrders
-            .filter(o => {
-                const ch = (o.channel || 'Cash').toLowerCase();
-                return !ch.includes('bank') && !ch.includes('transfer') && !ch.includes('1bill') && !ch.includes('1link');
+        const downPayments = downPaymentEntries
+            .filter(e => {
+                const pm = (e.payment_method || 'Cash').toLowerCase();
+                return !pm.includes('bank') && !pm.includes('transfer') && !pm.includes('1bill') && !pm.includes('1link');
             })
-            .map(o => ({
-                id: `dp-${o.id}`,
-                date: o.created_at,
-                title: o.customer_name || 'Customer',
-                subtitle: `Order ${o.order_ref} — Down Payment`,
-                amount: parseFloat(o.advance_amount || 0)
+            .map(e => ({
+                id: `dp-${e.id}`,
+                date: e.updated_at,
+                title: e.customer_name || 'Customer',
+                subtitle: `Order ${e.order?.order_ref || 'N/A'} — Down Payment`,
+                amount: parseFloat(e.amount || 0)
             }));
 
         // ── Installments Received (Cash-ish methods only) ──────────────
@@ -774,7 +801,14 @@ const getCashRegisterHistory = async (req, res) => {
 
         if (usingFallback) {
             const cashInHandRecords = await prisma.cashInHand.findMany({
-                where: { outlet_id, status: { in: ['paid', 'accepted', 'approved', 'submitted', 'completed'] }, updated_at: dateFilter },
+                where: {
+                    outlet_id,
+                    status: { in: ['paid', 'accepted', 'approved', 'submitted', 'completed'] },
+                    updated_at: dateFilter,
+                    // Already listed under Down Payments above — exclude here
+                    // so this fallback can't double-count them.
+                    cash_type: { not: 'Down payment (Self Pickup)' }
+                },
                 include: { officer: { select: { full_name: true, username: true, role_id: true, role: { select: { name: true } } } } },
                 orderBy: { updated_at: 'desc' },
                 take: MAX_HISTORY_PER_CATEGORY

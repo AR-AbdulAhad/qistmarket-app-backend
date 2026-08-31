@@ -452,10 +452,18 @@ const submitBankDeposit = async (req, res) => {
         let deposit;
 
         if (payment_method === '1bill' || payment_method === 'qr_payment') {
+            // Step-by-step timing so a hang/slowdown anywhere in this branch
+            // (DB round trips vs. the actual SmartPay/1Bill gateway calls) is
+            // visible in the logs instead of just an opaque "network error"
+            // on the client with no server-side breadcrumb.
+            const routedT0 = Date.now();
+            console.log(`[submitBankDeposit] ${payment_method} branch started for user ${req.user.id}`);
+
             const submittingUser = await prisma.user.findUnique({
                 where: { id: req.user.id },
                 include: { outlet: true }
             });
+            console.log(`[submitBankDeposit] fetched submittingUser at +${Date.now() - routedT0}ms`);
             if (!submittingUser) {
                 return res.status(404).json({ success: false, message: 'Submitting user not found.' });
             }
@@ -527,6 +535,7 @@ const submitBankDeposit = async (req, res) => {
 
             let qrImageBase64 = null;
             if (payment_method === 'qr_payment') {
+                console.log(`[submitBankDeposit] reservation claimed at +${Date.now() - routedT0}ms, calling generateDqr`);
                 const outletDisplayName = submittingUser.outlet?.name ? `${submittingUser.outlet.name} (${submittingUser.full_name})` : submittingUser.full_name;
                 const dqr = await generateDqr({
                     consumerNumber,
@@ -535,6 +544,7 @@ const submitBankDeposit = async (req, res) => {
                     cellNo: submittingUser.phone || '03000000000',
                     referenceInfo: `BDR-OUTLET-${outletId || 'HQ'}-${Date.now()}`
                 });
+                console.log(`[submitBankDeposit] generateDqr returned at +${Date.now() - routedT0}ms, success=${dqr.success}`);
                 if (!dqr.success) {
                     // Roll back the reservation exactly to its prior state.
                     await prisma.consumerNumber.update({
@@ -636,6 +646,9 @@ const submitBankDeposit = async (req, res) => {
 
         await logAction(req, 'BANK_DEPOSIT_SUBMITTED', `Deposit request of PKR ${amount} submitted via ${payment_method}.`, deposit.id, 'BankDepositRequest');
 
+        if (payment_method === '1bill' || payment_method === 'qr_payment') {
+            console.log(`[submitBankDeposit] sending success response for deposit ${deposit.id}`);
+        }
         res.json({ success: true, message: 'Deposit request submitted successfully.', deposit });
     } catch (error) {
         console.error('submitBankDeposit error:', error);

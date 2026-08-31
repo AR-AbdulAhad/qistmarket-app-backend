@@ -757,10 +757,24 @@ async function initiateGatedDelivery({ mode, order, payload, io, productNameSnap
 
   // Rare edge case: device already reports ACTIVE at pre-enroll time (e.g. re-enrolling a
   // previously-activated device). No later webhook may ever arrive, so complete right away.
+  // If this immediate attempt throws (e.g. ledger-build failure), it must NOT escape and
+  // abort the whole function here — completePendingPaytriggerDelivery already reverts the
+  // Delivery row back to PENDING_STATUS in its own catch block before re-throwing, but
+  // without catching it here too, order.status below never runs, leaving the order stuck
+  // 'approved' while its Delivery/PayTriggerDevice already say "awaiting enrollment" — a
+  // desynced order that shows in neither Approved Order List's actionable state nor the
+  // Waiting PayTrigger Approval list, and can't be retried (the delivery-already-exists
+  // guard in submitDelivery/submitSelfPickupDelivery blocks re-submission). Falling through
+  // to the normal pending state instead keeps order.status and delivery.status in sync and
+  // lets the existing PayTrigger webhook retry completion later, same as the non-active path.
   if (enrollmentStatus === 'active') {
-    const completion = await completePendingPaytriggerDelivery(device, io);
-    if (completion?.completed) {
-      return { delivery: completion.delivery, paytriggerDevice: device, completedImmediately: true };
+    try {
+      const completion = await completePendingPaytriggerDelivery(device, io);
+      if (completion?.completed) {
+        return { delivery: completion.delivery, paytriggerDevice: device, completedImmediately: true };
+      }
+    } catch (immediateCompletionErr) {
+      console.error('[PayTrigger] Immediate completion for already-active device failed, falling back to pending state:', immediateCompletionErr.message);
     }
   }
 

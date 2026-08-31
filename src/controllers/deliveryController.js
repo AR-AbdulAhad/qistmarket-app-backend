@@ -1706,11 +1706,21 @@ const submitSelfPickupDelivery = async (req, res) => {
     }
 
     if (order.delivery) {
-      if (order.delivery.status === 'awaiting_paytrigger_enrollment' || order.is_delivered || order.status === 'delivered' || order.status === 'completed') {
+      // Trust order.status (not order.delivery.status) as the source of truth for
+      // "is this genuinely still pending" — a failed immediate-completion attempt
+      // when a device reports ACTIVE at pre-enroll time can leave delivery.status
+      // stuck at 'awaiting_paytrigger_enrollment' while order.status already fell
+      // back to 'approved'. Blocking on delivery.status there would strand the
+      // order with no way to retry; checking order.status instead lets it fall
+      // through to the stale-cleanup below and self-heal.
+      if (order.status === 'awaiting_paytrigger_enrollment' || order.is_delivered || order.status === 'delivered' || order.status === 'completed') {
         return res.status(400).json({ success: false, message: 'Delivery already submitted and completed for this order' });
       }
       // Stale or non-completed delivery record on an approved order — clean it up so self-pickup can proceed
       try {
+        if (order.delivery.product_imei) {
+          await prisma.payTriggerDevice.deleteMany({ where: { imei: order.delivery.product_imei } });
+        }
         await prisma.deliveryUpload.deleteMany({ where: { delivery_id: order.delivery.id } });
         await prisma.delivery.delete({ where: { id: order.delivery.id } });
       } catch (delErr) {
