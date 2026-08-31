@@ -72,29 +72,44 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
     reserved: '',
   };
 
+  // The DQR endpoint is the flaky one in practice (has been observed timing
+  // out or returning an HTML error page instead of JSON), so it gets one
+  // retry after a short pause — the token call above stays single-shot since
+  // it's the lighter, more reliable of the two. Kept to 5s/attempt (not 6s)
+  // so the worst case (2 attempts) plus the token call still fits comfortably
+  // inside tight shared-hosting request timeouts.
   let dqrResponse;
-  const t1 = Date.now();
-  try {
-    const dqrReq = await fetch(SMARTPAY_DQR_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `${jwtToken}`,
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(6000),
-    });
-    console.log(`[smartPayGateway] DQR call took ${Date.now() - t1}ms, status ${dqrReq.status}`);
-    const textResp = await dqrReq.text();
+  let dqrErrorMessage = 'Failed to generate QR string from Gateway';
+  const dqrAttempts = 2;
+  for (let attempt = 1; attempt <= dqrAttempts; attempt += 1) {
+    const t1 = Date.now();
     try {
-      dqrResponse = JSON.parse(textResp);
-    } catch (err) {
-      console.error('[smartPayGateway] DQR response not JSON:', textResp);
-      return { success: false, message: 'Payment gateway returned invalid DQR response' };
+      const dqrReq = await fetch(SMARTPAY_DQR_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `${jwtToken}`,
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(5000),
+      });
+      console.log(`[smartPayGateway] DQR call (attempt ${attempt}/${dqrAttempts}) took ${Date.now() - t1}ms, status ${dqrReq.status}`);
+      const textResp = await dqrReq.text();
+      try {
+        dqrResponse = JSON.parse(textResp);
+        break;
+      } catch (err) {
+        console.error(`[smartPayGateway] DQR response not JSON (attempt ${attempt}/${dqrAttempts}):`, textResp.slice(0, 300));
+        dqrErrorMessage = 'Payment gateway returned invalid DQR response';
+      }
+    } catch (e) {
+      console.error(`[smartPayGateway] DQR fetch error after ${Date.now() - t1}ms (attempt ${attempt}/${dqrAttempts}):`, e.name, e.message);
+      dqrErrorMessage = e.name === 'TimeoutError' ? 'Payment Gateway timed out. Please try again.' : 'Failed to generate QR string from Gateway';
     }
-  } catch (e) {
-    console.error(`[smartPayGateway] DQR fetch error after ${Date.now() - t1}ms:`, e.name, e.message);
-    return { success: false, message: e.name === 'TimeoutError' ? 'Payment Gateway timed out. Please try again.' : 'Failed to generate QR string from Gateway' };
+    if (attempt < dqrAttempts) await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  if (!dqrResponse) {
+    return { success: false, message: dqrErrorMessage };
   }
 
   if (dqrResponse?.statusCode !== '200' || !dqrResponse?.QrString) {
