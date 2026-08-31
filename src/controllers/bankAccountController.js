@@ -536,10 +536,13 @@ const submitBankDeposit = async (req, res) => {
             let qrImageBase64 = null;
             if (payment_method === 'qr_payment') {
                 console.log(`[submitBankDeposit] reservation claimed at +${Date.now() - routedT0}ms, calling generateDqr`);
-                const outletDisplayName = submittingUser.outlet?.name ? `${submittingUser.outlet.name} (${submittingUser.full_name})` : submittingUser.full_name;
+                // Plain name only — the proven-working SmartPay QR flow (deliveryController's
+                // Cash-in-Hand online payment) sends just officerName with no punctuation.
+                // Parentheses here ("Branch (Name)") were a suspect for the "Invalid bill
+                // data" rejection since every other field already matched the working format.
                 const dqr = await generateDqr({
                     consumerNumber,
-                    consumerDetail: outletDisplayName,
+                    consumerDetail: submittingUser.full_name,
                     amount: amountFloat,
                     cellNo: submittingUser.phone || '03000000000',
                     referenceInfo: `BDR-OUTLET-${outletId || 'HQ'}-${Date.now()}`
