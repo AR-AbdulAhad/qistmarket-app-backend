@@ -29,13 +29,13 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
       // the host's own reverse-proxy timeout, which then drops the connection
       // before we can respond — the browser sees this as a raw network error
       // with no message, instead of the real error/message this function
-      // returns. Kept short so both calls combined (token + DQR below) still
-      // finish comfortably inside whatever the hosting platform's own request
-      // timeout is — shared/managed hosting (e.g. Hostinger's Node.js app via
-      // Passenger) can have noticeably tighter limits than a typical VPS/
-      // cloud reverse proxy, so err on the short side rather than assume a
-      // generous window.
-      signal: AbortSignal.timeout(6000),
+      // returns. This was previously cut down to 6s/5s on a guess that the
+      // hosting platform's own proxy had a tight limit, but that made it too
+      // short for the real, now-live SmartPay gateway's actual response time —
+      // it was timing out on genuinely valid, still-in-progress requests. Total
+      // worst case across token + both DQR attempts below is ~26.4s, kept under
+      // the platform's own ~30s proxy timeout with margin.
+      signal: AbortSignal.timeout(8000),
     });
     console.log(`[smartPayGateway] Token call took ${Date.now() - t0}ms, status ${tokenReq.status}`);
     const textResp = await tokenReq.text();
@@ -75,9 +75,10 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
   // The DQR endpoint is the flaky one in practice (has been observed timing
   // out or returning an HTML error page instead of JSON), so it gets one
   // retry after a short pause — the token call above stays single-shot since
-  // it's the lighter, more reliable of the two. Kept to 5s/attempt (not 6s)
-  // so the worst case (2 attempts) plus the token call still fits comfortably
-  // inside tight shared-hosting request timeouts.
+  // it's the lighter, more reliable of the two. 9s/attempt gives the live
+  // gateway room to actually respond (5s was routinely too short once
+  // SmartPay went live) while keeping the worst case, combined with the
+  // token call, under the platform's own ~30s proxy timeout.
   let dqrResponse;
   let dqrErrorMessage = 'Failed to generate QR string from Gateway';
   const dqrAttempts = 2;
@@ -91,7 +92,7 @@ const generateDqr = async ({ consumerNumber, consumerDetail, amount, cellNo, ref
           Authorization: `${jwtToken}`,
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(9000),
       });
       console.log(`[smartPayGateway] DQR call (attempt ${attempt}/${dqrAttempts}) took ${Date.now() - t1}ms, status ${dqrReq.status}`);
       const textResp = await dqrReq.text();
