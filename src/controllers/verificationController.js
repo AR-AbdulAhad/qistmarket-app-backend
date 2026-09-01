@@ -2496,10 +2496,12 @@ const getDeliveredProductDetails = async (req, res) => {
     // Extract advance payment details and installment ledger details
     let advancePayment = null;
     let installmentDetails = null;
+    let normalizedLedger = null;
     const ledger = order.installment_ledger || order.delivery?.installment_ledger;
 
     if (ledger?.ledger_rows) {
       const normalized = getNormalizedLedger(ledger.ledger_rows);
+      normalizedLedger = normalized;
 
       // Derive advance payment from ledger
       if (normalized.advance_payment) {
@@ -2539,6 +2541,20 @@ const getDeliveredProductDetails = async (req, res) => {
       };
     }
 
+    // The plan actually agreed at delivery (advance/monthly/months/total) can diverge
+    // from Order.total_amount/advance_amount/monthly_amount/months — those columns hold
+    // the originally suggested plan from order creation, while overrides made at
+    // delivery (e.g. an adjusted advance on self-pickup) only land in the installment
+    // ledger. Prefer the ledger's normalized figures when one exists, same reasoning
+    // as the Sales Report fix.
+    const hasLedgerPlan = !!normalizedLedger && normalizedLedger.installment_ledger.length > 0;
+    const actualTotalAmount = hasLedgerPlan ? normalizedLedger.summary.grandTotalDue : order.total_amount;
+    const actualAdvanceAmount = hasLedgerPlan ? normalizedLedger.advance_payment.amount : order.advance_amount;
+    const actualMonthlyAmount = hasLedgerPlan
+      ? (normalizedLedger.installment_ledger[0]?.dueAmount ?? order.monthly_amount)
+      : order.monthly_amount;
+    const actualMonths = hasLedgerPlan ? normalizedLedger.installment_ledger.length : order.months;
+
     // Compile delivered product details
     const deliveredProductDetails = {
       order_info: {
@@ -2556,10 +2572,14 @@ const getDeliveredProductDetails = async (req, res) => {
         imei_serial: imeiSerial,
         category: inventoryDetails ? inventoryDetails.category : undefined,
         color_variant: inventoryDetails ? inventoryDetails.color_variant : undefined,
-        total_amount: order.total_amount,
-        advance_amount: order.advance_amount,
-        monthly_amount: order.monthly_amount,
-        months: order.months,
+        total_amount: actualTotalAmount,
+        advance_amount: actualAdvanceAmount,
+        monthly_amount: actualMonthlyAmount,
+        months: actualMonths,
+        suggested_total_amount: order.total_amount,
+        suggested_advance_amount: order.advance_amount,
+        suggested_monthly_amount: order.monthly_amount,
+        suggested_months: order.months,
         inventory_status: inventoryDetails ? inventoryDetails.status : undefined
       },
       delivery_details: deliveryDetails,
