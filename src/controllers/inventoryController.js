@@ -115,6 +115,21 @@ function generateInstallments(categoryName, price) {
     });
 }
 
+// Matches each whitespace-separated word of `search` independently against any of `fields`
+// (all words must be found, each in some field) instead of requiring the whole search string
+// to appear verbatim in one field. This keeps matching robust against stray double-spaces or
+// odd characters that can creep into synced product names, which would otherwise make a
+// single-field `contains` on the full string silently fail while short/partial terms still work.
+function buildWordSearchWhere(search, fields) {
+    const words = (search || '').trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return {};
+    return {
+        AND: words.map(word => ({
+            OR: fields.map(field => ({ [field]: { contains: word } }))
+        }))
+    };
+}
+
 const getInventory = async (req, res) => {
     const { outlet_id } = req.user;
     const { page = 1, limit = 20, search = "" } = req.query;
@@ -132,12 +147,7 @@ const getInventory = async (req, res) => {
             outlet_id,
             is_used: false,
             status: { not: 'Used Stock' },
-            OR: search ? [
-                { product_name: { contains: search } },
-                { imei_serial: { contains: search } },
-                { category: { contains: search } },
-                { color_variant: { contains: search } }
-            ] : undefined
+            ...buildWordSearchWhere(search, ['product_name', 'imei_serial', 'category', 'color_variant'])
         };
 
         // Fetch every matching row for this outlet — a product's real "quantity" is the
@@ -235,12 +245,7 @@ const getStockTransferInventory = async (req, res) => {
         // Exclude 'Pending Transfer' items — they are tracked in transfer history, not inventory list
         const productSearchWhere = {
             outlet_id,
-            OR: search ? [
-                { product_name: { contains: search } },
-                { imei_serial: { contains: search } },
-                { category: { contains: search } },
-                { color_variant: { contains: search } }
-            ] : undefined
+            ...buildWordSearchWhere(search, ['product_name', 'imei_serial', 'category', 'color_variant'])
         };
 
         // Get products ordered by stock count descending for pagination
@@ -324,12 +329,7 @@ const getUsedInventory = async (req, res) => {
         const productSearchWhere = {
             outlet_id,
             is_used: true,
-            OR: search ? [
-                { product_name: { contains: search } },
-                { imei_serial: { contains: search } },
-                { category: { contains: search } },
-                { color_variant: { contains: search } }
-            ] : undefined
+            ...buildWordSearchWhere(search, ['product_name', 'imei_serial', 'category', 'color_variant'])
         };
 
         const distinctProducts = await prisma.outletInventory.groupBy({
