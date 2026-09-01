@@ -3635,21 +3635,8 @@ const getSelfPickupInventory = async (req, res) => {
   }
 
   try {
-    const where = {
-      outlet_id,
-      status: 'In Stock',
-    };
-
-    const searchWords = search.trim().split(/\s+/).filter(Boolean);
-    if (searchWords.length > 0) {
-      const fields = ['product_name', 'imei_serial', 'color_variant', 'category'];
-      where.AND = searchWords.map(word => ({
-        OR: fields.map(field => ({ [field]: { contains: word } }))
-      }));
-    }
-
-    const inventory = await prisma.outletInventory.findMany({
-      where,
+    const allInventory = await prisma.outletInventory.findMany({
+      where: { outlet_id, status: 'In Stock' },
       select: {
         id: true,
         product_name: true,
@@ -3663,6 +3650,18 @@ const getSelfPickupInventory = async (req, res) => {
       },
       orderBy: { product_name: 'asc' },
     });
+
+    // Matched in JS on normalized (lowercased, punctuation/space-stripped) text so
+    // formatting differences between the stored name and what's typed/pasted — spacing,
+    // slashes, casing — don't prevent an otherwise-correct match.
+    const normalize = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normalizedSearch = normalize(search);
+    const inventory = normalizedSearch
+      ? allInventory.filter(item => {
+          const haystack = normalize([item.product_name, item.imei_serial, item.color_variant, item.category].filter(Boolean).join(' '));
+          return haystack.includes(normalizedSearch);
+        })
+      : allInventory;
 
     return res.status(200).json({ success: true, data: inventory });
   } catch (error) {

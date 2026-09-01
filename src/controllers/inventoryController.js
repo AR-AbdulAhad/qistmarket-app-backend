@@ -115,19 +115,22 @@ function generateInstallments(categoryName, price) {
     });
 }
 
-// Matches each whitespace-separated word of `search` independently against any of `fields`
-// (all words must be found, each in some field) instead of requiring the whole search string
-// to appear verbatim in one field. This keeps matching robust against stray double-spaces or
-// odd characters that can creep into synced product names, which would otherwise make a
-// single-field `contains` on the full string silently fail while short/partial terms still work.
-function buildWordSearchWhere(search, fields) {
-    const words = (search || '').trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0) return {};
-    return {
-        AND: words.map(word => ({
-            OR: fields.map(field => ({ [field]: { contains: word } }))
-        }))
-    };
+// Strips everything but letters/digits and lowercases, so "8/256", "8 256", "8-256" and
+// "8GB/256GB" all collapse to a comparable form. SQL `contains` is brittle against exactly
+// this kind of formatting drift between what's displayed and what a user types or pastes
+// (different spacing, slashes, casing), so matching is done in JS on the normalized strings
+// instead of relying on the database's LIKE semantics.
+function normalizeForSearch(str) {
+    return (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// True if every row field, concatenated and normalized, contains the normalized search text
+// as a substring — immune to spacing/punctuation/case differences between the two.
+function matchesSearch(row, search, fields) {
+    const normalizedSearch = normalizeForSearch(search);
+    if (!normalizedSearch) return true;
+    const haystack = normalizeForSearch(fields.map(f => row[f]).filter(Boolean).join(' '));
+    return haystack.includes(normalizedSearch);
 }
 
 const getInventory = async (req, res) => {
@@ -147,18 +150,21 @@ const getInventory = async (req, res) => {
             outlet_id,
             is_used: false,
             status: { not: 'Used Stock' },
-            ...buildWordSearchWhere(search, ['product_name', 'imei_serial', 'category', 'color_variant'])
         };
 
-        // Fetch every matching row for this outlet — a product's real "quantity" is the
+        // Fetch every row for this outlet — a product's real "quantity" is the
         // SUM of its rows' `quantity` field, not the row count (a bulk row can hold
         // quantity > 1 on its own). Sorting/paginating by row count breaks ranking for
         // those, so instead we group + rank in JS across the FULL set first, then
-        // paginate the already-globally-sorted product groups.
-        const allMatchingRows = await prisma.outletInventory.findMany({
+        // paginate the already-globally-sorted product groups. Search matching also
+        // happens in JS (see matchesSearch) rather than in the SQL query.
+        const allRows = await prisma.outletInventory.findMany({
             where: productSearchWhere,
             orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
         });
+        const allMatchingRows = allRows.filter(row =>
+            matchesSearch(row, search, ['product_name', 'imei_serial', 'category', 'color_variant'])
+        );
 
         const groupMap = new Map();
         for (const row of allMatchingRows) {
@@ -243,29 +249,25 @@ const getStockTransferInventory = async (req, res) => {
     try {
         // 1. Get unique product names that match search criteria
         // Exclude 'Pending Transfer' items — they are tracked in transfer history, not inventory list
-        const productSearchWhere = {
-            outlet_id,
-            ...buildWordSearchWhere(search, ['product_name', 'imei_serial', 'category', 'color_variant'])
-        };
+        const allOutletRows = await prisma.outletInventory.findMany({
+            where: { outlet_id },
+            orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
+        });
+        const matchingRows = allOutletRows.filter(row =>
+            matchesSearch(row, search, ['product_name', 'imei_serial', 'category', 'color_variant'])
+        );
 
         // Get products ordered by stock count descending for pagination
-        const distinctProducts = await prisma.outletInventory.groupBy({
-            by: ['product_name'],
-            where: productSearchWhere,
-            _count: { product_name: true },
-            orderBy: { _count: { product_name: 'desc' } },
-            skip,
-            take
-        });
+        const countByProduct = new Map();
+        for (const row of matchingRows) {
+            countByProduct.set(row.product_name, (countByProduct.get(row.product_name) || 0) + 1);
+        }
+        const sortedProductNames = Array.from(countByProduct.entries())
+            .sort((a, b) => b[1] - a[1])
+            .map(([name]) => name);
 
-        const totalProductsCount = await prisma.outletInventory.groupBy({
-            by: ['product_name'],
-            where: productSearchWhere,
-            _count: true
-        });
-        const total = totalProductsCount.length;
-
-        const productNames = distinctProducts.map(p => p.product_name);
+        const total = sortedProductNames.length;
+        const productNames = sortedProductNames.slice(skip, skip + take);
 
         // 2. Fetch all records for these product names (excluding Pending Transfer)
         const inventory = await prisma.outletInventory.findMany({
@@ -326,29 +328,24 @@ const getUsedInventory = async (req, res) => {
     }
 
     try {
-        const productSearchWhere = {
-            outlet_id,
-            is_used: true,
-            ...buildWordSearchWhere(search, ['product_name', 'imei_serial', 'category', 'color_variant'])
-        };
-
-        const distinctProducts = await prisma.outletInventory.groupBy({
-            by: ['product_name'],
-            where: productSearchWhere,
-            _count: { product_name: true },
-            orderBy: { _count: { product_name: 'desc' } },
-            skip,
-            take
+        const allUsedRows = await prisma.outletInventory.findMany({
+            where: { outlet_id, is_used: true },
+            orderBy: [{ product_name: 'asc' }, { id: 'asc' }]
         });
+        const matchingUsedRows = allUsedRows.filter(row =>
+            matchesSearch(row, search, ['product_name', 'imei_serial', 'category', 'color_variant'])
+        );
 
-        const totalProductsCount = await prisma.outletInventory.groupBy({
-            by: ['product_name'],
-            where: productSearchWhere,
-            _count: true
-        });
-        const total = totalProductsCount.length;
+        const countByProduct = new Map();
+        for (const row of matchingUsedRows) {
+            countByProduct.set(row.product_name, (countByProduct.get(row.product_name) || 0) + 1);
+        }
+        const sortedProductNames = Array.from(countByProduct.entries())
+            .sort((a, b) => b[1] - a[1])
+            .map(([name]) => name);
 
-        const productNames = distinctProducts.map(p => p.product_name);
+        const total = sortedProductNames.length;
+        const productNames = sortedProductNames.slice(skip, skip + take);
 
         const inventory = await prisma.outletInventory.findMany({
             where: {
