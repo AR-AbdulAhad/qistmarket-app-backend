@@ -1675,7 +1675,7 @@ const getDeliveryOfficerOTPLogs = async (req, res) => {
  * Handles Self Pickup delivery directly from the branch
  */
 const submitSelfPickupDelivery = async (req, res) => {
-  const { order_id, product_imei, selected_plan, phone, feedback, enroll_paytrigger } = req.body;
+  const { order_id, product_imei, inventory_id, selected_plan, phone, feedback, enroll_paytrigger } = req.body;
   const outlet_id = req.user.outlet_id;
 
   if (!outlet_id) {
@@ -1744,8 +1744,10 @@ const submitSelfPickupDelivery = async (req, res) => {
     // product name/category passed down to the completion logic.
     let productNameSnapshot = order.product_name;
     let inventoryCategory = null;
-    if (product_imei) {
-      const inventory = await prisma.outletInventory.findFirst({ where: { imei_serial: product_imei, outlet_id } });
+    if (product_imei || inventory_id) {
+      const inventory = product_imei
+        ? await prisma.outletInventory.findFirst({ where: { imei_serial: product_imei, outlet_id } })
+        : await prisma.outletInventory.findFirst({ where: { id: parseInt(inventory_id), outlet_id } });
       if (inventory) {
         productNameSnapshot = inventory.product_name;
         inventoryCategory = inventory.category;
@@ -1764,6 +1766,7 @@ const submitSelfPickupDelivery = async (req, res) => {
       order_id: order.id,
       outlet_id,
       product_imei: product_imei || null,
+      inventory_id: inventory_id ? parseInt(inventory_id) : null,
       selected_plan: selected_plan || null,
       feedback: feedback || null,
       custom_ledger: req.body.custom_ledger || null,

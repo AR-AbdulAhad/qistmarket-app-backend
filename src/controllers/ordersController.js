@@ -3638,10 +3638,6 @@ const getSelfPickupInventory = async (req, res) => {
     const where = {
       outlet_id,
       status: 'In Stock',
-      AND: [
-        { imei_serial: { not: null } },
-        { imei_serial: { not: '' } },
-      ]
     };
 
     if (search.trim()) {

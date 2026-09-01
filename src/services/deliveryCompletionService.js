@@ -500,8 +500,10 @@ async function completeSelfPickupDelivery({ order, payload, io, productNameSnaps
     let colorVariant = null;
     let localProductNameSnapshot = productNameSnapshot || order.product_name;
 
-    if (payload.product_imei) {
-      const inventory = await tx.outletInventory.findFirst({ where: { imei_serial: payload.product_imei, outlet_id } });
+    if (payload.product_imei || payload.inventory_id) {
+      const inventory = payload.product_imei
+        ? await tx.outletInventory.findFirst({ where: { imei_serial: payload.product_imei, outlet_id } })
+        : await tx.outletInventory.findFirst({ where: { id: payload.inventory_id, outlet_id } });
       if (inventory) {
         await tx.outletInventory.update({
           where: { id: inventory.id },

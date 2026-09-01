@@ -134,8 +134,7 @@ const getInventory = async (req, res) => {
             status: { not: 'Used Stock' },
             OR: search ? [
                 { product_name: { contains: search } },
-                { imei_serial: { contains: search } },
-                { category: { contains: search } }
+                { imei_serial: { contains: search } }
             ] : undefined
         };
 
@@ -236,8 +235,7 @@ const getStockTransferInventory = async (req, res) => {
             outlet_id,
             OR: search ? [
                 { product_name: { contains: search } },
-                { imei_serial: { contains: search } },
-                { category: { contains: search } }
+                { imei_serial: { contains: search } }
             ] : undefined
         };
 
@@ -324,8 +322,7 @@ const getUsedInventory = async (req, res) => {
             is_used: true,
             OR: search ? [
                 { product_name: { contains: search } },
-                { imei_serial: { contains: search } },
-                { category: { contains: search } }
+                { imei_serial: { contains: search } }
             ] : undefined
         };
 
