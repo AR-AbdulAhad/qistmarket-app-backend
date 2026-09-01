@@ -3645,6 +3645,7 @@ const getSelfPickupInventory = async (req, res) => {
         { product_name: { contains: search.trim() } },
         { imei_serial: { contains: search.trim() } },
         { color_variant: { contains: search.trim() } },
+        { category: { contains: search.trim() } },
       ];
     }
 
