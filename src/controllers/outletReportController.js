@@ -180,10 +180,31 @@ const getSalesReport = async (req, res) => {
         const orders = await prisma.order.findMany({
             where,
             include: {
-                installment_ledger: true
+                installment_ledger: true,
+                delivery: true,
+                cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
             },
             orderBy: { updated_at: 'desc' }
         });
+
+        // Resolve the ACTUAL delivered product by IMEI, not the suggested product_name
+        // stored on the order at creation time — the outlet may hand over a different
+        // physical unit than what was originally requested.
+        const deliveryImeis = orders
+            .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
+            .filter(Boolean);
+
+        const deliveryInventories = deliveryImeis.length > 0
+            ? await prisma.outletInventory.findMany({
+                where: { imei_serial: { in: deliveryImeis } },
+                select: { imei_serial: true, product_name: true }
+            })
+            : [];
+
+        const deliveryInventoryMap = new Map();
+        for (const inv of deliveryInventories) {
+            if (inv.imei_serial) deliveryInventoryMap.set(inv.imei_serial, inv);
+        }
 
         // Down payment (advance) is month 0 on the installment ledger. Read it
         // from the ledger's normalized advance row rather than the static
@@ -192,13 +213,37 @@ const getSalesReport = async (req, res) => {
         // manual ledger edits, etc).
         const ordersWithDownPayment = orders.map(o => {
             const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
-            const { advance_payment } = getNormalizedLedger(rows);
+            const { advance_payment, installment_ledger, summary: ledgerSummary } = getNormalizedLedger(rows);
+
+            const imeiSerial = o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial;
+            const invInfo = imeiSerial ? deliveryInventoryMap.get(imeiSerial) : null;
+            const delivered_product_name = invInfo?.product_name || o.cash_in_hand?.[0]?.product_name || o.product_name || null;
+
+            const down_payment_amount = advance_payment.paid ? advance_payment.amount : 0;
+
+            // Sales value, tenure, and the monthly installment amount are read from the
+            // ledger (the actually-agreed plan) rather than Order.total_amount/months/
+            // monthly_amount, since those static columns hold the originally suggested
+            // plan and can diverge from what was actually agreed at delivery (advance
+            // overrides, plan changes, etc) — same reasoning as down_payment_amount above.
+            const hasLedger = installment_ledger.length > 0;
+            const sales_value = hasLedger ? ledgerSummary.grandTotalDue : o.total_amount;
+            const tenure = hasLedger ? installment_ledger.length : o.months;
+            const installment_amount = hasLedger ? (installment_ledger[0]?.dueAmount ?? o.monthly_amount) : o.monthly_amount;
+            const balance = sales_value - down_payment_amount;
+
             return {
                 ...o,
-                down_payment_amount: advance_payment.paid ? advance_payment.amount : 0,
+                product_name: delivered_product_name,
+                suggested_product_name: o.product_name,
+                down_payment_amount,
                 down_payment_planned: advance_payment.amount,
                 down_payment_paid: advance_payment.paid,
-                down_payment_status: advance_payment.status
+                down_payment_status: advance_payment.status,
+                sales_value,
+                tenure,
+                installment_amount,
+                balance
             };
         });
 
