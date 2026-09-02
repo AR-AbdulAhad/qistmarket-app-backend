@@ -291,7 +291,7 @@ const getDashboardStats = async (req, res) => {
                 where: {
                     outlet_id,
                     status: 'delivered',
-                    updated_at: { gte: sinceDate }
+                    ...deliveredDateFilter(sinceDate, undefined)
                 },
                 select: { total_amount: true }
             });
@@ -452,33 +452,37 @@ const getDashboardStats = async (req, res) => {
             sales: calcIncrement(currentSales, prevSales),
         };
 
-        // Graph Data: Current Month vs Last Month delivered orders
+        // Graph Data: selected period vs its immediately-preceding period, using the
+        // same `start`/`end`/`prevStart`/`prevEnd` the indicator cards above use — this
+        // used to be hardcoded to "calendar month to date" vs "last calendar month"
+        // regardless of the filter/date-range picked on screen, so the charts never
+        // matched what the user had actually filtered for. Also matches the delivered
+        // definition (delivered_at, falling back to updated_at) used everywhere else.
+        const dayCount = Math.max(1, Math.round((end - start) / 86400000) + 1);
+
         const getDailyStats = async (periodStart, periodEnd) => {
             const orders = await prisma.order.findMany({
                 where: {
                     outlet_id,
                     status: 'delivered',
-                    updated_at: { gte: periodStart, lte: periodEnd }
+                    ...deliveredDateFilter(periodStart, periodEnd)
                 },
-                select: { updated_at: true, total_amount: true }
+                select: { delivered_at: true, updated_at: true, total_amount: true }
             });
 
             const daily = {};
             orders.forEach(o => {
-                const day = o.updated_at.getDate();
-                if (!daily[day]) daily[day] = { amount: 0, customers: 0 };
-                daily[day].amount += (o.total_amount || 0);
-                daily[day].customers += 1;
+                const effectiveDate = o.delivered_at || o.updated_at;
+                const dayIndex = Math.floor((effectiveDate - periodStart) / 86400000) + 1;
+                if (!daily[dayIndex]) daily[dayIndex] = { amount: 0, customers: 0 };
+                daily[dayIndex].amount += (o.total_amount || 0);
+                daily[dayIndex].customers += 1;
             });
             return daily;
         };
 
-        const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
-
-        const thisMonthDaily = await getDailyStats(thisMonthStart, now);
-        const lastMonthDaily = await getDailyStats(lastMonthStart, lastMonthEnd);
+        const thisMonthDaily = await getDailyStats(start, end);
+        const lastMonthDaily = await getDailyStats(prevStart, prevEnd);
 
         // ─── Stock Snapshot (live, not period-scoped) ───────────────────────
         // Exact same convention as the "Stock List" page's own stats card
@@ -494,14 +498,14 @@ const getDashboardStats = async (req, res) => {
         ]);
 
         const graphData = {
-            days: Array.from({ length: 31 }, (_, i) => i + 1),
+            days: Array.from({ length: dayCount }, (_, i) => i + 1),
             sales: {
-                current: Array.from({ length: 31 }, (_, i) => thisMonthDaily[i + 1]?.amount || 0),
-                previous: Array.from({ length: 31 }, (_, i) => lastMonthDaily[i + 1]?.amount || 0)
+                current: Array.from({ length: dayCount }, (_, i) => thisMonthDaily[i + 1]?.amount || 0),
+                previous: Array.from({ length: dayCount }, (_, i) => lastMonthDaily[i + 1]?.amount || 0)
             },
             customers: {
-                current: Array.from({ length: 31 }, (_, i) => thisMonthDaily[i + 1]?.customers || 0),
-                previous: Array.from({ length: 31 }, (_, i) => lastMonthDaily[i + 1]?.customers || 0)
+                current: Array.from({ length: dayCount }, (_, i) => thisMonthDaily[i + 1]?.customers || 0),
+                previous: Array.from({ length: dayCount }, (_, i) => lastMonthDaily[i + 1]?.customers || 0)
             }
         };
 

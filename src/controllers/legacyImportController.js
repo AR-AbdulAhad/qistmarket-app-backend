@@ -70,16 +70,13 @@ function required(row, field) {
 
 const REQUIRED_FIELDS = ['purchaser_name', 'purchaser_cnic', 'purchaser_phone', 'item_price', 'tenure_months', 'installment'];
 
-// Every value here is a real order status this app already renders
-// (OrderList.tsx's status-badge switch) — picking anything outside this list
-// would leave the imported order in a status the rest of the dashboard
-// doesn't know how to display. Excludes transitional workflow states that
-// only make sense mid-process with live officer assignment already attached
-// (transferred, ready_for_pickup, picked, approved, awaiting_paytrigger_enrollment) —
-// those can't be a *starting* state for a bulk-imported historical record.
-const COMPLETED_STATUSES = ['delivered', 'completed'];
-const OPEN_STATUSES = ['new', 'in_progress', 'cancelled', 'rejected', 'expired', 'returned'];
-const VALID_STATUSES = [...COMPLETED_STATUSES, ...OPEN_STATUSES];
+// Every legacy row is an already-transacted historical sale, so only these
+// two make sense as the batch status — every other order status either
+// implies a live workflow stage (verification/delivery in progress, sent to
+// an outlet) that doesn't apply to a bulk-imported paper-ledger record, or
+// an outcome (cancelled/rejected/expired/returned) that isn't what this data
+// represents.
+const VALID_STATUSES = ['delivered', 'completed'];
 
 async function importOneRow(row, { adminUserId, defaultStatus }) {
   for (const f of REQUIRED_FIELDS) {
@@ -158,12 +155,12 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
     });
   }
 
-  // "Completed" statuses get the full Delivery + InstallmentLedger +
-  // ConsumerNumber graph built (it's an already-transacted sale); every
-  // other status is a bare Order + Customer + Verification record, same as
-  // any fresh order still waiting on the live workflow — see COMPLETED_STATUSES.
-  const isCompleted = COMPLETED_STATUSES.includes(defaultStatus);
-  const isDelivered = defaultStatus === 'delivered'; // only this one sets is_delivered/delivered_at — "completed" means fully paid off, not necessarily handed over on that exact date
+  // Both valid statuses (delivered, completed) represent an already-
+  // transacted sale, so the full Delivery + InstallmentLedger + ConsumerNumber
+  // graph is always built. Only "delivered" sets is_delivered/delivered_at —
+  // "completed" means fully paid off, not necessarily handed over on that
+  // exact date.
+  const isDelivered = defaultStatus === 'delivered';
 
   // 2. Order
   const order = await prisma.order.create({
@@ -182,7 +179,6 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
       status: defaultStatus,
       is_delivered: isDelivered,
       delivered_at: isDelivered ? orderDate : null,
-      cancelled_reason: defaultStatus === 'cancelled' ? 'Legacy import — historical record' : null,
       imei_serial: serial,
       created_by_user_id: adminUserId,
       customer_id: customer.id,
@@ -192,15 +188,14 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
     },
   });
 
-  // 3. Verification + Purchaser + up to 2 Grantors — always created so the
-  // profile shows up correctly regardless of the order's own status.
+  // 3. Verification + Purchaser + up to 2 Grantors
   const verification = await prisma.verification.create({
     data: {
       order_id: order.id,
       verification_officer_id: adminUserId,
-      status: isCompleted ? 'completed' : 'in_progress',
+      status: 'completed',
       start_time: orderDate,
-      end_time: isCompleted ? orderDate : null,
+      end_time: orderDate,
     },
   });
 
@@ -217,7 +212,7 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
       employer_address: PLACEHOLDER,
       designation: PLACEHOLDER,
       nearest_location: PLACEHOLDER,
-      is_verified: isCompleted,
+      is_verified: true,
     },
   });
 
@@ -245,16 +240,9 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
         full_residential_address: PLACEHOLDER,
         relationship: PLACEHOLDER,
         nearest_location: PLACEHOLDER,
-        is_verified: isCompleted,
+        is_verified: true,
       },
     });
-  }
-
-  if (!isCompleted) {
-    // Not treated as an already-completed sale — no Delivery/Ledger/
-    // ConsumerNumber records yet, same as any other freshly-created order
-    // waiting to go through the live verification → delivery flow.
-    return { order_id: order.id, reconciliationWarning };
   }
 
   // 4. Delivery — InstallmentLedger requires a real delivery_id (schema:

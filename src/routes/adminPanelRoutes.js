@@ -9,8 +9,11 @@ const {
 } = require('../controllers/adminPanelController');
 const { sendBroadcast, getRoleOptions } = require('../controllers/broadcastController');
 const { commitLegacyImport, listPendingLegacyProfiles, markLegacyProfileComplete } = require('../controllers/legacyImportController');
+const { getOtpChannelSettings, updateOtpChannelSettings } = require('../controllers/settingsController');
 
 router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
+router.get('/settings/otp', authenticateJWT, requireSuperAdmin, getOtpChannelSettings);
+router.post('/settings/otp', authenticateJWT, requireSuperAdmin, updateOtpChannelSettings);
 router.post('/legacy-import/commit', authenticateJWT, requireSuperAdmin, commitLegacyImport);
 router.get('/legacy-import/pending', authenticateJWT, requireSuperAdmin, listPendingLegacyProfiles);
 router.post('/legacy-import/:orderId/mark-complete', authenticateJWT, requireSuperAdmin, markLegacyProfileComplete);
@@ -30,3 +33,4 @@ router.get('/reports/payroll', authenticateJWT, getPayrollSummary);
 router.get('/outlets/staff', authenticateJWT, getOutletStaffList);
 
 module.exports = router;
+
