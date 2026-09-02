@@ -4,24 +4,25 @@ const prisma = require('../../lib/prisma');
 const now = () => new Date();
 
 const getOfficerAssignments = async (req, res) => {
-    const { role } = req.query;
+    const { role, all } = req.query;
     try {
-        let roleName;
+        let roleNames;
         if (role === 'delivery') {
-            roleName = 'Delivery Agent';
+            roleNames = ['Delivery Agent', 'Super Admin', 'Admin'];
         } else if (role === 'recovery') {
-            roleName = 'Recovery Officer';
+            roleNames = ['Recovery Officer', 'Super Admin', 'Admin'];
         } else {
-            roleName = 'Verification Officer';
+            roleNames = ['Verification Officer', 'Super Admin', 'Admin'];
         }
         const userRole = (req.user?.role || '').toLowerCase();
-        const where = { role: { name: roleName } };
+        const where = {
+            role: { name: { in: roleNames } }
+        };
 
-        // If it's a branch user, only show officers from their outlet
-        if (userRole === 'branch user' && req.user.outlet_id) {
+        // If 'all=true' is passed or user is admin/superadmin, don't restrict by branch outlet
+        if (all !== 'true' && userRole === 'branch user' && req.user.outlet_id) {
             where.outlet_id = req.user.outlet_id;
         } else if (req.query.outlet_id) {
-            // Support explicit filtering if provided (for admins)
             where.outlet_id = parseInt(req.query.outlet_id);
         }
 
@@ -31,6 +32,7 @@ const getOfficerAssignments = async (req, res) => {
                 id: true,
                 full_name: true,
                 username: true,
+                role: { select: { name: true } },
                 officerAssignments: true,
             },
             orderBy: { full_name: 'asc' },

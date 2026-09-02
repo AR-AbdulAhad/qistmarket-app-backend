@@ -605,6 +605,13 @@ const getBadges = async (req, res) => {
  * — not reusable for Admin, whose token has no outlet_id. This is the
  * Admin-facing equivalent: any outlet, any role, via ?outlet_id=.
  */
+/**
+ * getOutletStaffList
+ * outletController.getOutletOfficers reads req.user.outlet_id directly
+ * (no query-param fallback), so it only works for outlet-logged-in users
+ * — not reusable for Admin, whose token has no outlet_id. This is the
+ * Admin-facing equivalent: any outlet, any role, via ?outlet_id=.
+ */
 const getOutletStaffList = async (req, res) => {
     const { outlet_id } = req.query;
     if (!outlet_id) return res.status(400).json({ success: false, message: 'outlet_id is required.' });
@@ -632,6 +639,106 @@ const getOutletStaffList = async (req, res) => {
     }
 };
 
+/**
+ * deleteOrderPermanently
+ * Super Admin-only permanent deletion of an order and all its child graph
+ * (ConsumerNumbers, InstallmentLedger, Delivery, Verification, Purchaser,
+ * Grantors, Documents, Locations, OrderStatusHistories, OrderPayments,
+ * CashInHand, PayTrigger, SmartPay, RecoveryVisits, etc.).
+ * If the Customer record has no remaining orders after deletion, it is
+ * cleaned up as well.
+ */
+const deleteOrderPermanently = async (req, res) => {
+  const orderId = parseInt(req.params.orderId, 10);
+  if (isNaN(orderId)) {
+    return res.status(400).json({ success: false, message: 'Invalid order ID.' });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        verification: {
+          include: {
+            verification_locations: { include: { photos: true } },
+          },
+        },
+        delivery: { include: { installment_ledger: true } },
+        installment_ledger: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    const customerId = order.customer_id;
+    const verificationId = order.verification?.id || null;
+    const deliveryId = order.delivery?.id || null;
+    const ledgerId = order.installment_ledger?.id || order.delivery?.installment_ledger?.id || null;
+
+    // 1. Delete ConsumerNumbers
+    if (ledgerId || deliveryId) {
+      const consumerWhere = [];
+      if (ledgerId) consumerWhere.push({ ledger_id: ledgerId });
+      if (deliveryId) consumerWhere.push({ delivery_id: deliveryId });
+      await prisma.consumerNumber.deleteMany({ where: { OR: consumerWhere } });
+    }
+
+    // 2. Delete InstallmentLedger
+    await prisma.installmentLedger.deleteMany({ where: { order_id: orderId } });
+
+    // 3. Delete Deliveries & ArchivedDeliveries
+    await prisma.delivery.deleteMany({ where: { order_id: orderId } });
+    await prisma.archivedDelivery.deleteMany({ where: { order_id: orderId } });
+
+    // 4. Delete Verification details (purchaser, grantors, docs, locations & photos, reviews)
+    if (verificationId) {
+      const verLocs = order.verification?.verification_locations || [];
+      const locIds = verLocs.map((l) => l.id);
+      if (locIds.length > 0) {
+        await prisma.verificationLocationPhoto.deleteMany({ where: { verification_location_id: { in: locIds } } });
+        await prisma.verificationLocation.deleteMany({ where: { verification_id: verificationId } });
+      }
+      await prisma.purchaserVerification.deleteMany({ where: { verification_id: verificationId } });
+      await prisma.grantorVerification.deleteMany({ where: { verification_id: verificationId } });
+      await prisma.nextOfKinVerification.deleteMany({ where: { verification_id: verificationId } });
+      await prisma.verificationDocument.deleteMany({ where: { verification_id: verificationId } });
+      await prisma.verificationReview.deleteMany({ where: { verification_id: verificationId } });
+      await prisma.locationTracking.deleteMany({ where: { verification_id: verificationId } });
+      await prisma.verification.deleteMany({ where: { id: verificationId } });
+    }
+
+    // 5. Delete Order histories, payments, cash in hand, paytrigger, smartpay, complaints, visits
+    await prisma.orderStatusHistory.deleteMany({ where: { order_id: orderId } });
+    await prisma.orderProductHistory.deleteMany({ where: { order_id: orderId } });
+    await prisma.orderPayment.deleteMany({ where: { order_id: orderId } });
+    await prisma.cashInHand.deleteMany({ where: { order_id: orderId } });
+    await prisma.payTriggerDevice.deleteMany({ where: { order_id: orderId } });
+    await prisma.smartPayQr.deleteMany({ where: { order_id: orderId } });
+    await prisma.recoveryVisit.deleteMany({ where: { order_id: orderId } });
+    await prisma.returnExchange.deleteMany({ where: { order_id: orderId } });
+    await prisma.dummyCustomer.deleteMany({ where: { order_id: orderId } });
+    await prisma.complaint.updateMany({ where: { order_id: orderId }, data: { order_id: null } });
+
+    // 6. Delete Order itself
+    await prisma.order.delete({ where: { id: orderId } });
+
+    // 7. Cleanup orphaned Customer record if no other orders reference them
+    if (customerId) {
+      const remainingOrdersCount = await prisma.order.count({ where: { customer_id: customerId } });
+      if (remainingOrdersCount === 0) {
+        await prisma.customer.delete({ where: { id: customerId } }).catch(() => {});
+      }
+    }
+
+    return res.json({ success: true, message: `Order #${orderId} (${order.order_ref}) and all associated records permanently deleted.` });
+  } catch (error) {
+    console.error('deleteOrderPermanently error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to delete order permanently: ' + (error.message || 'Internal server error') });
+  }
+};
+
 module.exports = {
     getOutletPerformanceSummary,
     getUnifiedRankings,
@@ -645,4 +752,6 @@ module.exports = {
     getAttendanceMonitoring,
     getPayrollSummary,
     getOutletStaffList,
+    deleteOrderPermanently,
 };
+

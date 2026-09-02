@@ -858,12 +858,19 @@ const uploadPurchaserDocument = async (req, res) => {
       return res.status(400).json({ success: false, error: { code: 400, message: 'No file uploaded' } });
     }
 
-    const purchaser = await prisma.purchaserVerification.findUnique({
+    let purchaser = await prisma.purchaserVerification.findUnique({
       where: { verification_id: parseInt(verification_id) }
     });
 
     if (!purchaser) {
-      return res.status(404).json({ success: false, error: { code: 404, message: 'Purchaser record not found' } });
+      const ver = await prisma.verification.findUnique({ where: { id: parseInt(verification_id) }, include: { order: true } });
+      purchaser = await prisma.purchaserVerification.create({
+        data: {
+          verification: { connect: { id: parseInt(verification_id) } },
+          name: ver?.order?.customer_name || 'Purchaser',
+          telephone_number: ver?.order?.whatsapp_number || '',
+        }
+      });
     }
 
     const document = await prisma.verificationDocument.create({
@@ -913,7 +920,7 @@ const uploadGrantorDocument = async (req, res) => {
       return res.status(400).json({ success: false, error: { code: 400, message: 'No file uploaded' } });
     }
 
-    const grantor = await prisma.grantorVerification.findFirst({
+    let grantor = await prisma.grantorVerification.findFirst({
       where: {
         verification_id: parseInt(verification_id),
         grantor_number: parseInt(grantor_number)
@@ -921,7 +928,13 @@ const uploadGrantorDocument = async (req, res) => {
     });
 
     if (!grantor) {
-      return res.status(404).json({ success: false, error: { code: 404, message: 'Grantor record not found' } });
+      grantor = await prisma.grantorVerification.create({
+        data: {
+          verification_id: parseInt(verification_id),
+          grantor_number: parseInt(grantor_number),
+          name: `Grantor ${grantor_number}`
+        }
+      });
     }
 
     const document = await prisma.verificationDocument.create({
@@ -1271,6 +1284,14 @@ const getVerificationByOrderId = async (req, res) => {
             status: true,
             customer_name: true,
             whatsapp_number: true,
+            product_name: true,
+            total_amount: true,
+            advance_amount: true,
+            monthly_amount: true,
+            months: true,
+            imei_serial: true,
+            outlet_id: true,
+            outlet: { select: { id: true, name: true, code: true } },
             address: true,
             city: true,
             area: true,
@@ -3399,6 +3420,76 @@ const getVerificationDashboardStats = async (req, res) => {
   }
 };
 
+/**
+ * updateVerificationAssignment
+ * Updates verification_officer_id on Verification and outlet_id on Order.
+ */
+const updateVerificationAssignment = async (req, res) => {
+  const { verification_id } = req.params;
+  const { verification_officer_id, outlet_id } = req.body;
+
+  try {
+    const verId = parseInt(verification_id, 10);
+    if (isNaN(verId)) {
+      return res.status(400).json({ success: false, message: 'Invalid verification ID.' });
+    }
+
+    const verification = await prisma.verification.findUnique({
+      where: { id: verId },
+      include: { order: true }
+    });
+
+    if (!verification) {
+      return res.status(404).json({ success: false, message: 'Verification record not found.' });
+    }
+
+    const officerId = verification_officer_id !== undefined ? (verification_officer_id ? parseInt(verification_officer_id, 10) : null) : undefined;
+    const outletIdVal = outlet_id !== undefined ? (outlet_id ? parseInt(outlet_id, 10) : null) : undefined;
+
+    // Update Verification officer
+    const updatedVerification = await prisma.verification.update({
+      where: { id: verId },
+      data: {
+        ...(officerId !== undefined && { verification_officer_id: officerId }),
+        updated_at: now(),
+      },
+      include: {
+        verification_officer: { select: { id: true, full_name: true, username: true } }
+      }
+    });
+
+    // Update Order outlet and assigned_to_user_id if officerId changed
+    if (verification.order_id) {
+      await prisma.order.update({
+        where: { id: verification.order_id },
+        data: {
+          ...(outletIdVal !== undefined && { outlet_id: outletIdVal }),
+          ...(officerId !== undefined && { assigned_to_user_id: officerId }),
+          updated_at: now(),
+        }
+      });
+
+      // Log status change audit
+      await logOrderStatusChange(
+        verification.order_id,
+        verification.order.status,
+        verification.order.status,
+        req.user,
+        `Re-assigned: ${officerId ? `Officer #${officerId}` : ''} ${outletIdVal ? `Outlet #${outletIdVal}` : ''}`
+      ).catch(() => {});
+    }
+
+    return res.json({
+      success: true,
+      message: 'Verification Officer & Outlet assignment updated successfully!',
+      data: { verification: updatedVerification }
+    });
+  } catch (error) {
+    console.error('updateVerificationAssignment error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error: ' + (error.message || '') });
+  }
+};
+
 module.exports = {
   checkVerificationPerson,
   getVerificationDashboardStats,
@@ -3432,5 +3523,6 @@ module.exports = {
   getDeliveredProductDetails,
   getDeliveredProductsList,
   updateVerificationMedia,
-  replaceLocationPhoto
-};
+  replaceLocationPhoto,
+  updateVerificationAssignment,
+};

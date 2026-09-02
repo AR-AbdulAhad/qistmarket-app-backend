@@ -37,8 +37,12 @@ const {
   updateVerificationMedia,
   replaceLocationPhoto,
   getDashboardStats,
-  checkVerificationPerson
+  checkVerificationPerson,
+  updateVerificationAssignment
 } = require('../controllers/verificationController');
+
+// Update Verification Officer and Outlet assignment
+router.put('/verification/:verification_id/assignment', authenticateJWT, updateVerificationAssignment);
 
 // Get all verifications
 router.get('/verifications', authenticateJWT, getVerifications);
