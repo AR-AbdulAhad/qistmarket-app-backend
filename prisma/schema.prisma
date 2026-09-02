@@ -186,6 +186,8 @@ model Order {
   alternate_contact        String?
   order_notes              String?               @db.Text
   imei_serial              String?
+  needs_media_upload       Boolean               @default(false)
+  needs_location           Boolean               @default(false)
   postponed_feedback       String?               @db.Text
   delivery_assigned_at     DateTime?
   recovery_assigned_at     DateTime?
@@ -761,7 +763,7 @@ model OutletInventory {
 /// verification+delivery pipeline); this is a single-step sale against
 /// existing outlet stock, feeding straight into the outlet's Cash Register.
 model CashSale {
-  id              Int             @id @default(autoincrement())
+  id              Int      @id @default(autoincrement())
   outlet_id       Int
   inventory_id    Int
   // Snapshot fields so this record stays meaningful even if the inventory

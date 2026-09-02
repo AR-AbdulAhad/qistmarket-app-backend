@@ -249,6 +249,24 @@ const getDashboardStats = async (req, res) => {
         const currentCounts = getCounts(currentOrders);
         const prevCounts = getCounts(prevOrders);
 
+        // "Delivered" must match the dedicated Delivered Orders list exactly, which
+        // filters on delivered_at (falling back to updated_at only when delivered_at
+        // is null) rather than raw updated_at — an order merely touched (e.g. edited)
+        // within the window shouldn't count here unless it was actually delivered in it.
+        const deliveredDateFilter = (gte, lte) => ({
+            OR: [
+                { delivered_at: { gte, lte } },
+                { AND: [{ delivered_at: null }, { updated_at: { gte, lte } }] }
+            ]
+        });
+
+        currentCounts.delivered = await prisma.order.count({
+            where: { outlet_id, status: 'delivered', ...deliveredDateFilter(start, end) }
+        });
+        prevCounts.delivered = await prisma.order.count({
+            where: { outlet_id, status: 'delivered', ...deliveredDateFilter(prevStart, prevEnd) }
+        });
+
         // Sales calculation: Shifting from ledger advance to total order amount of delivered orders
         const getSalesSum = (ordersList) => {
             const deliveredList = ordersList.filter(o => o.status === 'delivered');

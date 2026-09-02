@@ -168,13 +168,26 @@ const getSalesReport = async (req, res) => {
         const where = { ...outletFilter, status: 'delivered' };
 
         if (startDate || endDate) {
-            where.updated_at = {};
-            if (startDate) where.updated_at.gte = new Date(startDate);
+            // Match the dedicated Delivered Orders list definition exactly: filter on
+            // delivered_at, falling back to updated_at only when delivered_at is null.
+            // Using raw updated_at here (as before) let orders merely edited within the
+            // window count as "delivered" in it, inflating totals vs. the Delivered
+            // Orders list and Dashboard for the same date range.
+            const range = {};
+            if (startDate) {
+                const start = new Date(startDate);
+                start.setHours(0, 0, 0, 0);
+                range.gte = start;
+            }
             if (endDate) {
                 const end = new Date(endDate);
                 end.setHours(23, 59, 59, 999);
-                where.updated_at.lte = end;
+                range.lte = end;
             }
+            where.AND = [
+                ...(where.AND || []),
+                { OR: [{ delivered_at: range }, { AND: [{ delivered_at: null }, { updated_at: range }] }] }
+            ];
         }
 
         const orders = await prisma.order.findMany({
@@ -251,7 +264,11 @@ const getSalesReport = async (req, res) => {
         // the selected date range, not just paid-ever across each order's
         // whole ledger history. Filter each paid row by its own paid_at,
         // mirroring the convention already used in getDaybook above.
-        const rangeStart = startDate ? new Date(startDate) : null;
+        let rangeStart = null;
+        if (startDate) {
+            rangeStart = new Date(startDate);
+            rangeStart.setHours(0, 0, 0, 0);
+        }
         let rangeEnd = null;
         if (endDate) {
             rangeEnd = new Date(endDate);
@@ -260,7 +277,11 @@ const getSalesReport = async (req, res) => {
 
         const summary = {
             totalOrders: orders.length,
-            totalGrossAmount: orders.reduce((acc, o) => acc + o.total_amount, 0),
+            // Must match the table's "Sales Value" column (ledger-derived grandTotalDue,
+            // falling back to Order.total_amount only when there's no ledger) — summing
+            // the raw Order.total_amount here let this tile diverge from the table below
+            // it whenever the actually-agreed plan differed from the originally suggested one.
+            totalGrossAmount: ordersWithDownPayment.reduce((acc, o) => acc + o.sales_value, 0),
             totalDownPaymentsReceived: ordersWithDownPayment.reduce((acc, o) => acc + o.down_payment_amount, 0),
             totalReceived: orders.reduce((acc, o) => {
                 const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];

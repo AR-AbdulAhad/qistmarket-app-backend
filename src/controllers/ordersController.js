@@ -286,6 +286,7 @@ function getDateRangeFilter(range, start, end) {
     case 'Custom Range':
       if (start && end) {
         gte = new Date(start);
+        gte.setHours(0, 0, 0, 0);
         lt = new Date(end);
         lt.setHours(23, 59, 59, 999);
       }
@@ -3078,14 +3079,12 @@ const getDeliveredOrders = async (req, res) => {
     };
 
     if (userRole === 'branch user') {
-      where.AND = [
-        {
-          OR: [
-            { outlet_id: userFromDb?.outlet_id || -1 },
-            { created_by_user_id: req.user.id }
-          ]
-        }
-      ];
+      // Scope strictly to the user's outlet — matching getOutletFilter and the
+      // Outlet Dashboard's own delivered count. The previous OR with
+      // created_by_user_id let this outlet-scoped list leak in orders the user
+      // had created for/while at a different outlet, so this list's total
+      // didn't match the dashboard indicator for the same date range.
+      where.outlet_id = userFromDb?.outlet_id || -1;
     } else if (userRole === 'sales officer') {
       where.AND = [
         { created_by_user_id: req.user.id }

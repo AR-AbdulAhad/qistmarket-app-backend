@@ -1,0 +1,123 @@
+type,id,label,reasons,created_at
+User,1,"superadmin1 (Super Admin1)","phone reused by another account",2026-01-12T21:08:27.145Z
+User,2,"ahad12 (Abdul Ahad)","phone reused by another account",2026-01-12T21:10:16.584Z
+User,4,"ahmedzaki (Muhammad Ahmed Zaki)","placeholder-looking CNIC",2026-01-23T17:34:11.540Z
+User,5,"ubaidraza (Ubaid Raza)","phone reused by another account",2026-01-26T12:32:35.865Z
+User,6,"ahad13 (Ahad)","phone reused by another account",2026-02-06T07:29:19.827Z
+User,7,"ahad14 (Abdul Ahad)","phone reused by another account",2026-02-06T13:41:44.011Z
+User,15,"sarwar1 (Sarwar)","phone reused by another account",2026-02-17T12:32:15.274Z
+User,16,"taimord (taimoor khan)","placeholder-looking phone",2026-02-17T13:04:25.558Z
+User,25,"ahadrec (ahad rec)","phone reused by another account",2026-02-27T12:06:30.765Z
+User,45,"testdeliver (Abdul Ahad)","phone reused by another account",2026-03-27T08:59:12.640Z
+User,46,"testsales (salestest)","phone reused by another account",2026-04-01T08:09:15.886Z
+User,54,"kavish (KAVISH)","placeholder-looking CNIC",2026-04-20T12:33:59.498Z
+User,57,"vo test (VO test)","name/username looks like a test account",2026-04-21T09:56:49.601Z
+User,67,"ahadsales (Ahad Sales)","phone reused by another account",2026-05-05T09:25:19.142Z
+User,92,"outlet_dummy1 (Test Dummy Outlet Manager)","name/username looks like a test account",2026-07-16T21:27:04.787Z
+User,93,"rec_dummy1 (Test Recovery Officer 1)","name/username looks like a test account",2026-07-16T21:27:04.793Z
+User,94,"rec_dummy2 (Test Recovery Officer 2)","name/username looks like a test account",2026-07-16T21:27:04.803Z
+User,95,"rec_dummy3 (Test Recovery Officer 3)","name/username looks like a test account",2026-07-16T21:27:04.812Z
+User,96,"rec_dummy4 (Test Recovery Officer 4)","name/username looks like a test account",2026-07-16T21:27:04.818Z
+User,108,"qist-010 (Sarwarrrr)","placeholder-looking phone",2026-08-11T11:04:53.532Z
+User,109,"zeeeee (zeeeee)","placeholder-looking CNIC; placeholder-looking phone",2026-08-11T14:35:08.669Z
+User,110,"zeeeeee (zeeeeee)","placeholder-looking CNIC; placeholder-looking phone",2026-08-11T14:39:12.833Z
+Order,16,"QIST-20260214-9171 — TAIMOOR","placeholder-looking phone number",2026-02-14T11:19:44.767Z
+Order,48,"QIST-20260226-8702 — OWAIS","placeholder-looking phone number",2026-02-26T09:25:13.924Z
+Order,78,"QIST-20260228-7930 — SYED MUNEER  AHMED","placeholder-looking phone number",2026-02-28T07:57:22.719Z
+Order,83,"QIST-20260228-9884 — M TALHA KHAN","placeholder-looking phone number",2026-02-28T08:48:12.710Z
+Order,107,"QIST-20260303-9160 — SHAHBAZ","placeholder-looking phone number",2026-03-03T11:45:48.180Z
+Order,137,"QIST-20260306-1264 — MUDASIR","placeholder-looking phone number",2026-03-06T07:25:49.448Z
+Order,218,"QIST-20260309-3653 — M noman","placeholder-looking phone number",2026-03-09T09:04:06.572Z
+Order,339,"QIST-20260313-7065 — MOHIB KHAN","placeholder-looking phone number",2026-03-13T07:56:01.300Z
+Order,397,"QIST-20260314-6028 — ADIL AHMED","placeholder-looking phone number",2026-03-14T12:10:33.145Z
+Order,420,"QIST-20260316-5614 — MUHAMMAD REHAN","placeholder-looking phone number",2026-03-16T09:11:48.298Z
+Order,457,"QIST-20260317-2242 — ADIL","placeholder-looking phone number",2026-03-17T08:23:44.082Z
+Order,533,"QIST-20260324-3051 — Mohammad umer","placeholder-looking phone number",2026-03-24T12:20:26.751Z
+Order,583,"QIST-20260326-5808 — test","customer name looks like a test entry",2026-03-26T14:22:07.713Z
+Order,584,"QIST-20260326-3278 — test","customer name looks like a test entry",2026-03-26T14:23:33.372Z
+Order,586,"QIST-20260326-2896 — test","customer name looks like a test entry",2026-03-26T16:32:14.094Z
+Order,728,"QIST-20260415-6249 — Ahsan Saleem","placeholder-looking phone number",2026-04-15T12:48:28.682Z
+Order,760,"QIST-20260417-5717 — Syed ali asghar kazmi","placeholder-looking phone number",2026-04-17T17:50:34.908Z
+Order,765,"QIST-20260417-6910 — tes ahad customer","trivial total_amount (0)",2026-04-17T20:02:31.423Z
+Order,785,"QIST-20260418-6250 — Syed Ali Asghar kazmi","placeholder-looking phone number",2026-04-18T15:14:15.419Z
+Order,795,"QIST-20260420-4189 — test","customer name looks like a test entry; trivial total_amount (1)",2026-04-20T15:27:49.271Z
+Order,804,"QIST-20260421-2467 — test","customer name looks like a test entry",2026-04-21T13:33:19.368Z
+Order,805,"QIST-20260421-7009 — SOHAIL ABBAS","placeholder-looking phone number",2026-04-21T14:16:35.137Z
+Order,839,"QIST-20260422-5892 — test orders 00","customer name looks like a test entry",2026-04-22T18:48:02.026Z
+Order,872,"QIST-20260423-3311 — Ahad Dummy Test Orders","customer name looks like a test entry",2026-04-23T15:18:13.548Z
+Order,873,"QIST-20260423-2696 — Ahad test real","customer name looks like a test entry",2026-04-23T15:24:36.821Z
+Order,875,"QIST-20260424-6574 — test check notification","customer name looks like a test entry",2026-04-24T15:34:28.996Z
+Order,877,"TEST-REF-1777037426027 — Test Blacklist User","channel is literally ""Test""; customer name looks like a test entry",2026-04-24T13:30:26.027Z
+Order,879,"TEST-REF-1777037459636 — Test Blacklist User","channel is literally ""Test""; customer name looks like a test entry",2026-04-24T13:30:59.636Z
+Order,880,"TEST-REF-1777037497401 — Test Blacklist User","channel is literally ""Test""; customer name looks like a test entry",2026-04-24T13:31:37.402Z
+Order,881,"TEST-REF-1777037521290 — Test Blacklist User","channel is literally ""Test""; customer name looks like a test entry",2026-04-24T13:32:01.290Z
+Order,882,"TEST-REF-1777037537120 — Test Blacklist User","channel is literally ""Test""; customer name looks like a test entry",2026-04-24T13:32:17.121Z
+Order,883,"TEST-REF-1777037595701 — Test Blacklist User","channel is literally ""Test""; customer name looks like a test entry",2026-04-24T13:33:15.701Z
+Order,884,"QIST-20260427-6539 — test check auto assign","customer name looks like a test entry",2026-04-27T13:22:36.697Z
+Order,885,"QIST-20260427-8008 — test auto assign","customer name looks like a test entry",2026-04-27T13:23:30.307Z
+Order,886,"QIST-20260427-8106 — test auto assign test","customer name looks like a test entry",2026-04-27T13:24:24.248Z
+Order,887,"QIST-20260427-8142 — test check auto off assign","customer name looks like a test entry",2026-04-27T13:29:17.722Z
+Order,888,"QIST-20260427-1630 — test auto admin assign","customer name looks like a test entry",2026-04-27T13:30:25.471Z
+Order,898,"QIST-20260502-8720 — test orders 0000","customer name looks like a test entry",2026-05-02T17:55:56.544Z
+Order,911,"QIST-20260505-2880 — test","customer name looks like a test entry",2026-05-05T19:22:27.786Z
+Order,912,"QIST-20260505-6964 — test","customer name looks like a test entry",2026-05-05T19:25:11.084Z
+Order,913,"QIST-20260505-5877 — test","customer name looks like a test entry",2026-05-05T19:42:39.840Z
+Order,914,"QIST-20260505-6905 — test","customer name looks like a test entry",2026-05-05T19:58:50.090Z
+Order,915,"QIST-20260505-8948 — test ahad sale update ","customer name looks like a test entry",2026-05-05T20:11:08.589Z
+Order,918,"QIST-20260508-2601 — test auto assign testsss","customer name looks like a test entry",2026-05-08T14:09:27.947Z
+Order,923,"QIST-20260512-5282-CAN — Test Development","customer name looks like a test entry",2026-05-12T11:29:16.992Z
+Order,924,"QIST-20260512-7652-CAN — test Development","customer name looks like a test entry",2026-05-12T11:39:12.763Z
+Order,925,"QIST-20260512-5316-CAN — Test Development","customer name looks like a test entry",2026-05-12T12:15:03.519Z
+Order,926,"QIST-20260512-8994 — test development","customer name looks like a test entry",2026-05-12T12:38:49.061Z
+Order,927,"QIST-20260512-4773-CAN — test development","customer name looks like a test entry",2026-05-12T12:41:03.413Z
+Order,928,"QIST-20260512-8446 — test development","customer name looks like a test entry",2026-05-12T13:10:42.006Z
+Order,929,"QIST-20260512-8143 — Test Development","customer name looks like a test entry",2026-05-12T13:14:24.797Z
+Order,931,"QIST-20260512-3641-CAN — Test Development","customer name looks like a test entry",2026-05-12T13:56:18.684Z
+Order,932,"QIST-20260512-8729 — test ttttt","customer name looks like a test entry",2026-05-12T15:30:05.205Z
+Order,933,"QIST-20260514-9888 — test check hghhgh","customer name looks like a test entry",2026-05-14T15:33:56.568Z
+Order,1007,"QIST-20260811-3595 — zeeshan","placeholder-looking phone number",2026-08-11T11:06:14.965Z
+Order,1008,"REC-DEMO-NEWACC — Recovery Demo - New Account","customer name looks like a test entry; placeholder-looking phone number",2026-05-05T15:40:44.377Z
+Order,1009,"REC-DEMO-TODAY — Recovery Demo - Due Today","customer name looks like a test entry; placeholder-looking phone number",2026-05-05T15:40:44.377Z
+Order,1010,"REC-DEMO-OVERDUE — Recovery Demo - Overdue 2 Months","customer name looks like a test entry; placeholder-looking phone number",2026-05-05T15:40:44.377Z
+Order,1011,"REC-DEMO-DEFAULT — Recovery Demo - Defaulter 3 Months","customer name looks like a test entry; placeholder-looking phone number",2026-05-05T15:40:44.377Z
+Order,1012,"REC-DEMO-ARREARS — Recovery Demo - Arrears Example","customer name looks like a test entry; placeholder-looking phone number",2026-05-05T15:40:44.377Z
+Customer,2,"Octavia Ellison (22222-2222222-2)","placeholder-looking CNIC",2026-05-13T13:42:23.044Z
+Customer,3,"Ralph Thornton (42222-2222222-2)","placeholder-looking CNIC",2026-05-13T13:42:23.059Z
+Customer,4,"Ghulam5 (56696-6666666-6)","placeholder-looking CNIC",2026-05-13T13:42:23.082Z
+Customer,5,"Caleb Kelley (44446-6666666-2)","placeholder-looking CNIC",2026-05-13T13:42:23.093Z
+Customer,8,"TAIMOOR (42301-6116757-8)","placeholder-looking phone",2026-05-13T13:42:23.138Z
+Customer,35,"OWAIS (43201-2547401-1)","placeholder-looking phone",2026-05-13T13:42:23.411Z
+Customer,60,"M TALHA KHAN (42301-0980259-3)","placeholder-looking phone",2026-05-13T13:42:23.657Z
+Customer,81,"SHAHBAZ (42101-5355875-7)","placeholder-looking phone",2026-05-13T13:42:23.829Z
+Customer,98,"Geraldine Watkins (15346-8422222-2)","placeholder-looking CNIC",2026-05-13T13:42:23.959Z
+Customer,108,"MUDASIR (no CNIC)","placeholder-looking phone",2026-05-13T13:42:24.043Z
+Customer,180,"M noman (no CNIC)","placeholder-looking phone",2026-05-13T13:42:24.618Z
+Customer,287,"MOHIB KHAN (no CNIC)","placeholder-looking phone",2026-05-13T13:42:25.479Z
+Customer,335,"ADIL AHMED (42301-2491836-5)","placeholder-looking phone",2026-05-13T13:42:25.852Z
+Customer,350,"MUHAMMAD REHAN (no CNIC)","placeholder-looking phone",2026-05-13T13:42:26.004Z
+Customer,446,"Mohammad umer (no CNIC)","placeholder-looking phone",2026-05-13T13:42:26.807Z
+Customer,487,"test (54565-4564644-4)","name looks like a test entry",2026-05-13T13:42:27.143Z
+Customer,488,"test (44343-4343434-3)","name looks like a test entry",2026-05-13T13:42:27.150Z
+Customer,608,"Ahsan Saleem (no CNIC)","placeholder-looking phone",2026-05-13T13:42:28.237Z
+Customer,635,"Syed ali asghar kazmi (no CNIC)","placeholder-looking phone",2026-05-13T13:42:28.464Z
+Customer,666,"test (no CNIC)","name looks like a test entry",2026-05-13T13:42:28.707Z
+Customer,671,"test (no CNIC)","name looks like a test entry",2026-05-13T13:42:28.772Z
+Customer,672,"SOHAIL ABBAS (no CNIC)","placeholder-looking phone",2026-05-13T13:42:28.784Z
+Customer,730,"Ahad Dummy Test Orders (56546-5645646-5)","name looks like a test entry",2026-05-13T13:42:29.257Z
+Customer,731,"test check notification (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.275Z
+Customer,732,"Test Blacklist User (42101-4806836-1)","name looks like a test entry",2026-05-13T13:42:29.286Z
+Customer,733,"test auto assign (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.336Z
+Customer,734,"test auto assign test (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.344Z
+Customer,735,"test check auto off assign (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.350Z
+Customer,736,"test auto admin assign (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.357Z
+Customer,742,"test orders 0000 (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.424Z
+Customer,755,"test auto assign testsss (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.577Z
+Customer,760,"test ttttt (no CNIC)","name looks like a test entry",2026-05-13T13:42:29.663Z
+Customer,761,"test check hghhgh (no CNIC)","name looks like a test entry",2026-05-14T15:33:56.590Z
+Customer,835,"Customer Gamma - 4 (42101-111-1)","placeholder-looking CNIC",2026-07-16T21:27:05.117Z
+Customer,838,"zeeshan (no CNIC)","placeholder-looking phone",2026-08-11T11:06:14.997Z
+Customer,839,"Recovery Demo - New Account (42101-1110001-1)","name looks like a test entry; placeholder-looking CNIC; placeholder-looking phone",2026-08-13T15:40:44.379Z
+Customer,840,"Recovery Demo - Due Today (42101-1110002-1)","name looks like a test entry; placeholder-looking CNIC; placeholder-looking phone",2026-08-13T15:40:44.401Z
+Customer,841,"Recovery Demo - Overdue 2 Months (42101-1110003-1)","name looks like a test entry; placeholder-looking CNIC; placeholder-looking phone",2026-08-13T15:40:44.417Z
+Customer,842,"Recovery Demo - Defaulter 3 Months (42101-1110004-1)","name looks like a test entry; placeholder-looking CNIC; placeholder-looking phone",2026-08-13T15:40:44.433Z
+Customer,843,"Recovery Demo - Arrears Example (42101-1110005-1)","name looks like a test entry; placeholder-looking CNIC; placeholder-looking phone",2026-08-13T15:40:44.481Z

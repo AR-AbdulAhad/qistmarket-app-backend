@@ -8,8 +8,12 @@ const {
     getAttendanceMonitoring, getPayrollSummary, getOutletStaffList,
 } = require('../controllers/adminPanelController');
 const { sendBroadcast, getRoleOptions } = require('../controllers/broadcastController');
+const { commitLegacyImport, listPendingLegacyProfiles, markLegacyProfileComplete } = require('../controllers/legacyImportController');
 
 router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
+router.post('/legacy-import/commit', authenticateJWT, requireSuperAdmin, commitLegacyImport);
+router.get('/legacy-import/pending', authenticateJWT, requireSuperAdmin, listPendingLegacyProfiles);
+router.post('/legacy-import/:orderId/mark-complete', authenticateJWT, requireSuperAdmin, markLegacyProfileComplete);
 router.get('/outlets/performance', authenticateJWT, getOutletPerformanceSummary);
 router.get('/outlets/rankings', authenticateJWT, getOutletRankings);
 router.get('/rankings', authenticateJWT, getUnifiedRankings);
