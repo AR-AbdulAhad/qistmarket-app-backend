@@ -253,9 +253,13 @@ const checkCNICOrders = async (req, res) => {
         const results = {};
 
         for (const c of cnicList) {
+            const variants = getCnicQueryVariants(c);
+
             // Search for purchaser matches
             const purchaserMatches = await prisma.purchaserVerification.findMany({
-                where: { cnic_number: c },
+                where: {
+                    OR: variants.map(v => ({ cnic_number: { contains: v } }))
+                },
                 include: {
                     verification: {
                         include: {
@@ -274,7 +278,9 @@ const checkCNICOrders = async (req, res) => {
 
             // Search for grantor matches
             const grantorMatches = await prisma.grantorVerification.findMany({
-                where: { cnic_number: c },
+                where: {
+                    OR: variants.map(v => ({ cnic_number: { contains: v } }))
+                },
                 include: {
                     verification: {
                         include: {
@@ -291,22 +297,45 @@ const checkCNICOrders = async (req, res) => {
                 }
             });
 
+            // Search direct Order matches (customer_cnic)
+            const orderMatches = await prisma.order.findMany({
+                where: {
+                    OR: variants.map(v => ({ customer_cnic: { contains: v } }))
+                },
+                select: {
+                    id: true,
+                    order_ref: true,
+                    status: true,
+                    created_at: true
+                }
+            });
+
             const orders = new Map();
 
             purchaserMatches.forEach(pm => {
                 if (pm.verification?.order) {
                     orders.set(pm.verification.order.id, {
                         ...pm.verification.order,
-                        role: 'Purchaser'
+                        role: 'PURCHASER'
                     });
                 }
             });
 
             grantorMatches.forEach(gm => {
                 if (gm.verification?.order) {
+                    const gNum = gm.grantor_number ? ` ${gm.grantor_number}` : '';
                     orders.set(gm.verification.order.id, {
                         ...gm.verification.order,
-                        role: `Guarantor ${gm.grantor_number || ''}`.trim()
+                        role: `GRANTOR${gNum}`
+                    });
+                }
+            });
+
+            orderMatches.forEach(o => {
+                if (!orders.has(o.id)) {
+                    orders.set(o.id, {
+                        ...o,
+                        role: 'PURCHASER'
                     });
                 }
             });
