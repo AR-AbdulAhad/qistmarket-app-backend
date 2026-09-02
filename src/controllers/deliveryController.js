@@ -633,11 +633,33 @@ const submitCashToOutlet = async (req, res) => {
     if (payment_method === 'Online') {
       onlineUserRecord = await prisma.user.findUnique({
         where: { id: deliveryBoyId },
-        select: { bill_consumer_number: true, smart_pay_consumer_number: true }
+        select: { bill_consumer_number: true, smart_pay_consumer_number: true, phone: true }
       });
 
-      if (!onlineUserRecord?.bill_consumer_number) {
+      if (!onlineUserRecord) {
         return res.status(400).json({ success: false, message: 'Your account does not have an active 1Bill or SmartPay number. Please contact support.' });
+      }
+
+      // Either field can be null (e.g. cleared for regeneration after a
+      // format fix) — self-heal here the same way bankAccountController's
+      // submitBankDeposit already does, instead of using a null value
+      // further down: a null smart_pay_consumer_number reaching the
+      // consumerNumber.updateMany's `in: [...]` filter below crashes with
+      // a PrismaClientValidationError since consumer_number is non-nullable.
+      if (!onlineUserRecord.bill_consumer_number || !onlineUserRecord.smart_pay_consumer_number) {
+        const fallbackMobile = onlineUserRecord.phone || '03000000000';
+        const billConsumerNumber = onlineUserRecord.bill_consumer_number
+          || await generateConsumerNumber(null, fallbackMobile);
+        const smartPayConsumerNumber = onlineUserRecord.smart_pay_consumer_number
+          || await generateSmartPayConsumerNumber(null, fallbackMobile);
+
+        await prisma.user.update({
+          where: { id: deliveryBoyId },
+          data: { bill_consumer_number: billConsumerNumber, smart_pay_consumer_number: smartPayConsumerNumber }
+        });
+
+        onlineUserRecord.bill_consumer_number = billConsumerNumber;
+        onlineUserRecord.smart_pay_consumer_number = smartPayConsumerNumber;
       }
     }
 

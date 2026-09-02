@@ -796,6 +796,30 @@ const editUser = async (req, res) => {
       });
     }
 
+    // phone/cnic have no DB-level unique constraint (only username/email do —
+    // see signup's comment on the same thing), so saving a phone/CNIC that
+    // already belongs to another user here would silently succeed instead of
+    // erroring, unlike signup which already checks this.
+    const normalizedPhone = phone ? phone.trim() : undefined;
+    const normalizedCnic = cnic ? cnic.trim() : undefined;
+    if (normalizedPhone || normalizedCnic) {
+      const conflict = await prisma.user.findFirst({
+        where: {
+          id: { not: parseInt(userId) },
+          OR: [
+            ...(normalizedPhone ? [{ phone: normalizedPhone }] : []),
+            ...(normalizedCnic ? [{ cnic: normalizedCnic }] : []),
+          ],
+        },
+      });
+      if (conflict) {
+        const message = normalizedPhone && conflict.phone === normalizedPhone
+          ? 'This phone number is already registered to another user.'
+          : 'This CNIC is already registered to another user.';
+        return res.status(409).json({ success: false, error: { code: 409, message } });
+      }
+    }
+
     const updateData = {
       ...(full_name && { full_name: full_name.trim() }),
       ...(username && { username: username.toLowerCase().trim() }),

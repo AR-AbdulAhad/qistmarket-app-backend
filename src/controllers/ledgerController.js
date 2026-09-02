@@ -124,7 +124,6 @@ async function fetchLedger(where) {
       },
       consumer_numbers: {
         orderBy: { created_at: 'asc' },
-        take: 1,
       },
     },
   });
@@ -255,9 +254,17 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   };
   const purchaserMapUrl = purchaser ? verificationMapUrl('purchaser', purchaser.id) : null;
 
-  let consumerNumber = ledger.consumer_numbers?.[0]?.consumer_number || order.consumer_numbers?.[0]?.consumer_number || null;
-  if (!consumerNumber && order?.id) {
-    consumerNumber = `1017100015${String(order.id).slice(-6).padStart(6, '0')}`;
+  // Two distinct consumer-number formats live in consumer_numbers — SmartPay
+  // only accepts its own "6500"-prefixed one on the live /DQR API; the 1Bill
+  // ("1017100015"-prefixed) one is for the locally-built EMVCo fallback QR
+  // and on-page display only. Mixing them up sent SmartPay 1Bill-format
+  // numbers on every live DQR call, which they flagged as invalid Bill Number
+  // format (see plan doc for the incident this fixes).
+  const consumerNumberRows = ledger.consumer_numbers || [];
+  const smartPayConsumerNumber = consumerNumberRows.find((c) => c.consumer_number.startsWith('6500'))?.consumer_number || null;
+  let billConsumerNumber = consumerNumberRows.find((c) => !c.consumer_number.startsWith('6500'))?.consumer_number || null;
+  if (!billConsumerNumber && order?.id) {
+    billConsumerNumber = `1017100015${String(order.id).slice(-6).padStart(6, '0')}`;
   }
 
   const smartPayQr = order.smart_pay_qrs?.[0] || null;
@@ -269,10 +276,11 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   let qrProvider = smartPayQr ? 'SmartPay' : null;
 
   // 1. Try SmartPay Gateway API DQR generation to get the exact SmartPay QR image
-  if (!qrImageSrc && consumerNumber) {
+  //    — only ever with a real "6500"-prefixed SmartPay number, never the 1Bill one.
+  if (!qrImageSrc && smartPayConsumerNumber) {
     try {
       const dqrRes = await generateDqr({
-        consumerNumber,
+        consumerNumber: smartPayConsumerNumber,
         consumerDetail: customerName,
         amount: monthlyInstallment || 0,
         cellNo: phone || '',
@@ -288,10 +296,10 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   }
 
   // 2. High-density EMVCo 1Bill DQR Payload String fallback (matches Picture 1 matrix density)
-  if (!qrImageSrc && consumerNumber) {
+  if (!qrImageSrc && billConsumerNumber) {
     try {
       const formattedAmount = parseFloat(monthlyInstallment || 0).toFixed(2);
-      const emvCoPayload = `00020101021226580016A0000006770101110216${consumerNumber}5204599953035865405${formattedAmount}5802PK5911Qist Market6007Karachi6304`;
+      const emvCoPayload = `00020101021226580016A0000006770101110216${billConsumerNumber}5204599953035865405${formattedAmount}5802PK5911Qist Market6007Karachi6304`;
       qrImageSrc = await qrcode.toDataURL(emvCoPayload, {
         errorCorrectionLevel: 'H',
         margin: 2,
@@ -412,14 +420,16 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       ${mapsUrl ? `<a class="btn-outline" style="margin-top:10px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a>` : ''}`;
 
   const paymentProviderLabel = qrProvider || 'SmartPay';
+  // Show whichever number actually produced qrImageSrc — never mix the two formats.
+  const displayConsumerNumber = qrProvider === '1Bill' ? billConsumerNumber : smartPayConsumerNumber;
 
   const paymentBoxHtml = `
       <div class="section-title" style="color:#0f172a;">SCAN & PAY</div>
-      ${consumerNumber ? `
+      ${displayConsumerNumber ? `
       <div class="info-label" style="margin-top:4px;">Your ${paymentProviderLabel} ID</div>
       <div class="bill-id-box">
-        <span id="billId-${ledger.id}">${consumerNumber}</span>
-        <button class="copy-btn no-print" onclick="navigator.clipboard.writeText('${consumerNumber}').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);})">Copy</button>
+        <span id="billId-${ledger.id}">${displayConsumerNumber}</span>
+        <button class="copy-btn no-print" onclick="navigator.clipboard.writeText('${displayConsumerNumber}').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);})">Copy</button>
       </div>` : ''}
       <div class="qr-box">
         <img src="${qrImageSrc}" alt="Scan & Pay QR" />
