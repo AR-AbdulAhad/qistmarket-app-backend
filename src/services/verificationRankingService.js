@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const { getScoringConfig } = require('../utils/scoringConfigUtils');
 
 const now = () => new Date();
 
@@ -34,6 +35,7 @@ async function updateVerificationRanking(officerId, periodType = 'month') {
 
     let deliveredCount = 0;
     let completedCount = 0;
+    let returnedCount = 0;
     let cancelledCount = 0;
     let expiredCount = 0;
     let totalSales = 0;
@@ -44,13 +46,19 @@ async function updateVerificationRanking(officerId, periodType = 'month') {
             totalSales += (order.total_amount || 0);
         }
         if (order.status === 'completed' || order.status === 'approved') completedCount++;
+        if (order.status === 'returned') returnedCount++;
         if (order.status === 'cancelled') cancelledCount++;
         if (order.status === 'expired') expiredCount++;
     });
 
-    // Score Formula for Verification Officer: 
-    // Example logic (can be adjusted by business rules)
-    const score = (completedCount * 10) + (deliveredCount * 5) - (cancelledCount * 2) - (expiredCount * 3);
+    // Configurable Score Formula for Verification Officer
+    const cfg = getScoringConfig().verification;
+    const score = 
+        (completedCount * (cfg.points_per_completed_verification || 10)) + 
+        (deliveredCount * (cfg.points_per_delivered_order || 5)) - 
+        (returnedCount * (cfg.points_deducted_per_returned_order || 5)) - 
+        (cancelledCount * (cfg.points_deducted_per_cancelled_order || 2)) - 
+        (expiredCount * (cfg.points_deducted_per_expired_order || 3));
 
     const existingRanking = await prisma.verificationRanking.findUnique({
         where: {

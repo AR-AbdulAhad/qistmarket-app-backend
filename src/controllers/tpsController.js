@@ -3,6 +3,7 @@ const { parseTpsAmount, formatTpsAmount, formatTpsAmountPaid } = require('../uti
 const { sendNextInstallmentReminder } = require('../services/watiService');
 const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
+const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 
 const now = () => new Date();
 
@@ -487,6 +488,7 @@ const billPayment = async (req, res) => {
                         } catch (err) {
                             console.error('[TPS BillPayment] Error fetching inventory product name:', err);
                         }
+                        syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex: lastTouchedRowIndex, month_number: rows[lastTouchedRowIndex]?.month || 1, phone });
                     }
 
                     if (phone) {

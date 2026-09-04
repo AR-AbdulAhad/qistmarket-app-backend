@@ -59,17 +59,17 @@ function normalizeLedger(rows) {
 /**
  * Returns a structured object with advance, installments, and a financial summary.
  */
-function getNormalizedLedger(rows) {
+function getNormalizedLedger(rows, fallbackAdvance = 0) {
     const updatedRows = normalizeLedger(rows);
     
     const advanceRow = updatedRows.find(r => r.month === 0);
     const advanceStatus = (advanceRow?.status || '').toLowerCase();
     const advancePayment = {
-        amount: Number(advanceRow?.amount || 0),
-        paid: advanceStatus === 'paid',
+        amount: advanceRow ? Number(advanceRow.amount || 0) : Number(fallbackAdvance || 0),
+        paid: advanceRow ? advanceStatus === 'paid' : (fallbackAdvance > 0),
         paidAt: advanceRow?.paid_at || advanceRow?.paidAt || null,
         paymentMethod: advanceRow?.payment_method || advanceRow?.paymentMethod || null,
-        status: advanceRow?.status || 'pending',
+        status: advanceRow?.status || (advanceRow ? 'pending' : 'paid'),
     };
 
     const installmentLedger = updatedRows.filter(r => r.month > 0).map(row => ({

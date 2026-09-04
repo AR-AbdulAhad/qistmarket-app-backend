@@ -7,6 +7,7 @@ const {
     getOutletRankings, getMissedRecoveryTracking, getProductSalesReport, getInstallmentStatusCounts,
     getAttendanceMonitoring, getPayrollSummary, getOutletStaffList, deleteOrderPermanently,
     listRecycleBinOrders, restoreOrders, permanentlyDeleteOrders,
+    getScoringRulesConfig, updateScoringRulesConfig, triggerRankingsRecalculation,
 } = require('../controllers/adminPanelController');
 const { sendBroadcast, getRoleOptions } = require('../controllers/broadcastController');
 const { commitLegacyImport, listPendingLegacyProfiles, markLegacyProfileComplete } = require('../controllers/legacyImportController');
@@ -15,6 +16,9 @@ const { getOtpChannelSettings, updateOtpChannelSettings } = require('../controll
 router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
 router.get('/settings/otp', authenticateJWT, requireSuperAdmin, getOtpChannelSettings);
 router.post('/settings/otp', authenticateJWT, requireSuperAdmin, updateOtpChannelSettings);
+router.get('/scoring-rules', authenticateJWT, getScoringRulesConfig);
+router.post('/scoring-rules', authenticateJWT, requireSuperAdmin, updateScoringRulesConfig);
+router.post('/scoring-rules/recalculate', authenticateJWT, requireSuperAdmin, triggerRankingsRecalculation);
 router.delete('/orders/:orderId/permanent-delete', authenticateJWT, requireSuperAdmin, deleteOrderPermanently);
 router.get('/orders/recycle-bin', authenticateJWT, requireSuperAdmin, listRecycleBinOrders);
 router.post('/orders/recycle-bin/restore', authenticateJWT, requireSuperAdmin, restoreOrders);

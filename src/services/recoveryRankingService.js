@@ -57,7 +57,12 @@ async function updateRecoveryRanking(officerId, periodType = 'month') {
         if (v.amount_collected) collectedAmount += v.amount_collected;
     });
 
-    const score = (collectedVisitsCount * 15) + (completedCount * 5) - (cancelledCount * 2) - (expiredCount * 3);
+    const { getScoringConfig } = require('../utils/scoringConfigUtils');
+    const recoveryRules = getScoringConfig().recovery;
+    const score = (collectedVisitsCount * (recoveryRules.points_per_collected_visit ?? 15)) +
+                  (completedCount * (recoveryRules.points_per_completed_order ?? 5)) -
+                  (cancelledCount * (recoveryRules.points_deducted_per_cancelled_order ?? 2)) -
+                  (expiredCount * (recoveryRules.points_deducted_per_expired_order ?? 3));
 
     const existingRanking = await prisma.recoveryRanking.findUnique({
         where: {

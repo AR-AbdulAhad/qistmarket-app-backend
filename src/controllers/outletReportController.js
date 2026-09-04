@@ -35,6 +35,17 @@ const getDaybook = async (req, res) => {
             where: {
                 order: outletFilter,
             },
+            include: {
+                order: {
+                    select: {
+                        id: true,
+                        order_ref: true,
+                        customer_name: true,
+                        verification: { select: { purchaser: { select: { name: true } } } },
+                        customer: { select: { name: true } }
+                    }
+                }
+            }
         });
 
         const payments = [];
@@ -44,6 +55,7 @@ const getDaybook = async (req, res) => {
 
         for (const ledger of ledgers) {
             const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            const purchaserName = ledger.order?.verification?.purchaser?.name || ledger.order?.customer?.name || ledger.order?.customer_name || '—';
             for (const row of rows) {
                 if (row.status === 'paid' && row.paid_at) {
                     const paidDate = new Date(row.paid_at);
@@ -55,6 +67,9 @@ const getDaybook = async (req, res) => {
 
                         payments.push({
                             ...row,
+                            order_ref: ledger.order?.order_ref || '—',
+                            customer_name: purchaserName,
+                            purchaser_name: purchaserName,
                             paymentType: row.month === 0 ? 'advance' : 'installment',
                             amount: amount,
                             paidAt: row.paid_at
@@ -195,7 +210,9 @@ const getSalesReport = async (req, res) => {
             include: {
                 installment_ledger: true,
                 delivery: true,
-                cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 }
+                cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
+                verification: { include: { purchaser: true } },
+                customer: true
             },
             orderBy: { updated_at: 'desc' }
         });
@@ -219,34 +236,31 @@ const getSalesReport = async (req, res) => {
             if (inv.imei_serial) deliveryInventoryMap.set(inv.imei_serial, inv);
         }
 
-        // Down payment (advance) is month 0 on the installment ledger. Read it
-        // from the ledger's normalized advance row rather than the static
-        // Order.advance_amount column, since the actually-paid amount can
-        // diverge from the originally planned advance (partial payments,
-        // manual ledger edits, etc).
         const ordersWithDownPayment = orders.map(o => {
             const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
-            const { advance_payment, installment_ledger, summary: ledgerSummary } = getNormalizedLedger(rows);
+            const { advance_payment, installment_ledger, summary: ledgerSummary } = getNormalizedLedger(rows, o.advance_amount);
 
             const imeiSerial = o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial;
             const invInfo = imeiSerial ? deliveryInventoryMap.get(imeiSerial) : null;
             const delivered_product_name = invInfo?.product_name || o.cash_in_hand?.[0]?.product_name || o.product_name || null;
 
-            const down_payment_amount = advance_payment.paid ? advance_payment.amount : 0;
+            // Purchaser name preference: PurchaserVerification.name -> Customer.name -> Order.customer_name
+            const purchaser = o.verification?.purchaser;
+            const realCustomerName = purchaser?.name || o.customer?.name || o.customer_name;
 
-            // Sales value, tenure, and the monthly installment amount are read from the
-            // ledger (the actually-agreed plan) rather than Order.total_amount/months/
-            // monthly_amount, since those static columns hold the originally suggested
-            // plan and can diverge from what was actually agreed at delivery (advance
-            // overrides, plan changes, etc) — same reasoning as down_payment_amount above.
+            const down_payment_amount = advance_payment.paid ? advance_payment.amount : (o.advance_amount || 0);
+
             const hasLedger = installment_ledger.length > 0;
-            const sales_value = hasLedger ? ledgerSummary.grandTotalDue : o.total_amount;
+            const sales_value = hasLedger && ledgerSummary.grandTotalDue > 0 ? ledgerSummary.grandTotalDue : (o.total_amount || 0);
             const tenure = hasLedger ? installment_ledger.length : o.months;
             const installment_amount = hasLedger ? (installment_ledger[0]?.dueAmount ?? o.monthly_amount) : o.monthly_amount;
             const balance = sales_value - down_payment_amount;
 
             return {
                 ...o,
+                purchaser_name: realCustomerName,
+                customer_name: realCustomerName,
+                total_amount: sales_value,
                 product_name: delivered_product_name,
                 suggested_product_name: o.product_name,
                 down_payment_amount,
@@ -260,10 +274,6 @@ const getSalesReport = async (req, res) => {
             };
         });
 
-        // "Total Amount Received" must reflect cash actually collected WITHIN
-        // the selected date range, not just paid-ever across each order's
-        // whole ledger history. Filter each paid row by its own paid_at,
-        // mirroring the convention already used in getDaybook above.
         let rangeStart = null;
         if (startDate) {
             rangeStart = new Date(startDate);
@@ -277,23 +287,27 @@ const getSalesReport = async (req, res) => {
 
         const summary = {
             totalOrders: orders.length,
-            // Must match the table's "Sales Value" column (ledger-derived grandTotalDue,
-            // falling back to Order.total_amount only when there's no ledger) — summing
-            // the raw Order.total_amount here let this tile diverge from the table below
-            // it whenever the actually-agreed plan differed from the originally suggested one.
-            totalGrossAmount: ordersWithDownPayment.reduce((acc, o) => acc + o.sales_value, 0),
+            totalGrossAmount: ordersWithDownPayment.reduce((acc, o) => acc + (o.sales_value || 0), 0),
             totalDownPaymentsReceived: ordersWithDownPayment.reduce((acc, o) => acc + o.down_payment_amount, 0),
             totalReceived: orders.reduce((acc, o) => {
                 const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
-                return acc + rows.filter(r => {
+                const rowsTotal = rows.filter(r => {
                     if (r.status !== 'paid') return false;
                     if (!rangeStart && !rangeEnd) return true;
-                    if (!r.paid_at) return false;
+                    if (!r.paid_at) return true;
                     const paidDate = new Date(r.paid_at);
                     if (rangeStart && paidDate < rangeStart) return false;
                     if (rangeEnd && paidDate > rangeEnd) return false;
                     return true;
-                }).reduce((pAcc, p) => pAcc + (p.amount || 0), 0);
+                }).reduce((pAcc, p) => pAcc + parseFloat(p.paid_amount || p.amount || 0), 0);
+
+                const advanceRow = rows.find(r => r.month === 0);
+                let advancePaid = 0;
+                if (!advanceRow && o.advance_amount > 0) {
+                    advancePaid = o.advance_amount;
+                }
+
+                return acc + rowsTotal + advancePaid;
             }, 0)
         };
 
@@ -548,7 +562,16 @@ const getInstallmentRecoveriesReport = async (req, res) => {
                 order: { ...outletFilter, status: { notIn: ['Cancelled', 'Rejected'] } }
             },
             include: {
-                order: { select: { order_ref: true, customer_name: true, whatsapp_number: true, id: true } }
+                order: {
+                    select: {
+                        id: true,
+                        order_ref: true,
+                        customer_name: true,
+                        whatsapp_number: true,
+                        verification: { select: { purchaser: { select: { name: true } } } },
+                        customer: { select: { name: true } }
+                    }
+                }
             }
         });
 
@@ -557,11 +580,8 @@ const getInstallmentRecoveriesReport = async (req, res) => {
 
         for (const ledger of ledgers) {
             const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            const purchaserName = ledger.order?.verification?.purchaser?.name || ledger.order?.customer?.name || ledger.order?.customer_name || '—';
             for (const row of rows) {
-                // month === 0 is the advance/down-payment row (see
-                // ledgerUtils.js's normalizeLedger convention) — this report
-                // is specifically monthly installment recoveries, so the
-                // advance must be excluded even when it's been paid.
                 if (row.month === 0) continue;
                 if (row.status === 'paid' && row.paid_at) {
                     const paidDate = new Date(row.paid_at);
@@ -575,7 +595,8 @@ const getInstallmentRecoveriesReport = async (req, res) => {
                         recoveries.push({
                             order_id: ledger.order.id,
                             order_ref: ledger.order.order_ref,
-                            customer_name: ledger.order.customer_name,
+                            customer_name: purchaserName,
+                            purchaser_name: purchaserName,
                             whatsapp_number: ledger.order.whatsapp_number,
                             amount: amount,
                             month: row.month,

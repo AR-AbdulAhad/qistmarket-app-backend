@@ -10,10 +10,11 @@ const toDashedCnic = (digitsOnly) => {
 };
 
 const getCnicQueryVariants = (query) => {
-    const digitsOnly = query.replace(/\D/g, '');
+    if (!query) return [];
+    const digitsOnly = String(query).replace(/\D/g, '');
     if (digitsOnly.length < 5) return [query];
     const dashed = toDashedCnic(digitsOnly);
-    return dashed === query ? [query] : [query, dashed];
+    return Array.from(new Set([query, digitsOnly, dashed])).filter(Boolean);
 };
 
 const globalSearch = async (req, res) => {
@@ -297,6 +298,27 @@ const checkCNICOrders = async (req, res) => {
                 }
             });
 
+            // Search for next of kin matches
+            const kinMatches = await prisma.nextOfKinVerification.findMany({
+                where: {
+                    OR: variants.map(v => ({ cnic_number: { contains: v } }))
+                },
+                include: {
+                    verification: {
+                        include: {
+                            order: {
+                                select: {
+                                    id: true,
+                                    order_ref: true,
+                                    status: true,
+                                    created_at: true
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
             // Search direct Order matches (customer_cnic)
             const orderMatches = await prisma.order.findMany({
                 where: {
@@ -327,6 +349,15 @@ const checkCNICOrders = async (req, res) => {
                     orders.set(gm.verification.order.id, {
                         ...gm.verification.order,
                         role: `GRANTOR${gNum}`
+                    });
+                }
+            });
+
+            kinMatches.forEach(km => {
+                if (km.verification?.order && !orders.has(km.verification.order.id)) {
+                    orders.set(km.verification.order.id, {
+                        ...km.verification.order,
+                        role: 'NEXT OF KIN'
                     });
                 }
             });

@@ -2000,9 +2000,9 @@ const updatePurchaserField = async (req, res) => {
     });
 
     // The purchaser's name is duplicated onto Order.customer_name (shown in
-    // Approved Order List and elsewhere) — keep it in sync so an edit here
+    // Approved Order List, Global Sales Report, and elsewhere) — keep it in sync so an edit here
     // doesn't leave those screens showing the old name.
-    if (field_name === 'name') {
+    if (['name', 'full_name', 'customer_name', 'purchaser_name'].includes(field_name)) {
       await prisma.order.update({
         where: { id: verification.order_id },
         data: { customer_name: new_value }

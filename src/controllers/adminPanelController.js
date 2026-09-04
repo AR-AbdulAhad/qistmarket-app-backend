@@ -1,4 +1,9 @@
 const prisma = require('../../lib/prisma');
+const { getScoringConfig, saveScoringConfig } = require('../utils/scoringConfigUtils');
+const { updateCsrRanking } = require('../services/rankingService');
+const { updateDeliveryRanking } = require('../services/deliveryRankingService');
+const { updateRecoveryRanking } = require('../services/recoveryRankingService');
+const { updateVerificationRanking } = require('../services/verificationRankingService');
 
 /**
  * getOutletPerformanceSummary
@@ -249,12 +254,6 @@ const getOutletRankings = async (req, res) => {
 
         const outlets = await prisma.outlet.findMany({ where: { type: { not: 'warehouse' } }, select: { id: true, name: true, code: true } });
 
-        // The selected month must be scoped by DELIVERY activity (delivered_at, falling
-        // back to updated_at when null), not order creation date — this is the exact
-        // same rule the "Delivered Orders" list page uses (see getDeliveredOrders) so
-        // the ranking's counts/sales always agree with what that page shows for the month.
-        // An order created in a different month but delivered in the selected month must
-        // still count here; an order merely created in the selected month must not.
         const orders = await prisma.order.findMany({
             where: {
                 outlet_id: { in: outlets.map((o) => o.id) },
@@ -267,8 +266,26 @@ const getOutletRankings = async (req, res) => {
             select: { outlet_id: true, total_amount: true, installment_ledger: { select: { ledger_rows: true } } },
         });
 
+        const returnedOrders = await prisma.order.findMany({
+            where: {
+                outlet_id: { in: outlets.map((o) => o.id) },
+                status: 'returned',
+                updated_at: { gte: startOfMonth, lt: startOfNextMonth },
+            },
+            select: { outlet_id: true },
+        });
+
+        const cancelledOrders = await prisma.order.findMany({
+            where: {
+                outlet_id: { in: outlets.map((o) => o.id) },
+                status: 'cancelled',
+                updated_at: { gte: startOfMonth, lt: startOfNextMonth },
+            },
+            select: { outlet_id: true },
+        });
+
         const stats = {};
-        for (const o of outlets) stats[o.id] = { outlet_id: o.id, outlet_name: o.name, outlet_code: o.code, totalSales: 0, dueAmount: 0, recoveredAmount: 0, customerCount: 0 };
+        for (const o of outlets) stats[o.id] = { outlet_id: o.id, outlet_name: o.name, outlet_code: o.code, totalSales: 0, dueAmount: 0, recoveredAmount: 0, customerCount: 0, returnedCount: 0, cancelledCount: 0 };
 
         for (const order of orders) {
             const entry = stats[order.outlet_id];
@@ -280,17 +297,34 @@ const getOutletRankings = async (req, res) => {
             const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
             for (const row of rows) {
                 const amount = parseFloat(row.amount || row.dueAmount || 0);
-                // Count partial payments too, not just fully-paid rows, so recovery % isn't undercounted.
                 const paidAmount = parseFloat(row.paid_amount || (row.status === 'paid' ? amount : 0)) || 0;
                 entry.dueAmount += amount;
                 entry.recoveredAmount += Math.min(paidAmount, amount);
             }
         }
 
+        for (const order of returnedOrders) {
+            const entry = stats[order.outlet_id];
+            if (entry) entry.returnedCount += 1;
+        }
+
+        for (const order of cancelledOrders) {
+            const entry = stats[order.outlet_id];
+            if (entry) entry.cancelledCount += 1;
+        }
+
+        const scoringCfg = getScoringConfig().outlet;
+
         const ranked = Object.values(stats).map((s) => {
             const recoveryPct = s.dueAmount > 0 ? (s.recoveredAmount / s.dueAmount) * 100 : 0;
-            // Blended score: sales scaled down + recovery% + customerCount weighted
-            const score = Math.round(s.totalSales / 1000 + recoveryPct * 5 + s.customerCount * 10);
+            
+            const salesPts = (s.totalSales / (scoringCfg.sales_divisor || 1000)) * (scoringCfg.sales_multiplier ?? 1);
+            const recPts = recoveryPct * (scoringCfg.recovery_pct_multiplier ?? 5);
+            const delPts = s.customerCount * (scoringCfg.points_per_delivered_order ?? 10);
+            const retPts = (s.returnedCount || 0) * (scoringCfg.points_deducted_per_returned_order ?? 10);
+            const canPts = (s.cancelledCount || 0) * (scoringCfg.points_deducted_per_cancelled_order ?? 0);
+
+            const score = Math.round(salesPts + recPts + delPts - retPts - canPts);
             return { ...s, recoveryPercentage: Math.round(recoveryPct * 10) / 10, score };
         }).sort((a, b) => b.score - a.score)
           .map((s, idx) => ({ ...s, rank: idx + 1, tier: tierFor(s.score) }));
@@ -299,6 +333,53 @@ const getOutletRankings = async (req, res) => {
     } catch (error) {
         console.error('getOutletRankings error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const getScoringRulesConfig = async (req, res) => {
+    try {
+        const config = getScoringConfig();
+        return res.json({ success: true, data: config });
+    } catch (error) {
+        console.error('getScoringRulesConfig error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to fetch scoring rules.' });
+    }
+};
+
+const updateScoringRulesConfig = async (req, res) => {
+    try {
+        const result = saveScoringConfig(req.body);
+        if (!result.success) {
+            return res.status(500).json({ success: false, message: result.error || 'Failed to save rules' });
+        }
+
+        recalculateAllOfficerRankings().catch(err => console.error('Recalculation error after config update:', err));
+
+        return res.json({ success: true, message: 'Scoring rules updated successfully.', data: result.config });
+    } catch (error) {
+        console.error('updateScoringRulesConfig error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to update scoring rules.' });
+    }
+};
+
+const recalculateAllOfficerRankings = async () => {
+    const users = await prisma.user.findMany({ select: { id: true } });
+    for (const u of users) {
+        await updateCsrRanking(u.id, 'month').catch(() => {});
+        await updateCsrRanking(u.id, 'today').catch(() => {});
+        await updateDeliveryRanking(u.id, 'month').catch(() => {});
+        await updateRecoveryRanking(u.id, 'month').catch(() => {});
+        await updateVerificationRanking(u.id, 'month').catch(() => {});
+    }
+};
+
+const triggerRankingsRecalculation = async (req, res) => {
+    try {
+        await recalculateAllOfficerRankings();
+        return res.json({ success: true, message: 'All rankings recalculated successfully.' });
+    } catch (error) {
+        console.error('triggerRankingsRecalculation error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to recalculate rankings.' });
     }
 };
 
@@ -783,6 +864,15 @@ const listRecycleBinOrders = async (req, res) => {
         status: true,
         deleted_at: true,
         deleted_by: true,
+        verification: {
+          select: {
+            purchaser: {
+              select: {
+                name: true
+              }
+            }
+          }
+        }
       },
     });
 
@@ -792,7 +882,22 @@ const listRecycleBinOrders = async (req, res) => {
       : [];
     const deleterNameById = Object.fromEntries(deleters.map((u) => [u.id, u.full_name]));
 
-    const result = orders.map((o) => ({ ...o, deleted_by_name: o.deleted_by ? (deleterNameById[o.deleted_by] || null) : null }));
+    const result = orders.map((o) => {
+      const purchaser = o.verification?.purchaser;
+      const purchaserName = purchaser?.name || o.customer_name;
+      return {
+        id: o.id,
+        order_ref: o.order_ref,
+        customer_name: purchaserName,
+        whatsapp_number: o.whatsapp_number,
+        product_name: o.product_name,
+        total_amount: o.total_amount,
+        status: o.status,
+        deleted_at: o.deleted_at,
+        deleted_by: o.deleted_by,
+        deleted_by_name: o.deleted_by ? (deleterNameById[o.deleted_by] || null) : null
+      };
+    });
 
     return res.json({ success: true, orders: result });
   } catch (error) {
@@ -883,5 +988,8 @@ module.exports = {
     listRecycleBinOrders,
     restoreOrders,
     permanentlyDeleteOrders,
+    getScoringRulesConfig,
+    updateScoringRulesConfig,
+    triggerRankingsRecalculation,
 };
 

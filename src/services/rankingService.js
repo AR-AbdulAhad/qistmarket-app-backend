@@ -160,8 +160,15 @@ async function updateCsrRanking(csrId, periodType = 'month') {
         }
     });
 
-    // Scoring Formula
-    const score = (deliveredCount * 10) + (repeatCount * 5) + (completedCount * 5) + (solvedComplaintsCount * 1) - (cancelledCount * 1) - (expiredCount * 3);
+    // Dynamic Admin-Configured Scoring Formula for CSR
+    const { getScoringConfig } = require('../utils/scoringConfigUtils');
+    const csrRules = getScoringConfig().csr;
+    const score = (deliveredCount * (csrRules.points_per_delivered_order ?? 10)) +
+                  (repeatCount * (csrRules.points_per_repeat_customer ?? 5)) +
+                  (completedCount * (csrRules.points_per_completed_order ?? 5)) +
+                  (solvedComplaintsCount * (csrRules.points_per_solved_complaint ?? 1)) -
+                  (cancelledCount * (csrRules.points_deducted_per_cancelled_order ?? 1)) -
+                  (expiredCount * (csrRules.points_deducted_per_expired_order ?? 3));
 
     // Fetch existing ranking to calculate trend
     const existingRanking = await prisma.csrRanking.findUnique({
@@ -297,8 +304,12 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
         if (d.order?.is_repeat_customer) repeatCount++;
     });
 
-    // Score logic for Delivery Agent
-    const score = (deliveredCount * 10) + (completedCount * 5) - (cancelledCount * 2) - (expiredCount * 3);
+    // Dynamic Admin-Configured Score logic for Delivery Agent
+    const deliveryRules = getScoringConfig().delivery;
+    const score = (deliveredCount * (deliveryRules.points_per_delivered_order ?? 15)) +
+                  (completedCount * (deliveryRules.points_per_completed_order ?? 5)) -
+                  (cancelledCount * (deliveryRules.points_deducted_per_cancelled_order ?? 2)) -
+                  (expiredCount * (deliveryRules.points_deducted_per_expired_order ?? 3));
 
     const existingRanking = await prisma.deliveryRanking.findUnique({
         where: {

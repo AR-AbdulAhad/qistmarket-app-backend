@@ -1,5 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { logAction } = require('../utils/auditLogger');
+const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 
 /**
  * rescheduleInstallment
@@ -53,6 +54,11 @@ const rescheduleInstallment = async (req, res) => {
             where: { id: order.installment_ledger.id },
             data: { ledger_rows: rows },
         });
+
+        const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+        if (imeiSerial) {
+            syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, month_number: row.month, phone: order.whatsapp_number });
+        }
 
         await logAction(
             req,

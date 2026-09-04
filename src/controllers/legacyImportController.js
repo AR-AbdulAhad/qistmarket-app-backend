@@ -89,7 +89,7 @@ function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paid
 // page (qistmarket-app-dashboard orders/[id]/page.tsx) — every one of these
 // is independently editable there too, this is just what bulk-import can
 // fill in upfront so staff aren't retyping it all by hand afterward.
-function buildPurchaserData(row, { name, cnic, phone, verificationId }) {
+function buildPurchaserData(row, { name, cnic, phone, verificationId, isVerified }) {
   return {
     verification_id: verificationId,
     name,
@@ -113,13 +113,13 @@ function buildPurchaserData(row, { name, cnic, phone, verificationId }) {
     nearest_location: orPlaceholder(row.purchaser_nearest_location || row.purchaser_area),
     permanent_area: orNull(row.purchaser_area),
     present_area: orNull(row.purchaser_area),
-    is_verified: true,
+    is_verified: isVerified,
   };
 }
 
 // Full field set matching a "Grantor N Details" section on the order detail
 // page — shared shape for both guarantors.
-function buildGrantorData(row, prefix, { name, cnic, phone, num, verificationId }) {
+function buildGrantorData(row, prefix, { name, cnic, phone, num, verificationId, isVerified }) {
   const f = (suffix) => row[`${prefix}_${suffix}`];
   return {
     verification_id: verificationId,
@@ -145,21 +145,28 @@ function buildGrantorData(row, prefix, { name, cnic, phone, num, verificationId 
     business_address: orNull(f('business_address')),
     net_income: orNull(f('net_income')),
     nearest_location: orPlaceholder(f('nearest_location')),
-    is_verified: true,
+    is_verified: isVerified,
   };
 }
 
 const REQUIRED_FIELDS = ['purchaser_name', 'purchaser_cnic', 'purchaser_phone', 'item_price', 'tenure_months', 'installment'];
 
-// Every legacy row is an already-transacted historical sale, so only these
-// two make sense as the batch status — every other order status either
-// implies a live workflow stage (verification/delivery in progress, sent to
-// an outlet) that doesn't apply to a bulk-imported paper-ledger record, or
-// an outcome (cancelled/rejected/expired/returned) that isn't what this data
-// represents.
-const VALID_STATUSES = ['delivered', 'completed'];
+// Every legacy row is, definitionally, an already-transacted, already-
+// delivered historical sale — so "delivered" is the only order status this
+// import ever uses. status:'completed' looks like the obvious pick for
+// "fully paid off", but it's actually a LIVE pipeline marker meaning
+// "verification done, awaiting admin approval" — ordersController.js's
+// getVerificationOrders (route /orders/verification-pending) filters on
+// exactly this, and expireOrders' own comment calls it "Verification done,
+// waiting for delivery". Importing with status:'completed' would silently
+// dump every row into that live Orders-for-Approval queue. Whether a
+// delivered account is fully paid off or still has installments due is read
+// from the InstallmentLedger's own rows instead (see customerController.js
+// getClearedCustomers) — already correctly reflected by this file's
+// paidCount vs months, no separate order status needed for it.
+const ORDER_STATUS = 'delivered';
 
-async function importOneRow(row, { adminUserId, defaultStatus }) {
+async function importOneRow(row, { adminUserId }) {
   for (const f of REQUIRED_FIELDS) {
     if (!required(row, f)) {
       throw Object.assign(new Error(`Missing required field: ${f}`), { httpStatus: 400 });
@@ -241,16 +248,16 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
     });
   }
 
-  // Both valid statuses (delivered, completed) represent an already-
-  // transacted sale, so the full Delivery + InstallmentLedger + ConsumerNumber
-  // graph is always built. Only "delivered" sets is_delivered/delivered_at —
-  // "completed" means fully paid off, not necessarily handed over on that
-  // exact date.
-  const isDelivered = defaultStatus === 'delivered';
+  const hasPendingBalance = paidCount < months;
 
   // 2. Order — same Customer Information fields shown on the order detail
   // page: full address string if given, otherwise the structured
-  // city/area/zone/house-street/gender/residential-type breakdown.
+  // city/area/zone/house-street/gender/residential-type breakdown. Also
+  // backfill the same assignment fields a real order accumulates as it moves
+  // through verification → delivery → recovery, so the Assignment Timeline
+  // card shows a complete, honest history instead of just a bare "Order
+  // Created" entry — all attributed to the importing admin (see the Order
+  // Status Timeline backfill just below too).
   const order = await prisma.order.create({
     data: {
       order_ref: generateOrderRef(),
@@ -271,17 +278,55 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
       monthly_amount: installment,
       months,
       channel: 'legacy_import',
-      status: defaultStatus,
-      is_delivered: isDelivered,
-      delivered_at: isDelivered ? orderDate : null,
+      status: ORDER_STATUS,
+      is_delivered: true,
+      delivered_at: orderDate,
       imei_serial: serial,
       created_by_user_id: adminUserId,
       customer_id: customer.id,
       needs_media_upload: true,
       needs_location: true,
       created_at: orderDate,
+      assigned_to_user_id: adminUserId,
+      verification_assigned_at: orderDate,
+      delivery_officer_id: adminUserId,
+      delivery_assigned_at: orderDate,
+      ...(hasPendingBalance && {
+        recovery_officer_id: adminUserId,
+        recovery_assigned_at: orderDate,
+      }),
     },
   });
+
+  {
+    // Order Status Timeline backfill — the real pipeline an order goes
+    // through (new -> in_progress -> completed[verification] -> approved ->
+    // delivered), all attributed to the importing admin. Deliberately NOT
+    // using orderAuditLogger.logOrderStatusChange here: that helper also
+    // fires a live WhatsApp notification to the customer's number and bumps
+    // the creator's CSR ranking for the day — exactly the "silent test
+    // pollution" this whole import is supposed to avoid, so this writes the
+    // history rows directly instead.
+    const stageMinutes = [0, 5, 10, 15, 20];
+    const stages = [
+      { old: null, new: 'new' },
+      { old: 'new', new: 'in_progress' },
+      { old: 'in_progress', new: 'completed' },
+      { old: 'completed', new: 'approved' },
+      { old: 'approved', new: 'delivered' },
+    ];
+    await prisma.orderStatusHistory.createMany({
+      data: stages.map((s, i) => ({
+        order_id: order.id,
+        old_status: s.old,
+        new_status: s.new,
+        user_id: adminUserId,
+        role_name: 'Super Admin',
+        remarks: i === 0 ? 'Legacy import — historical record, exact per-stage timestamps not available from the source ledger' : null,
+        created_at: new Date(orderDate.getTime() + stageMinutes[i] * 60000),
+      })),
+    });
+  }
 
   // 3. Verification + Purchaser + up to 2 Grantors — full field set, see
   // buildPurchaserData/buildGrantorData.
@@ -301,6 +346,7 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
       cnic: purchaserCnic,
       phone: purchaserPhone,
       verificationId: verification.id,
+      isVerified: true,
     }),
   });
 
@@ -317,6 +363,7 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
         phone: orPlaceholder(g.phone),
         num: g.num,
         verificationId: verification.id,
+        isVerified: true,
       }),
     });
   }
@@ -404,19 +451,17 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
 
 /**
  * POST /admin-panel/legacy-import/commit
- * body: { rows: [...], default_status }  — default_status must be one of VALID_STATUSES
+ * body: { rows: [...] } — every row is imported as a "delivered" order (see
+ * ORDER_STATUS's comment for why "completed" is never used here).
  * Each row is processed independently (see importOneRow's note on why this
  * isn't wrapped in a DB transaction) so one bad row can't abort the whole
  * batch — results are returned per-row, never silently dropped.
  */
 const commitLegacyImport = async (req, res) => {
-  const { rows, default_status } = req.body;
+  const { rows } = req.body;
 
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ success: false, message: 'No rows provided.' });
-  }
-  if (!VALID_STATUSES.includes(default_status)) {
-    return res.status(400).json({ success: false, message: `default_status must be one of: ${VALID_STATUSES.join(', ')}.` });
   }
 
   const adminUserId = req.user.id;
@@ -424,7 +469,7 @@ const commitLegacyImport = async (req, res) => {
 
   for (let i = 0; i < rows.length; i += 1) {
     try {
-      const { order_id, reconciliationWarning } = await importOneRow(rows[i], { adminUserId, defaultStatus: default_status });
+      const { order_id, reconciliationWarning } = await importOneRow(rows[i], { adminUserId });
       results.push({ row: i, success: true, order_id, reconciliation_warning: reconciliationWarning });
     } catch (err) {
       console.error(`Legacy import row ${i} failed:`, err);

@@ -11,6 +11,7 @@ const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { logAction } = require('../utils/auditLogger');
+const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 // Was left as an empty string, so both <img src="${logoDataURI}"> spots below
 // rendered as a broken-image icon next to the "QistMarket" alt text on every
 // ledger page and PDF. Points at the frontend's own already-deployed static
@@ -1251,6 +1252,11 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
 
     // Update Cash Register
     await updateCashRegister(null, outlet_id, 'installments_received', payingNow, 'add');
+
+    const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+    if (imeiSerial && totalPaid >= dueAmount) {
+      syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, month_number, phone });
+    }
 
     const customerName = order.verification?.purchaser?.name || order.customer_name;
     const paymentTxnId = `${order.order_ref}-M${month_number}-${Date.now().toString(36).toUpperCase()}`;

@@ -6,6 +6,7 @@ const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones, sendOverdueInst
 const { completePendingPaytriggerDelivery } = require('../services/deliveryCompletionService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
+const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 
 const now = () => new Date();
 
@@ -185,7 +186,17 @@ async function syncDeviceStatus(req, res) {
     const { imei } = req.params;
     if (!imei) return res.status(400).json({ success: false, message: 'IMEI required' });
 
-    const device = await prisma.payTriggerDevice.findUnique({ where: { imei } });
+    const device = await prisma.payTriggerDevice.findUnique({
+      where: { imei },
+      include: {
+        order: {
+          include: {
+            installment_ledger: true,
+            verification: { include: { purchaser: true } }
+          }
+        }
+      }
+    });
     if (!device) return res.status(404).json({ success: false, message: 'Device not found' });
 
     if (!pt.ENABLED()) return res.json({ success: false, message: 'PayTrigger disabled', skipped: true });
@@ -208,6 +219,14 @@ async function syncDeviceStatus(req, res) {
           raw_state: result,
         },
       });
+    }
+
+    // Also sync payment & unlock status based on ledger
+    if (device.order?.installment_ledger?.ledger_rows) {
+      let rows = device.order.installment_ledger.ledger_rows;
+      if (typeof rows === 'string') rows = JSON.parse(rows);
+      const phone = device.order.verification?.purchaser?.telephone_number || device.order.whatsapp_number || '';
+      await syncPayTriggerAfterPayment({ imeiSerial: imei, order: device.order, rows, rowIndex: 0, month_number: 1, phone });
     }
 
     return res.json({ success: true, data: result });

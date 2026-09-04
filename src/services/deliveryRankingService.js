@@ -44,7 +44,12 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
         if (order.status === 'expired') expiredCount++;
     });
 
-    const score = (deliveredCount * 15) + (completedCount * 5) - (cancelledCount * 2) - (expiredCount * 3);
+    const { getScoringConfig } = require('../utils/scoringConfigUtils');
+    const deliveryRules = getScoringConfig().delivery;
+    const score = (deliveredCount * (deliveryRules.points_per_delivered_order ?? 15)) +
+                  (completedCount * (deliveryRules.points_per_completed_order ?? 5)) -
+                  (cancelledCount * (deliveryRules.points_deducted_per_cancelled_order ?? 2)) -
+                  (expiredCount * (deliveryRules.points_deducted_per_expired_order ?? 3));
 
     const existingRanking = await prisma.deliveryRanking.findUnique({
         where: {
