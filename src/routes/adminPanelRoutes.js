@@ -6,6 +6,7 @@ const {
     getOutletPerformanceSummary, getUnifiedRankings, getDeliveryManagementOverview, syncBadges, getBadges,
     getOutletRankings, getMissedRecoveryTracking, getProductSalesReport, getInstallmentStatusCounts,
     getAttendanceMonitoring, getPayrollSummary, getOutletStaffList, deleteOrderPermanently,
+    listRecycleBinOrders, restoreOrders, permanentlyDeleteOrders,
 } = require('../controllers/adminPanelController');
 const { sendBroadcast, getRoleOptions } = require('../controllers/broadcastController');
 const { commitLegacyImport, listPendingLegacyProfiles, markLegacyProfileComplete } = require('../controllers/legacyImportController');
@@ -15,6 +16,9 @@ router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
 router.get('/settings/otp', authenticateJWT, requireSuperAdmin, getOtpChannelSettings);
 router.post('/settings/otp', authenticateJWT, requireSuperAdmin, updateOtpChannelSettings);
 router.delete('/orders/:orderId/permanent-delete', authenticateJWT, requireSuperAdmin, deleteOrderPermanently);
+router.get('/orders/recycle-bin', authenticateJWT, requireSuperAdmin, listRecycleBinOrders);
+router.post('/orders/recycle-bin/restore', authenticateJWT, requireSuperAdmin, restoreOrders);
+router.post('/orders/recycle-bin/permanent-delete', authenticateJWT, requireSuperAdmin, permanentlyDeleteOrders);
 router.post('/legacy-import/commit', authenticateJWT, requireSuperAdmin, commitLegacyImport);
 router.get('/legacy-import/pending', authenticateJWT, requireSuperAdmin, listPendingLegacyProfiles);
 router.post('/legacy-import/:orderId/mark-complete', authenticateJWT, requireSuperAdmin, markLegacyProfileComplete);

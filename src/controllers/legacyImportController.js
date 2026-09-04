@@ -6,10 +6,12 @@ const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../u
 const now = () => new Date();
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
 
-// Placeholder for any Verification/Purchaser/Grantor field the Excel ledger
-// never captured (father's name, employer, etc.) — deliberately a sentence,
-// not blank, so it reads as "not captured yet" rather than looking like real
-// data when staff open the profile later to fill it in.
+// Placeholder for any field the sheet genuinely didn't have a column for.
+// Deliberately a sentence, not blank, so it reads as "not captured yet"
+// rather than looking like real data when staff open the profile later.
+// Every field below can still be edited afterward on the order's own detail
+// page (Purchaser/Grantor Details sections, Super Admin + status=delivered)
+// — this is only what a bulk import couldn't fill in from the sheet.
 const PLACEHOLDER = 'Not available — legacy import';
 
 function addMonths(date, n) {
@@ -28,12 +30,32 @@ function generateTokenNumber() {
   return crypto.randomBytes(4).toString('hex').toUpperCase();
 }
 
+function required(row, field) {
+  const v = row[field];
+  return v !== undefined && v !== null && String(v).trim() !== '';
+}
+
+// Trimmed string if the sheet gave one, otherwise the standard placeholder.
+function orPlaceholder(v) {
+  return v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : PLACEHOLDER;
+}
+
+// Trimmed string if given, otherwise null (for genuinely optional fields —
+// e.g. official_number, business_name — that shouldn't get a placeholder
+// since "not available" would read oddly next to a field most people just
+// don't have).
+function orNull(v) {
+  return v !== undefined && v !== null && String(v).trim() !== '' ? String(v).trim() : null;
+}
+
 /**
  * Builds InstallmentLedger.ledger_rows the same shape
  * deliveryCompletionService.js builds for a normal completed sale — month 0
  * is the advance, months 1..N are the installment schedule. As many months
- * (oldest-first) as `paidCount` are marked already paid, matching however
- * many of the Excel's PAY1-4 columns were filled in.
+ * (oldest-first) as `paidCount` are marked already paid. This is exactly
+ * what the outlet Installments table reads to compute "Next Due" (it takes
+ * the first row with status:'pending', in month order), so a legacy-imported
+ * order shows its next installment correctly, same as any live-created one.
  */
 function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paidCount }) {
   const rows = [];
@@ -63,9 +85,68 @@ function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paid
   return rows;
 }
 
-function required(row, field) {
-  const v = row[field];
-  return v !== undefined && v !== null && String(v).trim() !== '';
+// Full field set matching the Purchaser Details section of the order detail
+// page (qistmarket-app-dashboard orders/[id]/page.tsx) — every one of these
+// is independently editable there too, this is just what bulk-import can
+// fill in upfront so staff aren't retyping it all by hand afterward.
+function buildPurchaserData(row, { name, cnic, phone, verificationId }) {
+  return {
+    verification_id: verificationId,
+    name,
+    cnic_number: cnic,
+    telephone_number: phone,
+    father_husband_name: orPlaceholder(row.purchaser_father_husband_name),
+    present_address: orPlaceholder(row.purchaser_address || row.purchaser_area),
+    permanent_address: orPlaceholder(row.purchaser_address || row.purchaser_area),
+    employment_type: null, // enum field (EMPLOYED/etc.) — left for staff to set correctly rather than guessing
+    job_type: orNull(row.purchaser_job_type),
+    employer_name: orPlaceholder(row.purchaser_employer_name),
+    employer_address: orPlaceholder(row.purchaser_employer_address),
+    designation: orPlaceholder(row.purchaser_designation),
+    official_number: orNull(row.purchaser_official_number),
+    business_name: orNull(row.purchaser_business_name),
+    established_since: orNull(row.purchaser_established_since),
+    business_address: orNull(row.purchaser_business_address),
+    net_income: orNull(row.purchaser_net_income),
+    years_in_company: orNull(row.purchaser_years_in_company),
+    gross_salary: orNull(row.purchaser_gross_salary),
+    nearest_location: orPlaceholder(row.purchaser_nearest_location || row.purchaser_area),
+    permanent_area: orNull(row.purchaser_area),
+    present_area: orNull(row.purchaser_area),
+    is_verified: true,
+  };
+}
+
+// Full field set matching a "Grantor N Details" section on the order detail
+// page — shared shape for both guarantors.
+function buildGrantorData(row, prefix, { name, cnic, phone, num, verificationId }) {
+  const f = (suffix) => row[`${prefix}_${suffix}`];
+  return {
+    verification_id: verificationId,
+    grantor_number: num,
+    name,
+    cnic_number: cnic,
+    telephone_number: phone,
+    father_husband_name: orPlaceholder(f('father_husband_name')),
+    relationship: orPlaceholder(f('relationship')),
+    present_address: orPlaceholder(f('full_residential_address')),
+    permanent_address: orPlaceholder(f('full_residential_address')),
+    full_residential_address: orPlaceholder(f('full_residential_address')),
+    employment_type: null,
+    job_type: orNull(f('job_type')),
+    designation: orPlaceholder(f('designation')),
+    official_number: orNull(f('official_number')),
+    office_address: orPlaceholder(f('office_address')),
+    company_name: orNull(f('company_name')),
+    years_in_company: orNull(f('years_in_company')),
+    monthly_income: orNull(f('monthly_income')),
+    business_name: orNull(f('business_name')),
+    established_since: orNull(f('established_since')),
+    business_address: orNull(f('business_address')),
+    net_income: orNull(f('net_income')),
+    nearest_location: orPlaceholder(f('nearest_location')),
+    is_verified: true,
+  };
 }
 
 const REQUIRED_FIELDS = ['purchaser_name', 'purchaser_cnic', 'purchaser_phone', 'item_price', 'tenure_months', 'installment'];
@@ -88,7 +169,12 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
   const purchaserName = String(row.purchaser_name).trim();
   const purchaserCnic = String(row.purchaser_cnic).trim();
   const purchaserPhone = String(row.purchaser_phone).trim();
-  const purchaserAddress = row.purchaser_address ? String(row.purchaser_address).trim() : PLACEHOLDER;
+  // The paper ledger's single "Address" column is actually a neighborhood/
+  // area name (e.g. "FB Area", "Gulshan-e-Iqbal"), not a street address —
+  // matches Order.area, not Order.address. A full address string, if the
+  // sheet has one, still wins when present.
+  const purchaserAddressLine = row.purchaser_address ? String(row.purchaser_address).trim() : null;
+  const purchaserArea = row.purchaser_area ? String(row.purchaser_area).trim() : null;
   const itemPrice = parseFloat(row.item_price) || 0;
   const advance = parseFloat(row.advance) || 0;
   const installment = parseFloat(row.installment) || 0;
@@ -162,14 +248,23 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
   // exact date.
   const isDelivered = defaultStatus === 'delivered';
 
-  // 2. Order
+  // 2. Order — same Customer Information fields shown on the order detail
+  // page: full address string if given, otherwise the structured
+  // city/area/zone/house-street/gender/residential-type breakdown.
   const order = await prisma.order.create({
     data: {
       order_ref: generateOrderRef(),
       token_number: generateTokenNumber(),
       customer_name: purchaserName,
       whatsapp_number: purchaserPhone,
-      address: purchaserAddress,
+      alternate_contact: orNull(row.purchaser_alt_contact),
+      address: purchaserAddressLine || '',
+      city: orNull(row.purchaser_city),
+      area: purchaserArea,
+      zone: orNull(row.purchaser_zone),
+      house_no: orNull(row.purchaser_house_street),
+      gender: orNull(row.purchaser_gender),
+      residential_type: orNull(row.purchaser_residential_type),
       product_name: itemModel,
       total_amount: itemPrice,
       advance_amount: advance,
@@ -188,7 +283,8 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
     },
   });
 
-  // 3. Verification + Purchaser + up to 2 Grantors
+  // 3. Verification + Purchaser + up to 2 Grantors — full field set, see
+  // buildPurchaserData/buildGrantorData.
   const verification = await prisma.verification.create({
     data: {
       order_id: order.id,
@@ -200,48 +296,28 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
   });
 
   await prisma.purchaserVerification.create({
-    data: {
-      verification_id: verification.id,
+    data: buildPurchaserData(row, {
       name: purchaserName,
-      father_husband_name: PLACEHOLDER,
-      present_address: purchaserAddress,
-      permanent_address: purchaserAddress,
-      cnic_number: purchaserCnic,
-      telephone_number: purchaserPhone,
-      employer_name: PLACEHOLDER,
-      employer_address: PLACEHOLDER,
-      designation: PLACEHOLDER,
-      nearest_location: PLACEHOLDER,
-      is_verified: true,
-    },
+      cnic: purchaserCnic,
+      phone: purchaserPhone,
+      verificationId: verification.id,
+    }),
   });
 
-  const grantors = [
-    { name: row.grantor1_name, cnic: row.grantor1_cnic, phone: row.grantor1_phone, num: 1 },
-    { name: row.grantor2_name, cnic: row.grantor2_cnic, phone: row.grantor2_phone, num: 2 },
+  const grantorInputs = [
+    { prefix: 'grantor1', name: row.grantor1_name, cnic: row.grantor1_cnic, phone: row.grantor1_phone, num: 1 },
+    { prefix: 'grantor2', name: row.grantor2_name, cnic: row.grantor2_cnic, phone: row.grantor2_phone, num: 2 },
   ].filter((g) => required({ n: g.name }, 'n'));
 
-  for (const g of grantors) {
-    const gName = String(g.name).trim();
-    const gCnic = g.cnic ? String(g.cnic).trim() : PLACEHOLDER;
-    const gPhone = g.phone ? String(g.phone).trim() : PLACEHOLDER;
+  for (const g of grantorInputs) {
     await prisma.grantorVerification.create({
-      data: {
-        verification_id: verification.id,
-        grantor_number: g.num,
-        name: gName,
-        father_husband_name: PLACEHOLDER,
-        present_address: PLACEHOLDER,
-        permanent_address: PLACEHOLDER,
-        cnic_number: gCnic,
-        telephone_number: gPhone,
-        designation: PLACEHOLDER,
-        office_address: PLACEHOLDER,
-        full_residential_address: PLACEHOLDER,
-        relationship: PLACEHOLDER,
-        nearest_location: PLACEHOLDER,
-        is_verified: true,
-      },
+      data: buildGrantorData(row, g.prefix, {
+        name: String(g.name).trim(),
+        cnic: orPlaceholder(g.cnic),
+        phone: orPlaceholder(g.phone),
+        num: g.num,
+        verificationId: verification.id,
+      }),
     });
   }
 
@@ -263,7 +339,16 @@ async function importOneRow(row, { adminUserId, defaultStatus }) {
   // 5. InstallmentLedger — backfilled payment history from the sheet.
   const ledgerRows = buildLedgerRows({ orderDate, advanceAmount: advance, monthlyAmount: installment, months, paidCount });
   const imeiStr = serial ? serial.replace(/\D/g, '') : '';
-  const shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
+  // short_id is unique across the whole table — a bulk import can plausibly
+  // hit two rows whose last-6-serial-digits (or, with no serial, random hex
+  // fallback) collide, so check-and-regenerate rather than letting the
+  // create() below fail outright.
+  let shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const clash = await prisma.installmentLedger.findUnique({ where: { short_id: shortId }, select: { id: true } });
+    if (!clash) break;
+    shortId = crypto.randomBytes(4).toString('hex').slice(0, 6);
+  }
   const ledgerToken = jwt.sign(
     { order_id: order.id, delivery_id: delivery.id },
     LEDGER_TOKEN_SECRET,

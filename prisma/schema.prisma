@@ -193,6 +193,8 @@ model Order {
   recovery_assigned_at     DateTime?
   verification_assigned_at DateTime?
   delivered_at             DateTime?
+  deleted_at               DateTime?
+  deleted_by               Int?
   dummyCustomer            DummyCustomer?        @relation("OrderDummyCustomer")
   delivery                 Delivery?             @relation("OrderDelivery")
   archived_deliveries      ArchivedDelivery[]    @relation("ArchivedOrderDeliveries")
@@ -222,6 +224,7 @@ model Order {
   @@index([recovery_officer_id])
   @@index([outlet_id])
   @@index([imei_serial])
+  @@index([deleted_at])
 }
 
 model OrderStatusHistory {
