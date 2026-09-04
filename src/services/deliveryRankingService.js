@@ -32,6 +32,7 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
     let completedCount = 0;
     let cancelledCount = 0;
     let expiredCount = 0;
+    let returnedCount = 0;
     let totalSales = 0;
 
     orders.forEach(order => {
@@ -40,6 +41,7 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
             totalSales += (order.total_amount || 0);
         }
         if (order.status === 'completed') completedCount++;
+        if (order.status === 'returned') returnedCount++;
         if (order.status === 'cancelled') cancelledCount++;
         if (order.status === 'expired') expiredCount++;
     });
@@ -48,6 +50,7 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
     const deliveryRules = getScoringConfig().delivery;
     const score = (deliveredCount * (deliveryRules.points_per_delivered_order ?? 15)) +
                   (completedCount * (deliveryRules.points_per_completed_order ?? 5)) -
+                  (returnedCount * (deliveryRules.points_deducted_per_returned_order ?? 5)) -
                   (cancelledCount * (deliveryRules.points_deducted_per_cancelled_order ?? 2)) -
                   (expiredCount * (deliveryRules.points_deducted_per_expired_order ?? 3));
 

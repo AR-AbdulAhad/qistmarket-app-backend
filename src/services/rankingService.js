@@ -135,6 +135,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     // updateDeliveryRanking below already does for delivery officers.
     let deliveredCount = 0;
     let completedCount = 0;
+    let returnedCount = 0;
     let repeatCount = 0;
     let cancelledCount = 0;
     let expiredCount = 0;
@@ -146,6 +147,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             totalSales += (order.total_amount || 0);
         }
         if (order.status === 'completed') completedCount++;
+        if (order.status === 'returned') returnedCount++;
         if (order.status === 'cancelled') cancelledCount++;
         if (order.status === 'expired') expiredCount++;
         if (order.is_repeat_customer) repeatCount++;
@@ -167,6 +169,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
                   (repeatCount * (csrRules.points_per_repeat_customer ?? 5)) +
                   (completedCount * (csrRules.points_per_completed_order ?? 5)) +
                   (solvedComplaintsCount * (csrRules.points_per_solved_complaint ?? 1)) -
+                  (returnedCount * (csrRules.points_deducted_per_returned_order ?? 5)) -
                   (cancelledCount * (csrRules.points_deducted_per_cancelled_order ?? 1)) -
                   (expiredCount * (csrRules.points_deducted_per_expired_order ?? 3));
 

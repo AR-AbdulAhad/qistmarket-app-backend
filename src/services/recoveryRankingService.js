@@ -32,6 +32,7 @@ async function updateRecoveryRanking(officerId, periodType = 'month') {
     let completedCount = 0;
     let cancelledCount = 0;
     let expiredCount = 0;
+    let returnedCount = 0;
     let totalSales = 0;
 
     orders.forEach(order => {
@@ -39,6 +40,7 @@ async function updateRecoveryRanking(officerId, periodType = 'month') {
             deliveredCount++;
         }
         if (order.status === 'completed') completedCount++;
+        if (order.status === 'returned') returnedCount++;
         if (order.status === 'cancelled') cancelledCount++;
         if (order.status === 'expired') expiredCount++;
     });
@@ -61,6 +63,7 @@ async function updateRecoveryRanking(officerId, periodType = 'month') {
     const recoveryRules = getScoringConfig().recovery;
     const score = (collectedVisitsCount * (recoveryRules.points_per_collected_visit ?? 15)) +
                   (completedCount * (recoveryRules.points_per_completed_order ?? 5)) -
+                  (returnedCount * (recoveryRules.points_deducted_per_returned_order ?? 5)) -
                   (cancelledCount * (recoveryRules.points_deducted_per_cancelled_order ?? 2)) -
                   (expiredCount * (recoveryRules.points_deducted_per_expired_order ?? 3));
 
