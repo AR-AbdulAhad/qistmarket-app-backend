@@ -46,7 +46,8 @@ async function main() {
     },
   ];
 
-  const req = { body: { rows, default_status: 'delivered' }, user: { id: superAdmin.id } };
+  const officer = await prisma.user.findFirst({ where: { role: { name: 'Verification Officer' }, status: 'active' } });
+  const req = { body: { rows, officer_id: officer.id }, user: { id: superAdmin.id } };
   const res = mockRes();
   await commitLegacyImport(req, res);
   console.log('Controller response:', JSON.stringify(res.body, null, 2));
@@ -71,6 +72,8 @@ async function main() {
   console.log('Order:', order.order_ref, order.status, 'needs_media_upload:', order.needs_media_upload, 'needs_location:', order.needs_location);
   console.log('Customer:', order.customer?.name, order.customer?.cnic, order.customer?.mobile);
   console.log('Delivery:', !!order.delivery, order.delivery?.status);
+  console.log('verification_officer_id === officer.id (not admin):', order.verification?.verification_officer_id === officer.id);
+  console.log('delivery_agent_id === officer.id (not admin):', order.delivery?.delivery_agent_id === officer.id);
   console.log('InstallmentLedger rows:', order.delivery?.installment_ledger?.ledger_rows?.length);
   console.log('ConsumerNumbers:', order.delivery?.installment_ledger?.consumer_numbers?.map(c => c.consumer_number));
   console.log('Verification status:', order.verification?.status);

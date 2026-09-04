@@ -14,12 +14,13 @@ function mockRes() {
 
 async function main() {
   const superAdmin = await prisma.user.findFirst({ where: { role: { name: 'Super Admin' } } });
+  const officer = await prisma.user.findFirst({ where: { role: { name: 'Verification Officer' }, status: 'active' } });
   const uniqueSuffix = Date.now().toString().slice(-8);
 
   // ── 1. Missing required fields ──
   const badRow = { purchaser_name: 'NO CNIC PERSON', item_price: 1000 }; // missing cnic/phone/tenure/installment
   let res1 = mockRes();
-  await commitLegacyImport({ body: { rows: [badRow], default_status: 'delivered' }, user: { id: superAdmin.id } }, res1);
+  await commitLegacyImport({ body: { rows: [badRow], officer_id: officer.id }, user: { id: superAdmin.id } }, res1);
   console.log('1. Bad row result:', JSON.stringify(res1.body.results[0]));
   const leaked = await prisma.order.findFirst({ where: { customer_name: 'NO CNIC PERSON' } });
   console.log('   leaked order (should be null):', leaked);
@@ -30,7 +31,7 @@ async function main() {
     item_price: 40000, item_model: 'Misc Model', serial: `111${uniqueSuffix}`, tenure_months: 6, advance: 4000, installment: 6000,
   };
   let res2 = mockRes();
-  await commitLegacyImport({ body: { rows: [goodRow], default_status: 'delivered' }, user: { id: superAdmin.id } }, res2);
+  await commitLegacyImport({ body: { rows: [goodRow], officer_id: officer.id }, user: { id: superAdmin.id } }, res2);
   const orderId = res2.body.results[0].order_id;
   console.log('2. Imported order id:', orderId);
 

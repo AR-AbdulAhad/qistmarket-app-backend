@@ -3426,7 +3426,7 @@ const getVerificationDashboardStats = async (req, res) => {
  */
 const updateVerificationAssignment = async (req, res) => {
   const { verification_id } = req.params;
-  const { verification_officer_id, outlet_id } = req.body;
+  const { verification_officer_id, outlet_id, delivery_officer_id } = req.body;
 
   try {
     const verId = parseInt(verification_id, 10);
@@ -3445,6 +3445,7 @@ const updateVerificationAssignment = async (req, res) => {
 
     const officerId = verification_officer_id !== undefined ? (verification_officer_id ? parseInt(verification_officer_id, 10) : null) : undefined;
     const outletIdVal = outlet_id !== undefined ? (outlet_id ? parseInt(outlet_id, 10) : null) : undefined;
+    const deliveryOfficerIdVal = delivery_officer_id !== undefined ? (delivery_officer_id ? parseInt(delivery_officer_id, 10) : null) : undefined;
 
     // Update Verification officer
     const updatedVerification = await prisma.verification.update({
@@ -3458,13 +3459,14 @@ const updateVerificationAssignment = async (req, res) => {
       }
     });
 
-    // Update Order outlet and assigned_to_user_id if officerId changed
+    // Update Order outlet, assigned_to_user_id and delivery_officer_id
     if (verification.order_id) {
       await prisma.order.update({
         where: { id: verification.order_id },
         data: {
           ...(outletIdVal !== undefined && { outlet_id: outletIdVal }),
           ...(officerId !== undefined && { assigned_to_user_id: officerId }),
+          ...(deliveryOfficerIdVal !== undefined && { delivery_officer_id: deliveryOfficerIdVal }),
           updated_at: now(),
         }
       });

@@ -822,7 +822,7 @@ model StockTransfer {
 model Verification {
   id                      Int                       @id @default(autoincrement())
   order_id                Int                       @unique
-  verification_officer_id Int
+  verification_officer_id Int?
   status                  String                    @default("in_progress")
   start_time              DateTime
   end_time                DateTime?
@@ -839,7 +839,7 @@ model Verification {
   purchaser               PurchaserVerification?
   active_user             User?                     @relation("active_verification")
   order                   Order                     @relation("OrderVerification", fields: [order_id], references: [id], onDelete: Cascade)
-  verification_officer    User                      @relation("verification_officer", fields: [verification_officer_id], references: [id])
+  verification_officer    User?                     @relation("verification_officer", fields: [verification_officer_id], references: [id])
   documents               VerificationDocument[]
   verification_locations  VerificationLocation[]
   reviews                 VerificationReview[]

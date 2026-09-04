@@ -36,8 +36,9 @@ async function main() {
     remain: 46000,
   };
 
+  const officer = await prisma.user.findFirst({ where: { role: { name: 'Verification Officer' }, status: 'active' } });
   const res = mockRes();
-  await commitLegacyImport({ body: { rows: [row], default_status: 'delivered' }, user: { id: superAdmin.id } }, res);
+  await commitLegacyImport({ body: { rows: [row], officer_id: officer.id }, user: { id: superAdmin.id } }, res);
   console.log('Result:', JSON.stringify(res.body.results[0]));
   const orderId = res.body.results[0].order_id;
   if (!orderId) return;

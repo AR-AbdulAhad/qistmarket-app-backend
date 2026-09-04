@@ -166,7 +166,7 @@ const REQUIRED_FIELDS = ['purchaser_name', 'purchaser_cnic', 'purchaser_phone', 
 // paidCount vs months, no separate order status needed for it.
 const ORDER_STATUS = 'delivered';
 
-async function importOneRow(row, { adminUserId }) {
+async function importOneRow(row, { adminUserId, officerId }) {
   for (const f of REQUIRED_FIELDS) {
     if (!required(row, f)) {
       throw Object.assign(new Error(`Missing required field: ${f}`), { httpStatus: 400 });
@@ -287,12 +287,12 @@ async function importOneRow(row, { adminUserId }) {
       needs_media_upload: true,
       needs_location: true,
       created_at: orderDate,
-      assigned_to_user_id: adminUserId,
+      assigned_to_user_id: officerId,
       verification_assigned_at: orderDate,
-      delivery_officer_id: adminUserId,
+      delivery_officer_id: officerId,
       delivery_assigned_at: orderDate,
       ...(hasPendingBalance && {
-        recovery_officer_id: adminUserId,
+        recovery_officer_id: officerId,
         recovery_assigned_at: orderDate,
       }),
     },
@@ -301,27 +301,29 @@ async function importOneRow(row, { adminUserId }) {
   {
     // Order Status Timeline backfill — the real pipeline an order goes
     // through (new -> in_progress -> completed[verification] -> approved ->
-    // delivered), all attributed to the importing admin. Deliberately NOT
-    // using orderAuditLogger.logOrderStatusChange here: that helper also
-    // fires a live WhatsApp notification to the customer's number and bumps
-    // the creator's CSR ranking for the day — exactly the "silent test
+    // delivered). The verification/handover stages are attributed to the
+    // chosen officer, "approved" to the importing admin — matches how a real
+    // order's timeline actually splits those roles. Deliberately NOT using
+    // orderAuditLogger.logOrderStatusChange here: that helper also fires a
+    // live WhatsApp notification to the customer's number and bumps the
+    // creator's CSR ranking for the day — exactly the "silent test
     // pollution" this whole import is supposed to avoid, so this writes the
     // history rows directly instead.
     const stageMinutes = [0, 5, 10, 15, 20];
     const stages = [
-      { old: null, new: 'new' },
-      { old: 'new', new: 'in_progress' },
-      { old: 'in_progress', new: 'completed' },
-      { old: 'completed', new: 'approved' },
-      { old: 'approved', new: 'delivered' },
+      { old: null, new: 'new', by: officerId, role: 'Verification Officer' },
+      { old: 'new', new: 'in_progress', by: officerId, role: 'Verification Officer' },
+      { old: 'in_progress', new: 'completed', by: officerId, role: 'Verification Officer' },
+      { old: 'completed', new: 'approved', by: adminUserId, role: 'Super Admin' },
+      { old: 'approved', new: 'delivered', by: officerId, role: 'Delivery Officer' },
     ];
     await prisma.orderStatusHistory.createMany({
       data: stages.map((s, i) => ({
         order_id: order.id,
         old_status: s.old,
         new_status: s.new,
-        user_id: adminUserId,
-        role_name: 'Super Admin',
+        user_id: s.by,
+        role_name: s.role,
         remarks: i === 0 ? 'Legacy import — historical record, exact per-stage timestamps not available from the source ledger' : null,
         created_at: new Date(orderDate.getTime() + stageMinutes[i] * 60000),
       })),
@@ -333,7 +335,7 @@ async function importOneRow(row, { adminUserId }) {
   const verification = await prisma.verification.create({
     data: {
       order_id: order.id,
-      verification_officer_id: adminUserId,
+      verification_officer_id: officerId,
       status: 'completed',
       start_time: orderDate,
       end_time: orderDate,
@@ -373,7 +375,7 @@ async function importOneRow(row, { adminUserId }) {
   const delivery = await prisma.delivery.create({
     data: {
       order_id: order.id,
-      delivery_agent_id: adminUserId,
+      delivery_agent_id: officerId,
       status: 'completed',
       start_time: orderDate,
       end_time: orderDate,
@@ -451,17 +453,32 @@ async function importOneRow(row, { adminUserId }) {
 
 /**
  * POST /admin-panel/legacy-import/commit
- * body: { rows: [...] } — every row is imported as a "delivered" order (see
- * ORDER_STATUS's comment for why "completed" is never used here).
+ * body: { rows: [...], officer_id } — every row is imported as a "delivered"
+ * order (see ORDER_STATUS's comment for why "completed" is never used here).
+ * officer_id is who the Verification Officer/Delivery Officer/Recovery
+ * Officer fields get attributed to — the Super Admin running the import is
+ * never a stand-in for those (an admin isn't a verification/delivery
+ * officer; that field showing "Super Admin" on every imported profile was
+ * exactly the bug this validates against). created_by_user_id still
+ * correctly stays the actual importing admin.
  * Each row is processed independently (see importOneRow's note on why this
  * isn't wrapped in a DB transaction) so one bad row can't abort the whole
  * batch — results are returned per-row, never silently dropped.
  */
 const commitLegacyImport = async (req, res) => {
-  const { rows } = req.body;
+  const { rows, officer_id } = req.body;
 
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ success: false, message: 'No rows provided.' });
+  }
+
+  const officerId = parseInt(officer_id, 10);
+  if (!officerId) {
+    return res.status(400).json({ success: false, message: 'officer_id is required — pick who these profiles should be attributed to.' });
+  }
+  const officer = await prisma.user.findUnique({ where: { id: officerId }, select: { id: true, status: true } });
+  if (!officer || officer.status !== 'active') {
+    return res.status(400).json({ success: false, message: 'The selected officer account was not found or is not active.' });
   }
 
   const adminUserId = req.user.id;
@@ -469,7 +486,7 @@ const commitLegacyImport = async (req, res) => {
 
   for (let i = 0; i < rows.length; i += 1) {
     try {
-      const { order_id, reconciliationWarning } = await importOneRow(rows[i], { adminUserId });
+      const { order_id, reconciliationWarning } = await importOneRow(rows[i], { adminUserId, officerId });
       results.push({ row: i, success: true, order_id, reconciliation_warning: reconciliationWarning });
     } catch (err) {
       console.error(`Legacy import row ${i} failed:`, err);

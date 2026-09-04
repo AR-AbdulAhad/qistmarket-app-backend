@@ -4,26 +4,30 @@ const prisma = require('../../lib/prisma');
 const now = () => new Date();
 
 const getOfficerAssignments = async (req, res) => {
-    const { role, all } = req.query;
+    const { role, all, outlet_id, include_admins } = req.query;
     try {
         let roleNames;
         if (role === 'delivery') {
-            roleNames = ['Delivery Agent', 'Super Admin', 'Admin'];
+            roleNames = ['Delivery Agent', 'Delivery Officer'];
         } else if (role === 'recovery') {
-            roleNames = ['Recovery Officer', 'Super Admin', 'Admin'];
+            roleNames = ['Recovery Officer'];
         } else {
-            roleNames = ['Verification Officer', 'Super Admin', 'Admin'];
+            roleNames = ['Verification Officer'];
         }
+
+        if (include_admins === 'true') {
+            roleNames.push('Super Admin', 'Admin');
+        }
+
         const userRole = (req.user?.role || '').toLowerCase();
         const where = {
             role: { name: { in: roleNames } }
         };
 
-        // If 'all=true' is passed or user is admin/superadmin, don't restrict by branch outlet
-        if (all !== 'true' && userRole === 'branch user' && req.user.outlet_id) {
+        if (outlet_id && !isNaN(parseInt(outlet_id))) {
+            where.outlet_id = parseInt(outlet_id);
+        } else if (all !== 'true' && userRole === 'branch user' && req.user.outlet_id) {
             where.outlet_id = req.user.outlet_id;
-        } else if (req.query.outlet_id) {
-            where.outlet_id = parseInt(req.query.outlet_id);
         }
 
         const officers = await prisma.user.findMany({
