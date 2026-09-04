@@ -1579,6 +1579,7 @@ const getVerifications = async (req, res) => {
     if (search.trim()) {
       where.OR = [
         { order: { customer_name: { contains: search } } },
+        { purchaser: { name: { contains: search } } },
         { order: { whatsapp_number: { contains: search } } },
         { order: { order_ref: { contains: search } } },
         { order: { token_number: { contains: search } } },
@@ -1659,6 +1660,7 @@ const getMyAssignedOrdersCursorPaginated = (targetStatus) => async (req, res) =>
     if (search.trim()) {
       baseWhere.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { token_number: { contains: search } },
@@ -2641,10 +2643,11 @@ const getDeliveredProductsList = async (req, res) => {
       where.outlet_id = parseInt(outlet_id);
     }
 
-    // Search by customer name, order_ref, or product name
+    // Search by customer name, purchaser name, order_ref, or product name
     if (search.trim()) {
       where.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { order_ref: { contains: search } },
         { token_number: { contains: search } },
         { product_name: { contains: search } }

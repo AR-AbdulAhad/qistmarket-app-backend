@@ -555,6 +555,8 @@ async function listDevices(req, res) {
         { imei: { contains: search } },
         { order_ref: { contains: search } },
         { product_model: { contains: search } },
+        { order: { customer_name: { contains: search } } },
+        { order: { verification: { purchaser: { name: { contains: search } } } } },
       ];
     }
     if (status) where.enrollment_status = status;

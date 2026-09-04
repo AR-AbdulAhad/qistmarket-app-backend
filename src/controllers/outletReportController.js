@@ -285,30 +285,13 @@ const getSalesReport = async (req, res) => {
             rangeEnd.setHours(23, 59, 59, 999);
         }
 
+        const totalDownPaymentsReceived = ordersWithDownPayment.reduce((acc, o) => acc + (o.down_payment_amount || 0), 0);
+
         const summary = {
             totalOrders: orders.length,
             totalGrossAmount: ordersWithDownPayment.reduce((acc, o) => acc + (o.sales_value || 0), 0),
-            totalDownPaymentsReceived: ordersWithDownPayment.reduce((acc, o) => acc + o.down_payment_amount, 0),
-            totalReceived: orders.reduce((acc, o) => {
-                const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
-                const rowsTotal = rows.filter(r => {
-                    if (r.status !== 'paid') return false;
-                    if (!rangeStart && !rangeEnd) return true;
-                    if (!r.paid_at) return true;
-                    const paidDate = new Date(r.paid_at);
-                    if (rangeStart && paidDate < rangeStart) return false;
-                    if (rangeEnd && paidDate > rangeEnd) return false;
-                    return true;
-                }).reduce((pAcc, p) => pAcc + parseFloat(p.paid_amount || p.amount || 0), 0);
-
-                const advanceRow = rows.find(r => r.month === 0);
-                let advancePaid = 0;
-                if (!advanceRow && o.advance_amount > 0) {
-                    advancePaid = o.advance_amount;
-                }
-
-                return acc + rowsTotal + advancePaid;
-            }, 0)
+            totalDownPaymentsReceived,
+            totalReceived: totalDownPaymentsReceived
         };
 
         res.json({ success: true, data: { summary, orders: ordersWithDownPayment } });

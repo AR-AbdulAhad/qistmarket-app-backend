@@ -1498,6 +1498,7 @@ const searchDeliveredOrders = async (req, res) => {
                 { order_ref: { contains: query } },
                 { token_number: { contains: query } },
                 { customer_name: { contains: query } },
+                { verification: { purchaser: { name: { contains: query } } } },
                 { product_name: { contains: query } },
                 { imei_serial: { contains: query } },
                 { whatsapp_number: { contains: query } },
@@ -1627,6 +1628,7 @@ const getOutletInstallments = async (req, res) => {
             ...(q && {
                 OR: [
                     { customer_name: { contains: q } },
+                    { verification: { purchaser: { name: { contains: q } } } },
                     { order_ref: { contains: q } },
                     { whatsapp_number: { contains: q } },
                     { delivery: { product_imei: { contains: q } } },
@@ -2865,6 +2867,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
                 return (
                     (inst.order_ref || '').toLowerCase().includes(q) ||
                     (inst.customer_name || '').toLowerCase().includes(q) ||
+                    (inst.purchaser?.name || '').toLowerCase().includes(q) ||
                     (inst.whatsapp_number || '').toLowerCase().includes(q) ||
                     (inst.alternate_number || '').toLowerCase().includes(q) ||
                     (inst.area || '').toLowerCase().includes(q) ||

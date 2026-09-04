@@ -886,6 +886,7 @@ const getOrders = async (req, res) => {
     if (search.trim()) {
       where.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { token_number: { contains: search } },
@@ -1066,6 +1067,7 @@ const getOrdersWithPagination = async (req, res) => {
     if (search.trim()) {
       baseWhere.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { token_number: { contains: search } },
@@ -1741,6 +1743,7 @@ const getMyDeliveryOrdersWithPagination = async (req, res) => {
     if (search.trim()) {
       baseWhere.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { token_number: { contains: search } },
@@ -2467,6 +2470,7 @@ const getVerificationOrders = async (req, res) => {
     if (search.trim()) {
       where.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { area: { contains: search } },
@@ -2575,6 +2579,7 @@ const getApprovedOrders = async (req, res) => {
     if (search.trim()) {
       where.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { area: { contains: search } },
@@ -3094,6 +3099,7 @@ const getDeliveredOrders = async (req, res) => {
     if (search.trim()) {
       where.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { area: { contains: search } },
@@ -3207,6 +3213,7 @@ const getReturnedOrders = async (req, res) => {
     if (search.trim()) {
       where.OR = [
         { customer_name: { contains: search } },
+        { verification: { purchaser: { name: { contains: search } } } },
         { whatsapp_number: { contains: search } },
         { order_ref: { contains: search } },
         { area: { contains: search } },
