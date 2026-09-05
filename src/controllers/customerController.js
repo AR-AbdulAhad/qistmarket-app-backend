@@ -2,6 +2,22 @@ const prisma = require('../../lib/prisma');
 const { syncBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
 
+// Largest overdue gap among this order's unpaid installments, in whole days.
+function computeDaysOverdue(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const todayEnd = new Date();
+  todayEnd.setHours(23, 59, 59, 999);
+  let maxDays = 0;
+  for (const row of list) {
+    if ((row.status || '').toLowerCase() === 'paid') continue;
+    const dueDate = row.dueDate ? new Date(row.dueDate) : null;
+    if (!dueDate || isNaN(dueDate.getTime()) || dueDate > todayEnd) continue;
+    const days = Math.floor((todayEnd - dueDate) / 86400000);
+    if (days > maxDays) maxDays = days;
+  }
+  return maxDays;
+}
+
 const getCustomers = async (req, res) => {
   const {
     page = 1,
@@ -304,6 +320,9 @@ const getBlacklistedCustomers = async (req, res) => {
           orderBy: { created_at: 'desc' },
           take: 1,
         },
+        recovery_officer: {
+          select: { id: true, full_name: true },
+        },
       },
     });
 
@@ -342,6 +361,13 @@ const getBlacklistedCustomers = async (req, res) => {
       const hasBlacklistedGrantor = order.verification?.grantors?.some((g) => g.is_blacklisted);
       const isAccountBlacklisted = purchaser?.is_blacklisted || hasBlacklistedGrantor || false;
 
+      // Which party on this order triggered the blacklist — drives the "Customer / Guarantor / G2" filter.
+      let blacklistedRole = 'Customer';
+      if (!purchaser?.is_blacklisted && hasBlacklistedGrantor) {
+        const blacklistedGrantor = order.verification?.grantors?.find((g) => g.is_blacklisted);
+        blacklistedRole = blacklistedGrantor?.grantor_number === 2 ? 'G2' : 'Guarantor';
+      }
+
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
@@ -358,6 +384,8 @@ const getBlacklistedCustomers = async (req, res) => {
             profile_photo: profilePhoto,
             is_blacklisted: isAccountBlacklisted, // Marker for UI
             created_at: order.created_at,
+            blacklisted_role: blacklistedRole,
+            recovery_officer_name: order.recovery_officer?.full_name || null,
           },
           orders: [],
           ledgerSummary: {
@@ -367,6 +395,7 @@ const getBlacklistedCustomers = async (req, res) => {
             totalRemaining: 0,
             totalDue: 0,
             totalCurrent: 0,
+            daysOverdue: 0,
           },
         });
       }
@@ -406,6 +435,7 @@ const getBlacklistedCustomers = async (req, res) => {
       });
 
       const { due: orderDue, current: orderCurrent } = computeDueAndCurrent(installmentLedger);
+      const orderDaysOverdue = computeDaysOverdue(installmentLedger);
 
       group.ledgerSummary.totalOrders += 1;
       group.ledgerSummary.totalAdvanceReceived += advanceAmount;
@@ -413,33 +443,47 @@ const getBlacklistedCustomers = async (req, res) => {
       group.ledgerSummary.totalRemaining += grandTotalRemaining;
       group.ledgerSummary.totalDue += orderDue;
       group.ledgerSummary.totalCurrent += orderCurrent;
+      group.ledgerSummary.daysOverdue = Math.max(group.ledgerSummary.daysOverdue, orderDaysOverdue);
     }
 
     const allBlacklisted = Array.from(customerMap.values()).sort((a, b) =>
       a.customer.name.localeCompare(b.customer.name)
     );
 
-    // Attach manual blacklist reasons
+    // Attach manual blacklist reasons, blacklist date, and pending-whitelist status
+    for (const c of allBlacklisted) {
+      c.customer.blacklist_reason = 'Auto-flagged (90+ days delinquency)';
+      c.customer.blacklist_date = null;
+      c.customer.blacklist_status = 'Blacklisted';
+    }
     const cnics = allBlacklisted.map(c => c.customer.cnic_number).filter(Boolean);
     if (cnics.length > 0) {
       const actions = await prisma.blacklistAction.findMany({
-        where: { cnic: { in: cnics }, action: 'blacklist' },
+        where: { cnic: { in: cnics } },
         orderBy: { created_at: 'desc' }
       });
-      // Get the latest blacklist action reason per cnic
-      const reasonMap = new Map();
+
+      // Latest "blacklist" action per cnic — drives reason + blacklist date.
+      const blacklistActionMap = new Map();
+      // Latest action of any kind per cnic — a pending whitelist request overrides the "Blacklisted" status.
+      const latestActionMap = new Map();
       for (const a of actions) {
-        if (!reasonMap.has(a.cnic)) {
-          reasonMap.set(a.cnic, a.reason);
-        }
+        if (!latestActionMap.has(a.cnic)) latestActionMap.set(a.cnic, a);
+        if (a.action === 'blacklist' && !blacklistActionMap.has(a.cnic)) blacklistActionMap.set(a.cnic, a);
       }
-      
+
       for (const c of allBlacklisted) {
-        if (c.customer.cnic_number && reasonMap.has(c.customer.cnic_number)) {
-          c.customer.blacklist_reason = reasonMap.get(c.customer.cnic_number) || 'Manual blacklist (No reason provided)';
-        } else {
-          c.customer.blacklist_reason = 'Auto-flagged (90+ days delinquency)';
-        }
+        const cnic = c.customer.cnic_number;
+        const blacklistAction = cnic ? blacklistActionMap.get(cnic) : null;
+        const latestAction = cnic ? latestActionMap.get(cnic) : null;
+
+        c.customer.blacklist_reason = blacklistAction
+          ? (blacklistAction.reason || 'Manual blacklist (No reason provided)')
+          : 'Auto-flagged (90+ days delinquency)';
+        c.customer.blacklist_date = blacklistAction?.created_at || null;
+        c.customer.blacklist_status = (latestAction?.action === 'whitelist' && latestAction.status === 'pending')
+          ? 'Pending Whitelist'
+          : 'Blacklisted';
       }
     }
 

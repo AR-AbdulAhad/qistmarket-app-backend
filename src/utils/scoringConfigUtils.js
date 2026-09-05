@@ -2,8 +2,10 @@ const fs = require('fs');
 const path = require('path');
 
 const CONFIG_PATH = path.join(__dirname, '../config/scoring_rules.json');
+const OVERRIDES_PATH = path.join(__dirname, '../config/scoring_overrides.json');
 
 let cachedConfig = null;
+let cachedOverrides = null;
 
 const DEFAULT_SCORING_CONFIG = {
   outlet: {

@@ -77,6 +77,16 @@ function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paid
     paid_at: orderDate,
     payment_method: 'Cash',
     feedback: 'Legacy import',
+    // Matches the extra bookkeeping fields a real payment picks up when
+    // recorded through the app (qistReceivingUtils.js) — payment_history is
+    // what the ledger UI reads for the per-payment breakdown under a row,
+    // collection_source/fuel_charges are always present on a real row even
+    // if zero/empty; a legacy row missing them still renders fine (
+    // ledgerUtils.js's normalizeLedger defaults them), but including them
+    // makes an imported row indistinguishable from one built the normal way.
+    payment_history: [{ amount: advanceAmount, date: orderDate, method: 'Cash' }],
+    collection_source: 'legacy_import',
+    fuel_charges: 0,
   });
 
   for (let i = 0; i < months; i += 1) {
@@ -87,15 +97,22 @@ function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paid
     // back to assuming the full scheduled installment was collected on
     // schedule, same as before.
     const realPayment = payments?.[i];
+    const paidAmount = realPayment?.amount ?? monthlyAmount;
+    const paidAt = realPayment?.date || addMonths(orderDate, i + 1);
     rows.push({
       month: i + 1,
       label: `Month ${i + 1}`,
       due_date: addMonths(orderDate, i + 1),
       amount: monthlyAmount,
-      paid_amount: isPaid ? (realPayment?.amount ?? monthlyAmount) : 0,
+      paid_amount: isPaid ? paidAmount : 0,
       status: isPaid ? 'paid' : 'pending',
-      paid_at: isPaid ? (realPayment?.date || addMonths(orderDate, i + 1)) : null,
+      paid_at: isPaid ? paidAt : null,
       payment_method: isPaid ? 'Cash' : null,
+      ...(isPaid && {
+        payment_history: [{ amount: paidAmount, date: paidAt, method: 'Cash' }],
+        collection_source: 'legacy_import',
+        fuel_charges: 0,
+      }),
     });
   }
   return rows;
@@ -410,6 +427,23 @@ async function importOneRow(row, { adminUserId, payoffStatus }) {
         verificationId: verification.id,
         isVerified: true,
       }),
+    });
+  }
+
+  // Next of Kin — optional, one per verification (schema: NextOfKinVerification
+  // is @unique on verification_id). Only created when the sheet actually
+  // names one; every field on the model is required, so anything the row
+  // didn't have (cnic/relation/phone) gets the same placeholder pattern as
+  // the rest of the profile.
+  if (required(row, 'next_of_kin_name')) {
+    await prisma.nextOfKinVerification.create({
+      data: {
+        verification_id: verification.id,
+        name: String(row.next_of_kin_name).trim(),
+        cnic_number: orPlaceholder(row.next_of_kin_cnic),
+        relation: orPlaceholder(row.next_of_kin_relation),
+        phone_number: orPlaceholder(row.next_of_kin_phone),
+      },
     });
   }
 

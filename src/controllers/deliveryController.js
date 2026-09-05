@@ -735,19 +735,45 @@ const submitCashToOutlet = async (req, res) => {
       let targetEntry = lastEntry;
 
       // ✅ No cash entries exist at all yet (brand new officer / balance
-      // truly has nothing to link to). Wallet is allowed to go negative, so
-      // create a zero-value placeholder anchored to any order this officer
-      // is linked to, instead of blocking the submission outright.
+      // truly has nothing to link to). Wallet is allowed to go negative, and
+      // a submission (including a plain 0-amount one) must still go through,
+      // so create a zero-value placeholder row anchored to *some* order
+      // instead of blocking the submission outright. `CashInHand.order_id`
+      // is a required FK, so we still need a real order id here — but which
+      // order it is doesn't matter, since this placeholder's own `amount`
+      // stays 0 and is never used for balance math (only the real
+      // `CashSubmissionHistory`/`OfficerTransaction` rows created below
+      // carry the actual submitted amount). Widen the search instead of
+      // failing: this officer's own orders (any role) first, then any order
+      // at their outlet, then — as a last resort, e.g. a brand-new officer
+      // with zero history anywhere — the most recent order in the system.
       if (!targetEntry) {
-        const anchorOrder = await prisma.order.findFirst({
+        const officerRecord = await prisma.user.findUnique({
+          where: { id: deliveryBoyId },
+          select: { outlet_id: true }
+        });
+
+        let anchorOrder = await prisma.order.findFirst({
           where: {
             OR: [
               { delivery_officer_id: deliveryBoyId },
-              { recovery_officer_id: deliveryBoyId }
+              { recovery_officer_id: deliveryBoyId },
+              { assigned_to_user_id: deliveryBoyId }
             ]
           },
           orderBy: { created_at: 'desc' }
         });
+
+        if (!anchorOrder && officerRecord?.outlet_id) {
+          anchorOrder = await prisma.order.findFirst({
+            where: { outlet_id: officerRecord.outlet_id },
+            orderBy: { created_at: 'desc' }
+          });
+        }
+
+        if (!anchorOrder) {
+          anchorOrder = await prisma.order.findFirst({ orderBy: { created_at: 'desc' } });
+        }
 
         if (!anchorOrder) {
           return res.status(400).json({ success: false, message: 'No cash collections found to link this submission to. Please collect some payment or deliver an order first.' });
@@ -999,17 +1025,29 @@ const cancelCashSubmission = async (req, res) => {
       }
     });
 
-    if (histories.length === 0) {
+    // The "Pending" list the officer sees is built from OfficerTransaction
+    // (getCashInHand groups `rawTransactions`), not from CashSubmissionHistory
+    // directly. The two are normally created together, but if the Online
+    // payment_method branch of submitCashToOutlet throws after that initial
+    // createMany (e.g. a SmartPay consumer-number regeneration hiccup), only
+    // one side can end up left behind. Gate the 404 on OfficerTransaction too
+    // — the table that actually drives what the officer sees as "pending" —
+    // so a submission the officer can see is never uncancellable.
+    const pendingTransactions = await prisma.officerTransaction.findMany({
+      where: { submission_ref, type: 'debit', status: 'pending', officer_id: deliveryBoyId }
+    });
+
+    if (histories.length === 0 && pendingTransactions.length === 0) {
       return res.status(404).json({ success: false, message: 'No pending submission found to cancel' });
     }
 
     await prisma.cashSubmissionHistory.updateMany({
-      where: { submission_ref, status: 'pending' },
+      where: { submission_ref, status: 'pending', cash_in_hand: { officer_id: deliveryBoyId } },
       data: { status: 'cancelled', otp: null }
     });
 
     await prisma.officerTransaction.updateMany({
-      where: { submission_ref, type: 'debit', status: 'pending' },
+      where: { submission_ref, type: 'debit', status: 'pending', officer_id: deliveryBoyId },
       data: { status: 'cancelled' }
     });
 

@@ -1,6 +1,6 @@
 {
   "outlet": {
-    "points_per_delivered_order": 5,
+    "points_per_delivered_order": 1,
     "points_deducted_per_returned_order": 5,
     "sales_divisor": 1000,
     "sales_multiplier": 1,
