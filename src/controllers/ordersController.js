@@ -2559,6 +2559,15 @@ const getApprovedOrders = async (req, res) => {
 
     const where = {
       status: { in: ['picked', 'approved'] },
+      // An order whose PayTrigger enrollment got interrupted keeps Order.status
+      // at 'approved' even though its Delivery record already moved on to
+      // 'awaiting_paytrigger_enrollment' — getOrdersWithPagination's Waiting
+      // PayTrigger Approval filter already recovers and shows it there (see the
+      // comment above that filter). Without this exclusion, the same order also
+      // matched here on raw status, showing up in both lists at once with two
+      // different displayed statuses. Waiting PayTrigger Approval is the correct
+      // home for it until enrollment completes, so exclude it here.
+      delivery: { isNot: { status: 'awaiting_paytrigger_enrollment' } },
     };
 
     if (userRole === 'branch user') {
