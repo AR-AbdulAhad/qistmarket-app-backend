@@ -5,6 +5,7 @@ const { sendNextInstallmentReminder } = require('../services/watiService');
 const { sendQistReceivingForPayment, sendPartialPaymentForRow } = require('../utils/qistReceivingUtils');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
+const { generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 
 const now = () => new Date();
 
@@ -70,33 +71,67 @@ const generateSmartPayQr = async (req, res) => {
         const phone = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
         const name = order.verification?.purchaser?.name || order.customer_name;
 
-        let consumerNumber = "6500" + order.id.toString().padStart(4, '0');
+        // Formulate Billing Month in YYMM format (current month)
+        const date = new Date();
+        const yy = String(date.getFullYear()).slice(-2);
+        const mm = String(date.getMonth() + 1).padStart(2, '0');
+        const billingMonth = `${yy}${mm}`;
+
+        let consumerNumber;
         try {
             // Find the delivery's installment ledger
             const delivery = await prisma.delivery.findUnique({
                 where: { order_id: parseInt(order_id) },
                 include: { installment_ledger: true }
             });
-            if (delivery && delivery.installment_ledger) {
-                const smartPayConsumer = await prisma.consumerNumber.findFirst({
-                    where: {
+            if (!delivery || !delivery.installment_ledger) {
+                return res.status(400).json({ success: false, message: 'This order has no active installment ledger — deliver it first before generating a SmartPay QR.' });
+            }
+
+            const smartPayConsumer = await prisma.consumerNumber.findFirst({
+                where: {
+                    ledger_id: delivery.installment_ledger.id,
+                    consumer_number: { startsWith: '6500' }
+                }
+            });
+
+            if (smartPayConsumer) {
+                consumerNumber = smartPayConsumer.consumer_number;
+            } else {
+                // Older ledgers created before SmartPay consumer numbers were
+                // seeded on delivery completion have no "6500"-prefixed row.
+                // Previously this fell back to an unchecked "6500" + order.id
+                // number that was never persisted or verified unique — it
+                // collided with unrelated officer_cash consumer numbers
+                // (confirmed against this DB: order ids 711 and 725 both
+                // resolved to a "6500XXXX" already registered to a different
+                // officer's cash-submission row, so SmartPay's payment
+                // webhook would apply the payment to the wrong record).
+                // Generate + persist a real,
+                // collision-checked one instead, exactly like
+                // deliveryCompletionService/legacyImportController do.
+                consumerNumber = await generateSmartPayConsumerNumber(delivery.product_imei, phone);
+                const dueDate = new Date();
+                dueDate.setFullYear(dueDate.getFullYear() + 10);
+                await prisma.consumerNumber.create({
+                    data: {
+                        consumer_number: consumerNumber,
                         ledger_id: delivery.installment_ledger.id,
-                        consumer_number: { startsWith: '6500' }
+                        delivery_id: delivery.id,
+                        type: 'installment',
+                        customer_name: name,
+                        mobile_number: phone || '03000000000',
+                        amount_due: parseFloat(amount) || 0,
+                        billing_month: billingMonth,
+                        due_date: dueDate,
+                        bill_status: 'U'
                     }
                 });
-                if (smartPayConsumer) {
-                    consumerNumber = smartPayConsumer.consumer_number;
-                }
             }
         } catch (e) {
-            console.error('Error fetching SmartPay consumer number from DB:', e);
+            console.error('Error resolving SmartPay consumer number:', e);
+            return res.status(500).json({ success: false, message: 'Failed to resolve SmartPay consumer number' });
         }
-
-        // Formulate Billing Month in YYMM format (current month)
-        const date = new Date();
-        const yy = String(date.getFullYear()).slice(-2);
-        const mm = String(date.getMonth() + 1).padStart(2, '0');
-        const billingMonth = `${yy}${mm}`;
 
         const refInfo = `QIST-${order.id}-${month_number}-${Date.now()}`.substring(0, 30);
 
