@@ -1,19 +1,19 @@
 {
   "outlet": {
-    "points_per_delivered_order": 10,
-    "points_deducted_per_returned_order": 10,
+    "points_per_delivered_order": 5,
+    "points_deducted_per_returned_order": 5,
     "sales_divisor": 1000,
     "sales_multiplier": 1,
     "recovery_pct_multiplier": 5
   },
   "csr": {
-    "points_per_delivered_order": 1,
+    "points_per_delivered_order": 2,
     "points_deducted_per_returned_order": 5,
     "points_deducted_per_cancelled_order": 1,
     "points_deducted_per_expired_order": 3,
     "points_per_completed_order": 5,
     "points_per_repeat_customer": 5,
-    "points_per_solved_complaint": 1
+    "points_per_solved_complaint": 6
   },
   "delivery": {
     "points_per_delivered_order": 15,

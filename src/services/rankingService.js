@@ -162,9 +162,9 @@ async function updateCsrRanking(csrId, periodType = 'month') {
         }
     });
 
-    // Dynamic Admin-Configured Scoring Formula for CSR
-    const { getScoringConfig } = require('../utils/scoringConfigUtils');
-    const csrRules = getScoringConfig().csr;
+    // Dynamic Admin-Configured Scoring Formula for CSR (Supports Per-Officer Overrides)
+    const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
+    const csrRules = getEffectiveScoringRules('csr', 'officer', csrId);
     const score = (deliveredCount * (csrRules.points_per_delivered_order ?? 10)) +
                   (repeatCount * (csrRules.points_per_repeat_customer ?? 5)) +
                   (completedCount * (csrRules.points_per_completed_order ?? 5)) +

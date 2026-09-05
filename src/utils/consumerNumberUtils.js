@@ -63,12 +63,14 @@ const SMARTPAY_PREFIX = '6500';
  * numbers frequently share the same last 4 digits across test/seed data).
  */
 async function generateSmartPayConsumerNumber(imei, mobile) {
+    const randomOffset = Math.floor(Math.random() * 9000) + 1000;
     const source = (
         (imei && typeof imei === 'string' && imei.replace(/\D/g, '').length >= 4)
             ? imei.replace(/\D/g, '')
             : (mobile && typeof mobile === 'string' ? mobile.replace(/\D/g, '') : String(Date.now()))
     );
-    const seed = parseInt(source.slice(-4).padStart(4, '0'), 10);
+    const baseSeed = parseInt(source.slice(-4).padStart(4, '0'), 10) || 1234;
+    const seed = (baseSeed + randomOffset + Date.now()) % 10000;
 
     // Check uniqueness in consumer_numbers table
     for (let i = 0; i < 10000; i += 1) {

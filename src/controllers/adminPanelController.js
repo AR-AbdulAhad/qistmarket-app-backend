@@ -1,5 +1,5 @@
 const prisma = require('../../lib/prisma');
-const { getScoringConfig, saveScoringConfig } = require('../utils/scoringConfigUtils');
+const { getScoringConfig, saveScoringConfig, getOverridesConfig, saveOverride, deleteOverride } = require('../utils/scoringConfigUtils');
 const { updateCsrRanking } = require('../services/rankingService');
 const { updateDeliveryRanking } = require('../services/deliveryRankingService');
 const { updateRecoveryRanking } = require('../services/recoveryRankingService');
@@ -313,10 +313,11 @@ const getOutletRankings = async (req, res) => {
             if (entry) entry.cancelledCount += 1;
         }
 
-        const scoringCfg = getScoringConfig().outlet;
+        const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
 
         const ranked = Object.values(stats).map((s) => {
             const recoveryPct = s.dueAmount > 0 ? (s.recoveredAmount / s.dueAmount) * 100 : 0;
+            const scoringCfg = getEffectiveScoringRules('outlet', 'outlet', s.outlet_id);
             
             const salesPts = (s.totalSales / (scoringCfg.sales_divisor || 1000)) * (scoringCfg.sales_multiplier ?? 1);
             const recPts = recoveryPct * (scoringCfg.recovery_pct_multiplier ?? 5);
@@ -380,6 +381,95 @@ const triggerRankingsRecalculation = async (req, res) => {
     } catch (error) {
         console.error('triggerRankingsRecalculation error:', error);
         return res.status(500).json({ success: false, message: 'Failed to recalculate rankings.' });
+    }
+};
+
+const getScoringOverrides = async (req, res) => {
+    try {
+        const overrides = getOverridesConfig();
+        return res.json({ success: true, data: overrides });
+    } catch (error) {
+        console.error('getScoringOverrides error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to fetch scoring overrides.' });
+    }
+};
+
+const updateScoringOverride = async (req, res) => {
+    try {
+        const { type, id, section, rules } = req.body;
+        if (!type || !id || !section) {
+            return res.status(400).json({ success: false, message: 'Missing type, id, or section' });
+        }
+        const result = saveOverride(type, id, section, rules);
+        if (!result.success) {
+            return res.status(500).json({ success: false, message: result.error || 'Failed to save override' });
+        }
+
+        recalculateAllOfficerRankings().catch(err => console.error('Recalculation error after override update:', err));
+
+        return res.json({ success: true, message: 'Scoring override updated successfully.', data: result.overrides });
+    } catch (error) {
+        console.error('updateScoringOverride error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to update scoring override.' });
+    }
+};
+
+const removeScoringOverride = async (req, res) => {
+    try {
+        const { type, id, section } = req.body;
+        if (!type || !id) {
+            return res.status(400).json({ success: false, message: 'Missing type or id' });
+        }
+        const result = deleteOverride(type, id, section);
+        if (!result.success) {
+            return res.status(500).json({ success: false, message: result.error || 'Failed to delete override' });
+        }
+
+        recalculateAllOfficerRankings().catch(err => console.error('Recalculation error after override delete:', err));
+
+        return res.json({ success: true, message: 'Scoring override removed.', data: result.overrides });
+    } catch (error) {
+        console.error('removeScoringOverride error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to remove scoring override.' });
+    }
+};
+
+const getScoringEntities = async (req, res) => {
+    try {
+        const [outlets, users] = await Promise.all([
+            prisma.outlet.findMany({
+                select: { id: true, name: true, code: true },
+                orderBy: { name: 'asc' }
+            }),
+            prisma.user.findMany({
+                where: { status: 'active' },
+                select: {
+                    id: true,
+                    full_name: true,
+                    username: true,
+                    role: { select: { name: true } },
+                    outlet: { select: { name: true } }
+                },
+                orderBy: { full_name: 'asc' }
+            })
+        ]);
+
+        return res.json({
+            success: true,
+            data: {
+                outlets: outlets.map(o => ({ id: o.id, name: o.name, code: o.code })),
+                officers: users.map(u => ({
+                    id: u.id,
+                    name: u.full_name,
+                    username: u.username,
+                    role: u.role?.name || 'Officer',
+                    outletName: u.outlet?.name || 'Unassigned'
+                }))
+            }
+        });
+    } catch (error) {
+        console.error('getScoringEntities error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to fetch scoring entities.' });
     }
 };
 
@@ -991,5 +1081,9 @@ module.exports = {
     getScoringRulesConfig,
     updateScoringRulesConfig,
     triggerRankingsRecalculation,
+    getScoringOverrides,
+    updateScoringOverride,
+    removeScoringOverride,
+    getScoringEntities,
 };
 

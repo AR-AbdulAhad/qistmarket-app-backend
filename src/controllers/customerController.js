@@ -278,9 +278,10 @@ const getBlacklistedCustomers = async (req, res) => {
     const orders = await prisma.order.findMany({
       where: {
         verification: {
-          purchaser: {
-            is_blacklisted: true,
-          },
+          OR: [
+            { purchaser: { is_blacklisted: true } },
+            { grantors: { some: { is_blacklisted: true } } },
+          ],
         },
       },
       include: {
@@ -338,6 +339,8 @@ const getBlacklistedCustomers = async (req, res) => {
 
       const customerName = purchaser?.name || order.customer_name;
       const telephoneNumber = purchaser?.telephone_number || order.whatsapp_number;
+      const hasBlacklistedGrantor = order.verification?.grantors?.some((g) => g.is_blacklisted);
+      const isAccountBlacklisted = purchaser?.is_blacklisted || hasBlacklistedGrantor || false;
 
       if (!customerMap.has(key)) {
         customerMap.set(key, {
@@ -353,7 +356,7 @@ const getBlacklistedCustomers = async (req, res) => {
             city: order.city,
             area: order.area,
             profile_photo: profilePhoto,
-            is_blacklisted: true, // Marker for UI
+            is_blacklisted: isAccountBlacklisted, // Marker for UI
             created_at: order.created_at,
           },
           orders: [],

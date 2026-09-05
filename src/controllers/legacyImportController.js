@@ -168,21 +168,29 @@ function buildGrantorData(row, prefix, { name, cnic, phone, num, verificationId,
 const REQUIRED_FIELDS = ['purchaser_name', 'purchaser_cnic', 'purchaser_phone', 'item_price', 'tenure_months', 'installment'];
 
 // Every legacy row is, definitionally, an already-transacted, already-
-// delivered historical sale — so "delivered" is the only order status this
-// import ever uses. status:'completed' looks like the obvious pick for
-// "fully paid off", but it's actually a LIVE pipeline marker meaning
-// "verification done, awaiting admin approval" — ordersController.js's
-// getVerificationOrders (route /orders/verification-pending) filters on
-// exactly this, and expireOrders' own comment calls it "Verification done,
-// waiting for delivery". Importing with status:'completed' would silently
-// dump every row into that live Orders-for-Approval queue. Whether a
-// delivered account is fully paid off or still has installments due is read
-// from the InstallmentLedger's own rows instead (see customerController.js
-// getClearedCustomers) — already correctly reflected by this file's
-// paidCount vs months, no separate order status needed for it.
+// delivered historical sale — so Order.status is always "delivered" here,
+// never the DB value "completed": that string looks like the obvious pick
+// for "fully paid off", but on Order.status it's actually a LIVE pipeline
+// marker meaning "verification done, awaiting admin approval" —
+// ordersController.js's getVerificationOrders (route
+// /orders/verification-pending) filters on exactly this, and expireOrders'
+// own comment calls it "Verification done, waiting for delivery". Setting
+// Order.status:'completed' here would silently dump every row into that
+// live Orders-for-Approval queue.
+//
+// "Completed vs Delivered" as the *user's* choice is still real and useful
+// though — it's just answered by the InstallmentLedger's rows, not
+// Order.status (matches customerController.js's getClearedCustomers, which
+// already determines "fully paid off" the same way): payoffStatus
+// 'completed' forces every installment row to paid (remain treated as 0,
+// PAY1-4/remain from the sheet ignored for the count — the person importing
+// is asserting this account is fully closed), 'delivered' uses the sheet's
+// own ADVANCE/PAY/remain figures to work out how many months are actually
+// paid, which may be partial.
 const ORDER_STATUS = 'delivered';
+const VALID_PAYOFF_STATUSES = ['delivered', 'completed'];
 
-async function importOneRow(row, { adminUserId, officerId }) {
+async function importOneRow(row, { adminUserId, payoffStatus }) {
   for (const f of REQUIRED_FIELDS) {
     if (!required(row, f)) {
       throw Object.assign(new Error(`Missing required field: ${f}`), { httpStatus: 400 });
@@ -214,7 +222,13 @@ async function importOneRow(row, { adminUserId, officerId }) {
   // PAY1-4 is used only as a fallback when a row has no "remain" value at all.
   const remain = row.remain !== undefined && row.remain !== null && row.remain !== '' ? parseFloat(row.remain) : null;
   let paidCount;
-  if (remain !== null && installment > 0) {
+  if (payoffStatus === 'completed') {
+    // Explicit "fully paid off" — every installment is marked paid
+    // regardless of what PAY1-4/remain say, since the importer is asserting
+    // the account is closed (useful when the sheet's own running-balance
+    // figures for this particular row are missing or unreliable).
+    paidCount = months;
+  } else if (remain !== null && installment > 0) {
     const impliedPaidAmount = itemPrice - advance - remain;
     paidCount = Math.max(0, Math.round(impliedPaidAmount / installment));
   } else {
@@ -239,7 +253,7 @@ async function importOneRow(row, { adminUserId, officerId }) {
   });
 
   let reconciliationWarning = null;
-  if (remain !== null) {
+  if (payoffStatus !== 'completed' && remain !== null) {
     const expectedRemain = itemPrice - advance - paidCount * installment;
     if (Math.abs(expectedRemain - remain) > 1) {
       // Only possible when remain doesn't land on a whole number of
@@ -286,7 +300,9 @@ async function importOneRow(row, { adminUserId, officerId }) {
   // through verification → delivery → recovery, so the Assignment Timeline
   // card shows a complete, honest history instead of just a bare "Order
   // Created" entry — all attributed to the importing admin (see the Order
-  // Status Timeline backfill just below too).
+  // Status Timeline backfill just below too). A real Verification/Delivery/
+  // Recovery Officer can be assigned afterward from the order's own profile,
+  // same as any other order — this import doesn't gate on picking one upfront.
   const order = await prisma.order.create({
     data: {
       order_ref: generateOrderRef(),
@@ -316,12 +332,12 @@ async function importOneRow(row, { adminUserId, officerId }) {
       needs_media_upload: true,
       needs_location: true,
       created_at: orderDate,
-      assigned_to_user_id: officerId,
+      assigned_to_user_id: adminUserId,
       verification_assigned_at: orderDate,
-      delivery_officer_id: officerId,
+      delivery_officer_id: adminUserId,
       delivery_assigned_at: orderDate,
       ...(hasPendingBalance && {
-        recovery_officer_id: officerId,
+        recovery_officer_id: adminUserId,
         recovery_assigned_at: orderDate,
       }),
     },
@@ -330,29 +346,27 @@ async function importOneRow(row, { adminUserId, officerId }) {
   {
     // Order Status Timeline backfill — the real pipeline an order goes
     // through (new -> in_progress -> completed[verification] -> approved ->
-    // delivered). The verification/handover stages are attributed to the
-    // chosen officer, "approved" to the importing admin — matches how a real
-    // order's timeline actually splits those roles. Deliberately NOT using
-    // orderAuditLogger.logOrderStatusChange here: that helper also fires a
-    // live WhatsApp notification to the customer's number and bumps the
-    // creator's CSR ranking for the day — exactly the "silent test
+    // delivered), all attributed to the importing admin. Deliberately NOT
+    // using orderAuditLogger.logOrderStatusChange here: that helper also
+    // fires a live WhatsApp notification to the customer's number and bumps
+    // the creator's CSR ranking for the day — exactly the "silent test
     // pollution" this whole import is supposed to avoid, so this writes the
     // history rows directly instead.
     const stageMinutes = [0, 5, 10, 15, 20];
     const stages = [
-      { old: null, new: 'new', by: officerId, role: 'Verification Officer' },
-      { old: 'new', new: 'in_progress', by: officerId, role: 'Verification Officer' },
-      { old: 'in_progress', new: 'completed', by: officerId, role: 'Verification Officer' },
-      { old: 'completed', new: 'approved', by: adminUserId, role: 'Super Admin' },
-      { old: 'approved', new: 'delivered', by: officerId, role: 'Delivery Officer' },
+      { old: null, new: 'new' },
+      { old: 'new', new: 'in_progress' },
+      { old: 'in_progress', new: 'completed' },
+      { old: 'completed', new: 'approved' },
+      { old: 'approved', new: 'delivered' },
     ];
     await prisma.orderStatusHistory.createMany({
       data: stages.map((s, i) => ({
         order_id: order.id,
         old_status: s.old,
         new_status: s.new,
-        user_id: s.by,
-        role_name: s.role,
+        user_id: adminUserId,
+        role_name: 'Super Admin',
         remarks: i === 0 ? 'Legacy import — historical record, exact per-stage timestamps not available from the source ledger' : null,
         created_at: new Date(orderDate.getTime() + stageMinutes[i] * 60000),
       })),
@@ -364,7 +378,7 @@ async function importOneRow(row, { adminUserId, officerId }) {
   const verification = await prisma.verification.create({
     data: {
       order_id: order.id,
-      verification_officer_id: officerId,
+      verification_officer_id: adminUserId,
       status: 'completed',
       start_time: orderDate,
       end_time: orderDate,
@@ -404,7 +418,7 @@ async function importOneRow(row, { adminUserId, officerId }) {
   const delivery = await prisma.delivery.create({
     data: {
       order_id: order.id,
-      delivery_agent_id: officerId,
+      delivery_agent_id: adminUserId,
       status: 'completed',
       start_time: orderDate,
       end_time: orderDate,
@@ -482,40 +496,34 @@ async function importOneRow(row, { adminUserId, officerId }) {
 
 /**
  * POST /admin-panel/legacy-import/commit
- * body: { rows: [...], officer_id } — every row is imported as a "delivered"
- * order (see ORDER_STATUS's comment for why "completed" is never used here).
- * officer_id is who the Verification Officer/Delivery Officer/Recovery
- * Officer fields get attributed to — the Super Admin running the import is
- * never a stand-in for those (an admin isn't a verification/delivery
- * officer; that field showing "Super Admin" on every imported profile was
- * exactly the bug this validates against). created_by_user_id still
- * correctly stays the actual importing admin.
+ * body: { rows: [...] } — every row is imported as a "delivered" order (see
+ * ORDER_STATUS's comment for why "completed" is never used here), attributed
+ * to the importing Super Admin across the board (created_by, verification
+ * officer, delivery agent, assignment fields). A real Verification/Delivery/
+ * Recovery Officer can be assigned to the order afterward the normal way,
+ * same as any other order — this endpoint doesn't gate on picking one upfront.
  * Each row is processed independently (see importOneRow's note on why this
  * isn't wrapped in a DB transaction) so one bad row can't abort the whole
  * batch — results are returned per-row, never silently dropped.
  */
 const commitLegacyImport = async (req, res) => {
-  const { rows, officer_id } = req.body;
+  const { rows, payoffStatus } = req.body;
 
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ success: false, message: 'No rows provided.' });
   }
 
-  const officerId = parseInt(officer_id, 10);
-  if (!officerId) {
-    return res.status(400).json({ success: false, message: 'officer_id is required — pick who these profiles should be attributed to.' });
-  }
-  const officer = await prisma.user.findUnique({ where: { id: officerId }, select: { id: true, status: true } });
-  if (!officer || officer.status !== 'active') {
-    return res.status(400).json({ success: false, message: 'The selected officer account was not found or is not active.' });
-  }
+  // 'completed' → all installments marked paid (account fully closed).
+  // 'delivered' → installment status read from sheet's PAY/remain columns.
+  // Default to 'delivered' when not supplied (backward-compatible).
+  const resolvedPayoffStatus = VALID_PAYOFF_STATUSES.includes(payoffStatus) ? payoffStatus : 'delivered';
 
   const adminUserId = req.user.id;
   const results = [];
 
   for (let i = 0; i < rows.length; i += 1) {
     try {
-      const { order_id, reconciliationWarning } = await importOneRow(rows[i], { adminUserId, officerId });
+      const { order_id, reconciliationWarning } = await importOneRow(rows[i], { adminUserId, payoffStatus: resolvedPayoffStatus });
       results.push({ row: i, success: true, order_id, reconciliation_warning: reconciliationWarning });
     } catch (err) {
       console.error(`Legacy import row ${i} failed:`, err);

@@ -51,8 +51,9 @@ async function updateVerificationRanking(officerId, periodType = 'month') {
         if (order.status === 'expired') expiredCount++;
     });
 
-    // Configurable Score Formula for Verification Officer
-    const cfg = getScoringConfig().verification;
+    // Configurable Score Formula for Verification Officer (Supports Per-Officer Overrides)
+    const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
+    const cfg = getEffectiveScoringRules('verification', 'officer', officerId);
     const score = 
         (completedCount * (cfg.points_per_completed_verification || 10)) + 
         (deliveredCount * (cfg.points_per_delivered_order || 5)) - 

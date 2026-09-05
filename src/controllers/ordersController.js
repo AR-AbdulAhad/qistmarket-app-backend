@@ -4107,14 +4107,21 @@ const updateTimelineDates = async (req, res) => {
       });
     }
 
-    // Update individual OrderStatusHistory timestamps if provided
+    // Update individual OrderStatusHistory timestamps & status strings if provided
     if (Array.isArray(status_histories) && status_histories.length > 0) {
       for (const item of status_histories) {
-        if (item.id && item.created_at) {
-          await prisma.orderStatusHistory.update({
-            where: { id: parseInt(item.id) },
-            data: { created_at: new Date(item.created_at) }
-          });
+        if (item.id) {
+          const updateObj = {};
+          if (item.created_at) updateObj.created_at = new Date(item.created_at);
+          if (item.new_status !== undefined && item.new_status !== null) updateObj.new_status = String(item.new_status);
+          if (item.old_status !== undefined) updateObj.old_status = item.old_status ? String(item.old_status) : null;
+
+          if (Object.keys(updateObj).length > 0) {
+            await prisma.orderStatusHistory.update({
+              where: { id: parseInt(item.id) },
+              data: updateObj
+            });
+          }
         }
       }
     }

@@ -816,11 +816,56 @@ const submitCashToOutlet = async (req, res) => {
       const dueDate = new Date();
       dueDate.setHours(dueDate.getHours() + 24);
 
+      // Generate a fresh 8-digit SmartPay consumer number prefixed with 6500 for every online cash submission
+      const officerMobile = officerPhone || userRecord?.phone || '03000000000';
+      const freshSmartPayConsumerNumber = await generateSmartPayConsumerNumber(null, officerMobile);
+
+      const yy = String(dueDate.getFullYear()).slice(-2);
+      const mm = String(dueDate.getMonth() + 1).padStart(2, '0');
+      const billingMonth = `${yy}${mm}`;
+
+      // Insert fresh ConsumerNumber row for SmartPay payment tracking
+      await prisma.consumerNumber.create({
+        data: {
+          consumer_number: freshSmartPayConsumerNumber,
+          user_id: deliveryBoyId,
+          type: 'officer_cash',
+          customer_name: officerName,
+          mobile_number: officerMobile,
+          amount_due: amountToSubmit,
+          billing_month: billingMonth,
+          due_date: dueDate,
+          bill_status: 'U',
+          cash_submission_ref: submissionRef,
+          created_at: now()
+        }
+      });
+
+      // Update User table with latest active SmartPay consumer number
+      await prisma.user.update({
+        where: { id: deliveryBoyId },
+        data: { smart_pay_consumer_number: freshSmartPayConsumerNumber }
+      });
+      userRecord.smart_pay_consumer_number = freshSmartPayConsumerNumber;
+
+      // Update 1Bill consumer number (if exists) with submission ref as well
+      if (userRecord.bill_consumer_number) {
+        await prisma.consumerNumber.updateMany({
+          where: {
+            consumer_number: userRecord.bill_consumer_number,
+            user_id: deliveryBoyId
+          },
+          data: {
+            amount_due: amountToSubmit,
+            bill_status: 'U',
+            cash_submission_ref: submissionRef,
+            due_date: dueDate
+          }
+        });
+      }
+
       let qrImageBase64 = null;
       try {
-        const yy = String(dueDate.getFullYear()).slice(-2);
-        const mm = String(dueDate.getMonth() + 1).padStart(2, '0');
-        const billingMonth = `${yy}${mm}`;
         const refInfo = `QIST-${deliveryBoyId}-${Date.now()}`.substring(0, 30);
         const username = process.env.SMARTPAY_USERNAME || 'test';
         const password = process.env.SMARTPAY_PASSWORD || 'test';
@@ -839,7 +884,7 @@ const submitCashToOutlet = async (req, res) => {
               'Authorization': `${tokenResponse.dist.jwtToken}`
             },
             body: JSON.stringify({
-              Consumer_Number: userRecord.smart_pay_consumer_number,
+              Consumer_Number: freshSmartPayConsumerNumber,
               Consumer_Detail: officerName,
               Billing_Month: billingMonth,
               Amount: parseFloat(amountToSubmit).toFixed(2),
@@ -862,25 +907,12 @@ const submitCashToOutlet = async (req, res) => {
         console.error("Failed to generate SmartPay QR in submitCash:", err);
       }
 
-      await prisma.consumerNumber.updateMany({
-        where: {
-          consumer_number: { in: [userRecord.bill_consumer_number, userRecord.smart_pay_consumer_number] },
-          user_id: deliveryBoyId
-        },
-        data: {
-          amount_due: amountToSubmit,
-          bill_status: 'U',
-          cash_submission_ref: submissionRef,
-          due_date: dueDate
-        }
-      });
-
       return res.status(200).json({
         success: true,
         message: 'Online cash submission initiated.',
         total_amount: amountToSubmit,
         bill_consumer_number: userRecord.bill_consumer_number,
-        smart_pay_consumer_number: userRecord.smart_pay_consumer_number,
+        smart_pay_consumer_number: freshSmartPayConsumerNumber,
         smart_pay_qr_base64: qrImageBase64,
         submission_ref: submissionRef,
         expires_at: dueDate

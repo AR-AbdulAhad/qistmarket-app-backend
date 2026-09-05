@@ -46,8 +46,8 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
         if (order.status === 'expired') expiredCount++;
     });
 
-    const { getScoringConfig } = require('../utils/scoringConfigUtils');
-    const deliveryRules = getScoringConfig().delivery;
+    const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
+    const deliveryRules = getEffectiveScoringRules('delivery', 'officer', officerId);
     const score = (deliveredCount * (deliveryRules.points_per_delivered_order ?? 15)) +
                   (completedCount * (deliveryRules.points_per_completed_order ?? 5)) -
                   (returnedCount * (deliveryRules.points_deducted_per_returned_order ?? 5)) -

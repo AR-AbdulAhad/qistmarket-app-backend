@@ -319,10 +319,10 @@ const checkCNICOrders = async (req, res) => {
                 }
             });
 
-            // Search direct Order matches (customer_cnic)
+            // Search direct Order matches (via linked Customer's cnic)
             const orderMatches = await prisma.order.findMany({
                 where: {
-                    OR: variants.map(v => ({ customer_cnic: { contains: v } }))
+                    OR: variants.map(v => ({ customer: { cnic: { contains: v } } }))
                 },
                 select: {
                     id: true,

@@ -59,8 +59,8 @@ async function updateRecoveryRanking(officerId, periodType = 'month') {
         if (v.amount_collected) collectedAmount += v.amount_collected;
     });
 
-    const { getScoringConfig } = require('../utils/scoringConfigUtils');
-    const recoveryRules = getScoringConfig().recovery;
+    const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
+    const recoveryRules = getEffectiveScoringRules('recovery', 'officer', officerId);
     const score = (collectedVisitsCount * (recoveryRules.points_per_collected_visit ?? 15)) +
                   (completedCount * (recoveryRules.points_per_completed_order ?? 5)) -
                   (returnedCount * (recoveryRules.points_deducted_per_returned_order ?? 5)) -

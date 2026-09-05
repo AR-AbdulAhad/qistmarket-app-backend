@@ -81,17 +81,13 @@ const searchByCnicOrPhone = async (req, res) => {
  * a real approval workflow rather than a single person unilaterally
  * clearing someone — EXCEPT when an Admin/Super Admin requests it: they
  * already are the final approval authority, so there is nobody "above" them
- * to approve a second time, and requiring one just made whitelisting from
- * the admin's own Blacklisted Accounts page silently do nothing until an
- * accountant separately opened Pending Approvals. For Admin/Super Admin the
- * whitelist takes effect immediately, same as blacklisting does. A
- * whitelist also protects the CNIC from being re-blacklisted by the
- * automatic 90-day sync (see blacklistUtils.js), whether applied instantly
- * here or via later approval.
+ * to approve a second time. For Admin/Super Admin the whitelist takes effect
+ * immediately, same as blacklisting does. Supports targetType ('all', 'purchaser',
+ * 'grantor') for individual entity whitelisting/blacklisting.
  */
 const setBlacklistStatus = async (req, res) => {
     try {
-        const { cnic, action, reason, category } = req.body;
+        const { cnic, action, reason, category, targetType, verificationId, grantorId, id } = req.body;
         if (!cnic || !['blacklist', 'whitelist'].includes(action)) {
             return res.status(400).json({ success: false, message: 'cnic and a valid action (blacklist/whitelist) are required.' });
         }
@@ -103,18 +99,43 @@ const setBlacklistStatus = async (req, res) => {
         }
 
         const cleanCnic = cnic.trim();
+        const type = targetType || 'all'; // 'all' | 'purchaser' | 'grantor'
+        const targetId = grantorId || id;
 
         if (action === 'blacklist') {
-            await prisma.$transaction([
-                prisma.purchaserVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: true } }),
-                prisma.grantorVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: true } }),
+            const txActions = [];
+            if (type === 'purchaser') {
+                txActions.push(prisma.purchaserVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: true } }));
+            } else if (type === 'grantor') {
+                if (targetId) {
+                    txActions.push(prisma.grantorVerification.update({ where: { id: parseInt(targetId) }, data: { is_blacklisted: true } }));
+                } else {
+                    txActions.push(prisma.grantorVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: true } }));
+                }
+            } else {
+                // 'all': blacklist purchaser AND all linked grantors
+                txActions.push(
+                    prisma.purchaserVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: true } }),
+                    prisma.grantorVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: true } })
+                );
+                if (verificationId) {
+                    txActions.push(
+                        prisma.purchaserVerification.updateMany({ where: { verification_id: parseInt(verificationId) }, data: { is_blacklisted: true } }),
+                        prisma.grantorVerification.updateMany({ where: { verification_id: parseInt(verificationId) }, data: { is_blacklisted: true } })
+                    );
+                }
+            }
+
+            txActions.push(
                 prisma.blacklistAction.create({
-                    data: { cnic: cleanCnic, action, category: category || null, reason: reason || null, status: 'approved', approved_by_id: req.user.id, approved_at: new Date(), created_by_id: req.user.id },
-                }),
-            ]);
-            await logAction(req, 'MANUAL_BLACKLIST', `CNIC ${cleanCnic} manually blacklisted. ${category ? `Category: ${category}. ` : ''}${reason ? 'Reason: ' + reason : ''}`, null, 'BlacklistAction');
+                    data: { cnic: cleanCnic, action, category: category || null, reason: reason.trim(), status: 'approved', approved_by_id: req.user.id, approved_at: new Date(), created_by_id: req.user.id },
+                })
+            );
+
+            await prisma.$transaction(txActions);
+            await logAction(req, 'MANUAL_BLACKLIST', `CNIC ${cleanCnic} (${type}) manually blacklisted. ${category ? `Category: ${category}. ` : ''}${reason ? 'Reason: ' + reason : ''}`, null, 'BlacklistAction');
             notifyManualBlacklist(cleanCnic);
-            return res.json({ success: true, message: 'Customer blacklisted.' });
+            return res.json({ success: true, message: `${type === 'grantor' ? 'Guarantor' : type === 'purchaser' ? 'Purchaser' : 'Account'} blacklisted.` });
         }
 
         const requesterRole = (req.user?.role || '').toLowerCase();
@@ -123,21 +144,38 @@ const setBlacklistStatus = async (req, res) => {
         if (isTopAuthority) {
             const approvedAction = await prisma.$transaction(async (tx) => {
                 const created = await tx.blacklistAction.create({
-                    data: { cnic: cleanCnic, action: 'whitelist', category: category || null, reason: reason || null, status: 'approved', created_by_id: req.user.id, approved_by_id: req.user.id, approved_at: new Date() },
+                    data: { cnic: cleanCnic, action: 'whitelist', category: category || null, reason: reason.trim(), status: 'approved', created_by_id: req.user.id, approved_by_id: req.user.id, approved_at: new Date() },
                 });
-                await tx.purchaserVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
-                await tx.grantorVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
+
+                if (type === 'purchaser') {
+                    await tx.purchaserVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
+                } else if (type === 'grantor') {
+                    if (targetId) {
+                        await tx.grantorVerification.update({ where: { id: parseInt(targetId) }, data: { is_blacklisted: false } });
+                    } else {
+                        await tx.grantorVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
+                    }
+                } else {
+                    // 'all': whitelist purchaser AND all linked grantors
+                    await tx.purchaserVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
+                    await tx.grantorVerification.updateMany({ where: { cnic_number: cleanCnic }, data: { is_blacklisted: false } });
+
+                    if (verificationId) {
+                        await tx.purchaserVerification.updateMany({ where: { verification_id: parseInt(verificationId) }, data: { is_blacklisted: false } });
+                        await tx.grantorVerification.updateMany({ where: { verification_id: parseInt(verificationId) }, data: { is_blacklisted: false } });
+                    }
+                }
                 return created;
             });
-            await logAction(req, 'MANUAL_WHITELIST_APPROVED', `CNIC ${cleanCnic} whitelisted immediately by ${requesterRole}. ${reason ? 'Reason: ' + reason : ''}`, approvedAction.id, 'BlacklistAction');
-            return res.json({ success: true, message: 'Customer whitelisted.', data: approvedAction });
+            await logAction(req, 'MANUAL_WHITELIST_APPROVED', `CNIC ${cleanCnic} (${type}) whitelisted immediately by ${requesterRole}. ${reason ? 'Reason: ' + reason : ''}`, approvedAction.id, 'BlacklistAction');
+            return res.json({ success: true, message: `${type === 'grantor' ? 'Guarantor' : type === 'purchaser' ? 'Purchaser' : 'Account'} whitelisted successfully.`, data: approvedAction });
         }
 
-        // Everyone else: whitelist requests start pending — is_blacklisted is NOT flipped here.
+        // Non-admin roles: whitelist request starts pending
         const pendingAction = await prisma.blacklistAction.create({
-            data: { cnic: cleanCnic, action: 'whitelist', category: category || null, reason: reason || null, status: 'pending', created_by_id: req.user.id },
+            data: { cnic: cleanCnic, action: 'whitelist', category: category || null, reason: reason.trim(), status: 'pending', created_by_id: req.user.id },
         });
-        await logAction(req, 'MANUAL_WHITELIST_REQUESTED', `Whitelist requested for CNIC ${cleanCnic}, pending approval. ${reason ? 'Reason: ' + reason : ''}`, pendingAction.id, 'BlacklistAction');
+        await logAction(req, 'MANUAL_WHITELIST_REQUESTED', `Whitelist requested for CNIC ${cleanCnic} (${type}), pending approval. ${reason ? 'Reason: ' + reason : ''}`, pendingAction.id, 'BlacklistAction');
 
         res.json({ success: true, message: 'Whitelist request submitted for approval.', data: pendingAction });
     } catch (error) {

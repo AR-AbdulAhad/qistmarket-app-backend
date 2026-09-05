@@ -1426,14 +1426,16 @@ const submitVerificationReview = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Verification not found' });
     }
 
-    if (verification.reviews.length >= 3) {
+    const isAdmin = req.user.role === 'Super Admin' || req.user.role === 'Admin';
+
+    if (!isAdmin && verification.reviews.length >= 3) {
       return res.status(400).json({
         success: false,
         error: 'Maximum of 3 reviews allowed'
       });
     }
 
-    if (verification.reviews.some(r => r.reviewer_id === req.user.id)) {
+    if (!isAdmin && verification.reviews.some(r => r.reviewer_id === req.user.id)) {
       return res.status(400).json({
         success: false,
         error: 'You have already reviewed this verification'

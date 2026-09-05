@@ -471,20 +471,19 @@ const submitBankDeposit = async (req, res) => {
             let billConsumerNumber = submittingUser.bill_consumer_number;
             let smartPayConsumerNumber = submittingUser.smart_pay_consumer_number;
 
-            if (!billConsumerNumber || !smartPayConsumerNumber) {
-                if (!billConsumerNumber) {
-                    billConsumerNumber = await generateConsumerNumber(null, submittingUser.phone || '03000000000');
-                }
-                if (!smartPayConsumerNumber) {
-                    smartPayConsumerNumber = await generateSmartPayConsumerNumber(null, submittingUser.phone || '03000000000');
-                }
-
+            if (payment_method === 'qr_payment' || !smartPayConsumerNumber) {
+                smartPayConsumerNumber = await generateSmartPayConsumerNumber(null, submittingUser.phone || '03000000000');
                 await prisma.user.update({
                     where: { id: submittingUser.id },
-                    data: {
-                        bill_consumer_number: billConsumerNumber,
-                        smart_pay_consumer_number: smartPayConsumerNumber
-                    }
+                    data: { smart_pay_consumer_number: smartPayConsumerNumber }
+                });
+            }
+
+            if (!billConsumerNumber) {
+                billConsumerNumber = await generateConsumerNumber(null, submittingUser.phone || '03000000000');
+                await prisma.user.update({
+                    where: { id: submittingUser.id },
+                    data: { bill_consumer_number: billConsumerNumber }
                 });
             }
 
