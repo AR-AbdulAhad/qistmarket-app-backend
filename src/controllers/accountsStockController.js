@@ -22,8 +22,11 @@ const getWarehouseStockSummary = async (req, res) => {
             const key = item.product_name;
             if (!acc[key]) acc[key] = { product: key, total: 0, inStock: 0, sold: 0, valuation: 0 };
             acc[key].total++;
-            if (item.status === 'In Stock') { acc[key].inStock++; acc[key].valuation += item.purchase_price; }
-            else if (item.status === 'Sold') acc[key].sold++;
+            // Multiply by quantity — a bulk (non-IMEI) inventory row can represent
+            // more than one unit, so valuation must scale with it, not just add the
+            // per-unit price once per row.
+            if (item.status === 'In Stock') { acc[key].inStock += item.quantity; acc[key].valuation += item.purchase_price * item.quantity; }
+            else if (item.status === 'Sold') acc[key].sold += item.quantity;
             return acc;
         }, {});
 

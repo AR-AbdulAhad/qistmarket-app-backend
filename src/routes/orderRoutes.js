@@ -39,9 +39,13 @@ const {
   verifyConvertSaleOTP,
   createConvertedSale,
   updateOrderStatus,
+  updateTimelineDates,
 } = require('../controllers/ordersController');
+
 const { submitSelfPickupDelivery } = require('../controllers/deliveryController');
 const { authenticateJWT, requireSuperAdmin, authorizeRoles } = require('../middlewares/authMiddleware');
+
+const requireAdminOrSuper = authorizeRoles('Admin', 'Super Admin');
 
 // Roles that legitimately manage orders day-to-day today (confirmed via
 // OrderList.tsx/ApprovedOrderList.tsx being shared across MAIN MENU, CSR
@@ -76,6 +80,7 @@ router.post('/orders/assign-bulk-delivery', authenticateJWT, requireOrderManager
 router.patch('/orders/website-feed/:id/cancel', authenticateJWT, cancelWebsiteOrderFeedItem);
 router.patch('/orders/:id/cancel', authenticateJWT, requireOrderManager, cancelOrder);
 router.patch('/orders/:id/status', authenticateJWT, requireSuperAdmin, updateOrderStatus);
+router.patch('/orders/:id/update-timeline-dates', authenticateJWT, requireOrderManager, updateTimelineDates);
 router.patch('/orders/:id/update-item', authenticateJWT, updateOrderItem);
 router.patch('/orders/:id/take', authenticateJWT, takeOrder);
 router.patch('/orders/:id/transfer', authenticateJWT, transferOrder);

@@ -633,7 +633,7 @@ const submitCashToOutlet = async (req, res) => {
     if (payment_method === 'Online') {
       onlineUserRecord = await prisma.user.findUnique({
         where: { id: deliveryBoyId },
-        select: { bill_consumer_number: true, smart_pay_consumer_number: true, phone: true }
+        select: { bill_consumer_number: true, smart_pay_consumer_number: true, phone: true, full_name: true }
       });
 
       if (!onlineUserRecord) {
@@ -648,6 +648,8 @@ const submitCashToOutlet = async (req, res) => {
       // a PrismaClientValidationError since consumer_number is non-nullable.
       if (!onlineUserRecord.bill_consumer_number || !onlineUserRecord.smart_pay_consumer_number) {
         const fallbackMobile = onlineUserRecord.phone || '03000000000';
+        const needsBill = !onlineUserRecord.bill_consumer_number;
+        const needsSmartPay = !onlineUserRecord.smart_pay_consumer_number;
         const billConsumerNumber = onlineUserRecord.bill_consumer_number
           || await generateConsumerNumber(null, fallbackMobile);
         const smartPayConsumerNumber = onlineUserRecord.smart_pay_consumer_number
@@ -657,6 +659,48 @@ const submitCashToOutlet = async (req, res) => {
           where: { id: deliveryBoyId },
           data: { bill_consumer_number: billConsumerNumber, smart_pay_consumer_number: smartPayConsumerNumber }
         });
+
+        // generateConsumerNumber/generateSmartPayConsumerNumber only pick a free
+        // string — unlike signup() (authController.js), which always inserts a
+        // matching ConsumerNumber row, this self-heal path was saving the number
+        // onto the User row and stopping there. With no ConsumerNumber row to
+        // find, the cash_submission_ref update below silently matched zero rows,
+        // and SmartPay's payment-confirmation webhook (smartPayController.notifyPayment)
+        // had nothing to look up — hence its "Consumer not found" 404 and the
+        // submission staying "Payment not received yet" forever. Create the
+        // missing row(s) now, exactly like signup() does.
+        const dueDate = new Date();
+        dueDate.setFullYear(dueDate.getFullYear() + 10);
+        const newConsumerRows = [];
+        if (needsBill) {
+          newConsumerRows.push({
+            consumer_number: billConsumerNumber,
+            user_id: deliveryBoyId,
+            type: 'officer_cash',
+            customer_name: onlineUserRecord.full_name,
+            mobile_number: fallbackMobile,
+            amount_due: 0,
+            billing_month: '2401',
+            due_date: dueDate,
+            bill_status: 'P',
+          });
+        }
+        if (needsSmartPay) {
+          newConsumerRows.push({
+            consumer_number: smartPayConsumerNumber,
+            user_id: deliveryBoyId,
+            type: 'officer_cash',
+            customer_name: onlineUserRecord.full_name,
+            mobile_number: fallbackMobile,
+            amount_due: 0,
+            billing_month: '2401',
+            due_date: dueDate,
+            bill_status: 'P',
+          });
+        }
+        if (newConsumerRows.length > 0) {
+          await prisma.consumerNumber.createMany({ data: newConsumerRows });
+        }
 
         onlineUserRecord.bill_consumer_number = billConsumerNumber;
         onlineUserRecord.smart_pay_consumer_number = smartPayConsumerNumber;

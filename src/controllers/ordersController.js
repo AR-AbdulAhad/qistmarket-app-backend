@@ -4049,22 +4049,93 @@ const updateOrderStatus = async (req, res) => {
   }
 };
 
+/**
+ * updateTimelineDates
+ * Admin/Super Admin helper to adjust assignment and status history timestamps
+ * for legacy imported orders (or any order).
+ */
+const updateTimelineDates = async (req, res) => {
+  const { id } = req.params;
+  const {
+    created_at,
+    verification_assigned_at,
+    delivery_assigned_at,
+    recovery_assigned_at,
+    delivered_at,
+    status_histories
+  } = req.body;
+
+  try {
+    const orderId = parseInt(id);
+    const order = await prisma.order.findUnique({
+      where: { id: orderId }
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const orderUpdateData = {};
+    if (created_at) orderUpdateData.created_at = new Date(created_at);
+    if (verification_assigned_at !== undefined) {
+      orderUpdateData.verification_assigned_at = verification_assigned_at ? new Date(verification_assigned_at) : null;
+    }
+    if (delivery_assigned_at !== undefined) {
+      orderUpdateData.delivery_assigned_at = delivery_assigned_at ? new Date(delivery_assigned_at) : null;
+    }
+    if (recovery_assigned_at !== undefined) {
+      orderUpdateData.recovery_assigned_at = recovery_assigned_at ? new Date(recovery_assigned_at) : null;
+    }
+    if (delivered_at !== undefined) {
+      orderUpdateData.delivered_at = delivered_at ? new Date(delivered_at) : null;
+    }
+
+    if (Object.keys(orderUpdateData).length > 0) {
+      orderUpdateData.updated_at = new Date();
+      await prisma.order.update({
+        where: { id: orderId },
+        data: orderUpdateData
+      });
+    }
+
+    // Update individual OrderStatusHistory timestamps if provided
+    if (Array.isArray(status_histories) && status_histories.length > 0) {
+      for (const item of status_histories) {
+        if (item.id && item.created_at) {
+          await prisma.orderStatusHistory.update({
+            where: { id: parseInt(item.id) },
+            data: { created_at: new Date(item.created_at) }
+          });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'Timeline dates updated successfully.'
+    });
+  } catch (error) {
+    console.error('updateTimelineDates error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
-  getOrders,
-  getOrderById,
   createOrder,
+  getOrders,
   getOrdersWithPagination,
   getMyDeliveryOrdersWithPagination,
   assignOrder,
   assignBulk,
+  getOrderById,
+  getVerificationOrders,
+  getApprovedOrders,
   assignDelivery,
   assignBulkDelivery,
-  getApprovedOrders,
-  getVerificationOrders,
   cancelOrder,
+  updateOrderItem,
   initiateHandover,
   verifyHandover,
-  updateOrderItem,
   takeOrder,
   getCsrDashboardStats,
   getExpiredAssignedOrders,
@@ -4090,6 +4161,7 @@ module.exports = {
   verifyConvertSaleOTP,
   createConvertedSale,
   updateOrderStatus,
+  updateTimelineDates,
 };
 
 

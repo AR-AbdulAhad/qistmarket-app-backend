@@ -145,21 +145,30 @@ const getStockSummary = async (req, res) => {
                     total: 0,
                     inStock: 0,
                     sold: 0,
-                    valuation: 0
+                    valuation: 0,
+                    serials: []
                 };
             }
-            
-            // Only count if it's in stock or it's sold within the date range (or no date filter)
+
+            // Only count if it's in stock or it's sold within the date range (or no date filter).
+            // Counted by quantity, not by row — a bulk (non-IMEI) row can represent more
+            // than one physical unit, and this must match the Stock List page's counts.
             if (item.status === 'In Stock') {
-                acc[key].total++;
-                acc[key].inStock++;
-                acc[key].valuation += item.purchase_price;
+                acc[key].total += item.quantity;
+                acc[key].inStock += item.quantity;
+                // Sum each physical unit's actual purchase price (not qty × a single
+                // representative price) so this matches the Stock List page exactly —
+                // units bought in different batches can have different prices.
+                acc[key].valuation += item.purchase_price * item.quantity;
+                if (item.imei_serial) acc[key].serials.push(item.imei_serial);
             } else if (item.status === 'Sold' && includeSold) {
-                acc[key].total++;
-                acc[key].sold++;
-                acc[key].valuation += item.purchase_price; // Value of what we had/sold
+                acc[key].total += item.quantity;
+                acc[key].sold += item.quantity;
+                // Sold units are no longer capital tied up in inventory — they're
+                // tracked in "total"/"sold" for movement, but must NOT be added into
+                // "valuation", which represents current stock value only.
             }
-            
+
             return acc;
         }, {});
 
