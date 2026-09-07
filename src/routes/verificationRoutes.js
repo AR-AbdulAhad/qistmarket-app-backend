@@ -39,7 +39,8 @@ const {
   getDashboardStats,
   checkVerificationPerson,
   updateVerificationAssignment,
-  updateVerificationDetails
+  updateVerificationDetails,
+  deleteLocationPhoto
 } = require('../controllers/verificationController');
 
 // Update Verification Officer and Outlet assignment
@@ -179,5 +180,8 @@ router.put(
   fixUploadPath,
   replaceLocationPhoto
 );
+
+// Delete verification location photo (Super Admin only)
+router.delete('/location-photo/:photo_id', authenticateJWT, deleteLocationPhoto);
 
 module.exports = router;

@@ -2907,6 +2907,29 @@ const replaceLocationPhoto = async (req, res) => {
   }
 };
 
+// Delete a single location photo (Super Admin only) — replaceLocationPhoto
+// above already lets Super Admin swap one in-place; this fills the matching
+// delete gap so a photo can also just be removed outright.
+const deleteLocationPhoto = async (req, res) => {
+  const { photo_id } = req.params;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can delete this.' });
+  }
+
+  try {
+    const existing = await prisma.verificationLocationPhoto.findUnique({ where: { id: parseInt(photo_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Photo not found.' });
+    }
+    await prisma.verificationLocationPhoto.delete({ where: { id: existing.id } });
+    return res.status(200).json({ success: true, message: 'Location photo deleted successfully' });
+  } catch (error) {
+    console.error('deleteLocationPhoto error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 const checkVerificationPerson = async (req, res) => {
   try {
     const { cnic, phone, exclude_order_id } = req.body;
@@ -3662,4 +3685,5 @@ module.exports = {
   replaceLocationPhoto,
   updateVerificationAssignment,
   updateVerificationDetails,
+  deleteLocationPhoto,
 };

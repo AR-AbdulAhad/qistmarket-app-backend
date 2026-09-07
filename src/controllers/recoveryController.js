@@ -1704,6 +1704,28 @@ const replaceRecoveryVisitPhoto = async (req, res) => {
   }
 };
 
+// Delete a single recovery visit photo (Super Admin only) — matching delete
+// counterpart to replaceRecoveryVisitPhoto above.
+const deleteRecoveryVisitPhoto = async (req, res) => {
+  const { photo_id } = req.params;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can delete this.' });
+  }
+
+  try {
+    const existing = await prisma.recoveryVisitPhoto.findUnique({ where: { id: parseInt(photo_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Photo not found.' });
+    }
+    await prisma.recoveryVisitPhoto.delete({ where: { id: existing.id } });
+    return res.status(200).json({ success: true, message: 'Recovery visit photo deleted successfully' });
+  } catch (error) {
+    console.error('deleteRecoveryVisitPhoto error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 const getRecoveryDashboardStats = async (req, res) => {
   try {
     const { filter = 'today', startDate, endDate } = req.query;
