@@ -23,6 +23,8 @@ const {
   initiateReturnExchange,
   getDeliveryOfficerOTPLogs,
   replaceDeliveryUpload,
+  addManualDeliveryUpload,
+  deleteDeliveryUpload,
   getDashboardStats
 } = require('../controllers/deliveryController');
 
@@ -81,5 +83,17 @@ router.put(
   fixUploadPath,
   replaceDeliveryUpload
 );
+
+// Manually add a delivery photo (Super Admin only, e.g. backfilling legacy orders)
+router.post(
+  '/delivery/:delivery_id/upload-manual',
+  authenticateJWT,
+  upload.array('photos', 5),
+  fixUploadPath,
+  addManualDeliveryUpload
+);
+
+// Delete a delivery photo (Super Admin only)
+router.delete('/delivery/upload/:upload_id', authenticateJWT, deleteDeliveryUpload);
 
 module.exports = router;

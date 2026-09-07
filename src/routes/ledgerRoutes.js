@@ -5,7 +5,9 @@ const {
     downloadLedgerPdf,
     generateInstallmentPaymentOtp,
     verifyInstallmentPaymentOtp,
-    sendLedgerToCustomer
+    sendLedgerToCustomer,
+    editLedgerRows,
+    setLedgerMonths
 } = require('../controllers/ledgerController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -21,5 +23,9 @@ router.post('/verify-payment-and-pay', authenticateJWT, verifyInstallmentPayment
 
 // Send Ledger via WhatsApp
 router.post('/:shortId/send', authenticateJWT, sendLedgerToCustomer);
+
+// Admin-direct ledger correction (Super Admin only, enforced in the controller)
+router.patch('/:ledger_id/edit', authenticateJWT, editLedgerRows);
+router.post('/:ledger_id/set-months', authenticateJWT, setLedgerMonths);
 
 module.exports = router;

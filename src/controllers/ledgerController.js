@@ -1380,10 +1380,244 @@ const sendLedgerToCustomer = async (req, res) => {
   }
 };
 
+function addMonthsToDate(date, n) {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + n);
+  return d;
+}
+
+// Admin-direct ledger correction — Super Admin only. Unlike every payment
+// endpoint above (which cascades one payment across months and maintains
+// the FIFO waterfall), this is a raw field editor: each row's amount/
+// paid_amount/due_date/payment_method/feedback is taken exactly as sent,
+// and `status` is always recomputed from amount vs paid_amount server-side
+// (never trusted from the client) — the same rule normalizeLedger already
+// uses for display, so a row can never end up with a status that disagrees
+// with its own amounts. Row identity/order (month numbers, row count) is
+// fixed here — changing the number of months is a separate, structural
+// operation (setLedgerMonths below).
+const editLedgerRows = async (req, res) => {
+  const { ledger_id } = req.params;
+  const { rows: editedRows } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit the ledger.' });
+  }
+  if (!Array.isArray(editedRows) || editedRows.length === 0) {
+    return res.status(400).json({ success: false, message: 'rows must be a non-empty array.' });
+  }
+
+  try {
+    const ledger = await prisma.installmentLedger.findUnique({
+      where: { id: parseInt(ledger_id, 10) },
+      include: { order: { select: { id: true, order_ref: true } } },
+    });
+    if (!ledger) {
+      return res.status(404).json({ success: false, message: 'Ledger not found.' });
+    }
+
+    const allExistingRows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+    // The advance payment (month 0) has its own separate, non-editable
+    // "Advance Payment" display and is never part of the Installment
+    // Schedule table the frontend sends back here — only compare/replace
+    // the month>0 rows, and carry the advance row through untouched.
+    const advanceRow = allExistingRows.find((r) => Number(r.month) === 0) || null;
+    const existingRows = allExistingRows.filter((r) => Number(r.month) !== 0);
+    if (editedRows.length !== existingRows.length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Row count mismatch — use the "change total months" action to add or remove installments, not a direct row edit.',
+      });
+    }
+
+    const changedMonths = [];
+    const newInstallmentRows = existingRows.map((existing, i) => {
+      const edited = editedRows[i];
+      if (Number(edited.month) !== Number(existing.month)) {
+        throw Object.assign(new Error(`Row ${i} month mismatch (expected ${existing.month}, got ${edited.month}).`), { httpStatus: 400 });
+      }
+
+      const amount = parseFloat(edited.amount);
+      const paidAmount = Math.max(0, parseFloat(edited.paid_amount) || 0);
+      if (isNaN(amount) || amount < 0) {
+        throw Object.assign(new Error(`Row for month ${existing.month} has an invalid amount.`), { httpStatus: 400 });
+      }
+      const status = paidAmount <= 0 ? 'pending' : (paidAmount >= amount ? 'paid' : 'partial');
+
+      const oldPaidAmount = Math.max(0, parseFloat(existing.paid_amount) || 0);
+      const paidAmountChanged = Math.abs(paidAmount - oldPaidAmount) > 0.01;
+      if (paidAmountChanged) changedMonths.push(existing.month);
+
+      const paymentMethod = edited.payment_method || existing.payment_method || null;
+      const dueDate = edited.due_date || existing.due_date;
+
+      const row = {
+        ...existing,
+        label: edited.label || existing.label,
+        due_date: dueDate,
+        amount,
+        paid_amount: status === 'pending' ? 0 : paidAmount,
+        status,
+        payment_method: status === 'pending' ? null : paymentMethod,
+        feedback: edited.feedback !== undefined ? edited.feedback : existing.feedback,
+      };
+
+      if (status === 'pending') {
+        row.paid_at = null;
+      } else if (paidAmountChanged || !existing.paid_at) {
+        row.paid_at = now();
+      }
+
+      if (paidAmountChanged) {
+        const history = Array.isArray(existing.payment_history) ? [...existing.payment_history] : [];
+        history.push({
+          amount: paidAmount - oldPaidAmount,
+          date: now().toISOString(),
+          method: paymentMethod || 'Manual correction',
+          admin_edit: true,
+          edited_by: req.user.id,
+        });
+        row.payment_history = history;
+        row.collection_source = 'admin_edit';
+      }
+
+      return row;
+    });
+
+    const newRows = [...(advanceRow ? [advanceRow] : []), ...newInstallmentRows];
+
+    await prisma.installmentLedger.update({
+      where: { id: ledger.id },
+      data: { ledger_rows: newRows, updated_at: now() },
+    });
+
+    await logAction(
+      req,
+      'LEDGER_EDITED',
+      `Ledger for order ${ledger.order.order_ref} manually edited by ${req.user.full_name || req.user.username}.${changedMonths.length ? ` Paid amount changed on month(s): ${changedMonths.join(', ')}.` : ''}`,
+      ledger.order.id,
+      'Order',
+    );
+
+    const normalized = getNormalizedLedger(newRows);
+    return res.json({ success: true, message: 'Ledger updated successfully', data: { ledger_rows: newRows, normalized } });
+  } catch (error) {
+    console.error('editLedgerRows error:', error);
+    return res.status(error.httpStatus || 500).json({ success: false, message: error.httpStatus ? error.message : 'Internal server error' });
+  }
+};
+
+// Change the total number of installment months — Super Admin only. Every
+// already-paid or partially-paid month is left completely untouched; only
+// the still-fully-pending tail is discarded and rebuilt, spreading whatever
+// balance is currently outstanding evenly across the new number of pending
+// months (the last one absorbing any rounding remainder). Arrears keep
+// working automatically afterward — ledgerUtils.js's normalizeLedger
+// recomputes them at read time from whatever amount/paid_amount/due_date/
+// status values end up on the rows, same as any other ledger.
+const setLedgerMonths = async (req, res) => {
+  const { ledger_id } = req.params;
+  const { months } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can change the installment plan.' });
+  }
+  const newMonths = parseInt(months, 10);
+  if (!newMonths || newMonths < 1) {
+    return res.status(400).json({ success: false, message: 'months must be a positive integer.' });
+  }
+
+  try {
+    const ledger = await prisma.installmentLedger.findUnique({
+      where: { id: parseInt(ledger_id, 10) },
+      include: { order: { select: { id: true, order_ref: true } } },
+    });
+    if (!ledger) {
+      return res.status(404).json({ success: false, message: 'Ledger not found.' });
+    }
+
+    const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+    const advanceRow = rows.find((r) => Number(r.month) === 0) || null;
+    const installmentRows = rows.filter((r) => Number(r.month) > 0).sort((a, b) => Number(a.month) - Number(b.month));
+
+    // Highest month that is paid or partial — everything up to and
+    // including it is protected from being touched.
+    let keptThroughMonth = 0;
+    for (const r of installmentRows) {
+      if (r.status === 'paid' || r.status === 'partial') keptThroughMonth = Number(r.month);
+    }
+
+    if (newMonths < keptThroughMonth) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot set total months below ${keptThroughMonth} — that many months are already paid or partially paid.`,
+      });
+    }
+
+    const totalRemaining = installmentRows.reduce((sum, r) => sum + Math.max(0, (parseFloat(r.amount) || 0) - (parseFloat(r.paid_amount) || 0)), 0);
+    const newPendingMonths = newMonths - keptThroughMonth;
+
+    if (newPendingMonths === 0) {
+      if (totalRemaining > 1) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot set total months to ${newMonths} — that leaves an outstanding balance of ${totalRemaining} with no pending months left to collect it in.`,
+        });
+      }
+    }
+
+    const keptRows = installmentRows.filter((r) => Number(r.month) <= keptThroughMonth);
+    const anchorRow = keptRows[keptRows.length - 1] || advanceRow;
+    const anchorDate = anchorRow ? new Date(anchorRow.due_date) : now();
+
+    const newPendingRows = [];
+    if (newPendingMonths > 0) {
+      const flatAmount = Math.floor((totalRemaining / newPendingMonths) * 100) / 100;
+      const lastAmount = Math.round((totalRemaining - flatAmount * (newPendingMonths - 1)) * 100) / 100;
+      for (let i = 0; i < newPendingMonths; i += 1) {
+        const monthNumber = keptThroughMonth + i + 1;
+        newPendingRows.push({
+          month: monthNumber,
+          label: `Month ${monthNumber}`,
+          due_date: addMonthsToDate(anchorDate, i + 1),
+          amount: i === newPendingMonths - 1 ? lastAmount : flatAmount,
+          paid_amount: 0,
+          status: 'pending',
+          paid_at: null,
+          payment_method: null,
+        });
+      }
+    }
+
+    const newRows = [...(advanceRow ? [advanceRow] : []), ...keptRows, ...newPendingRows];
+
+    await prisma.installmentLedger.update({
+      where: { id: ledger.id },
+      data: { ledger_rows: newRows, updated_at: now() },
+    });
+
+    await logAction(
+      req,
+      'LEDGER_MONTHS_CHANGED',
+      `Installment plan for order ${ledger.order.order_ref} changed to ${newMonths} total months by ${req.user.full_name || req.user.username} (${keptThroughMonth} already paid/partial, ${newPendingMonths} regenerated).`,
+      ledger.order.id,
+      'Order',
+    );
+
+    const normalized = getNormalizedLedger(newRows);
+    return res.json({ success: true, message: 'Installment plan updated successfully', data: { ledger_rows: newRows, normalized } });
+  } catch (error) {
+    console.error('setLedgerMonths error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   viewLedger,
   downloadLedgerPdf,
   generateInstallmentPaymentOtp,
   verifyInstallmentPaymentOtp,
-  sendLedgerToCustomer
+  sendLedgerToCustomer,
+  editLedgerRows,
+  setLedgerMonths
 };

@@ -2972,7 +2972,15 @@ const cancelOrder = async (req, res) => {
 
 const updateOrderItem = async (req, res) => {
   const { id } = req.params;
-  const { product_name, total_amount, advance_amount, monthly_amount, months } = req.body;
+  const { product_name, total_amount, advance_amount, monthly_amount, months, imei_serial } = req.body;
+
+  // imei_serial editing is a new, Super-Admin-only correction tool (added
+  // alongside the verification page's Product & Financial edit UI) — every
+  // other field this endpoint already accepted keeps its existing access so
+  // the pre-delivery "Edit Item" flow elsewhere in the app isn't affected.
+  if (imei_serial !== undefined && req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit IMEI/Serial.' });
+  }
 
   try {
     const order = await prisma.order.findUnique({ where: { id: parseInt(id) } });
@@ -2998,6 +3006,7 @@ const updateOrderItem = async (req, res) => {
         advance_amount: advance_amount ? parseFloat(advance_amount) : undefined,
         monthly_amount: monthly_amount ? parseFloat(monthly_amount) : undefined,
         months: months ? parseInt(months) : undefined,
+        ...(imei_serial !== undefined && { imei_serial: imei_serial || null }),
         updated_at: new Date(),
       },
     });

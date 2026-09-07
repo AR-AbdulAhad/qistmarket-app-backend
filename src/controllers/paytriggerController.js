@@ -465,6 +465,37 @@ async function cancelPendingEnrollment(req, res) {
   }
 }
 
+// Submits a manual lock screen photo for an order stuck/pending in 'awaiting_paytrigger_enrollment'
+// and completes the delivery immediately to 'delivered' status.
+async function submitManualLockPhoto(req, res) {
+  try {
+    const { order_id } = req.params;
+    const file = req.file;
+
+    const fileUrl = file ? `/uploads/${file.filename}` : (req.body.file_url || null);
+    if (!fileUrl) {
+      return res.status(400).json({ success: false, message: 'Lock screen photo is required' });
+    }
+
+    const io = req.app.get('io');
+    const result = await deliveryCompletionService.completePendingDeliveryWithManualLockPhoto({
+      orderId: order_id,
+      fileUrl,
+      user: req.user,
+      io,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Lock screen photo submitted successfully. Order is now delivered.',
+      data: result,
+    });
+  } catch (error) {
+    console.error('[PayTrigger] submitManualLockPhoto error:', error);
+    return res.status(400).json({ success: false, message: error.message || 'Failed to submit lock photo' });
+  }
+}
+
 async function handleCallback(req, res) {
   try {
     const payload = req.body;
@@ -1025,6 +1056,7 @@ module.exports = {
   manualUnlock,
   promiseToPay,
   cancelPendingEnrollment,
+  submitManualLockPhoto,
   handleCallback,
   listDevices,
   getDeviceSummary,

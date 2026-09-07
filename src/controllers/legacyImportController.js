@@ -58,14 +58,14 @@ function orNull(v) {
  * order shows its next installment correctly, same as any live-created one.
  *
  * `amount` on each row is always the scheduled/due amount for that month
- * (ledgerUtils.js's normalizeLedger reads it as dueAmount); the amount
- * actually collected goes in `paid_amount` — normalizeLedger defaults that
- * to `amount` when it's missing, which silently hides an uneven real
- * payment, so `payments[i]` (from the sheet's PAY1-4 columns, when given) is
- * used here instead of assuming every paid month collected exactly the
- * scheduled installment.
+ * (ledgerUtils.js's normalizeLedger reads it as dueAmount). The sheet no
+ * longer carries per-payment PAY1-4 figures (dropped — too unreliable in the
+ * source paper ledgers), so every paid month is assumed to have collected
+ * exactly the scheduled installment, on its scheduled monthly-anniversary
+ * date; `paidCount` itself is still worked out from the trustworthy `remain`
+ * column (see importOneRow).
  */
-function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paidCount, payments }) {
+function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paidCount }) {
   const rows = [];
   rows.push({
     month: 0,
@@ -91,14 +91,8 @@ function buildLedgerRows({ orderDate, advanceAmount, monthlyAmount, months, paid
 
   for (let i = 0; i < months; i += 1) {
     const isPaid = i < paidCount;
-    // payments[i] only exists for the first PAY1-4 slots the sheet actually
-    // gave real figures for — every later paid month (paidCount > 4, or no
-    // PAY columns at all and paidCount inferred purely from "remain") falls
-    // back to assuming the full scheduled installment was collected on
-    // schedule, same as before.
-    const realPayment = payments?.[i];
-    const paidAmount = realPayment?.amount ?? monthlyAmount;
-    const paidAt = realPayment?.date || addMonths(orderDate, i + 1);
+    const paidAmount = monthlyAmount;
+    const paidAt = addMonths(orderDate, i + 1);
     rows.push({
       month: i + 1,
       label: `Month ${i + 1}`,
@@ -231,43 +225,26 @@ async function importOneRow(row, { adminUserId, payoffStatus }) {
   const serial = row.serial ? String(row.serial).trim() : null;
   const itemModel = row.item_model ? String(row.item_model).trim() : 'N/A';
 
-  // "remain" is the bookkeeper's authoritative running balance — it's what
-  // determines how many months get marked paid, not the PAY1-4 columns
-  // (those are frequently left blank/inconsistent in the paper ledger even
-  // when remain is kept up to date, which is exactly what was happening on
-  // real rows: PAY1-4 empty but remain correctly reflecting paid months).
-  // PAY1-4 is used only as a fallback when a row has no "remain" value at all.
+  // "remain" is the bookkeeper's sole authoritative running balance — PAY1-4
+  // columns were dropped from the sheet entirely (too unreliable in the
+  // source paper ledgers, often blank even when remain was kept accurate).
   const remain = row.remain !== undefined && row.remain !== null && row.remain !== '' ? parseFloat(row.remain) : null;
   let paidCount;
   if (payoffStatus === 'completed') {
     // Explicit "fully paid off" — every installment is marked paid
-    // regardless of what PAY1-4/remain say, since the importer is asserting
-    // the account is closed (useful when the sheet's own running-balance
-    // figures for this particular row are missing or unreliable).
+    // regardless of what remain says, since the importer is asserting the
+    // account is closed (useful when the sheet's own remain figure for this
+    // particular row is missing or unreliable).
     paidCount = months;
   } else if (remain !== null && installment > 0) {
     const impliedPaidAmount = itemPrice - advance - remain;
     paidCount = Math.max(0, Math.round(impliedPaidAmount / installment));
   } else {
-    const paidAmountsProvided = [row.pay1, row.pay2, row.pay3, row.pay4]
-      .map((v) => parseFloat(v))
-      .filter((v) => !isNaN(v) && v > 0);
-    paidCount = paidAmountsProvided.length;
+    // No remain given and not asserted fully paid — nothing to infer from,
+    // so default to "no installments paid yet" rather than guessing.
+    paidCount = 0;
   }
   paidCount = Math.min(paidCount, months);
-
-  // Real per-payment amount + date, when the sheet has them (PAY1-4 columns
-  // plus their matching PAY1-4 DATE columns) — used to fill in the actual
-  // paid_amount/paid_at on the corresponding paid ledger row (PAY1 -> month
-  // 1, PAY2 -> month 2, ...) instead of assuming every paid month collected
-  // exactly the scheduled installment on a fabricated monthly-anniversary
-  // date. Positions are kept even when a slot is blank (undefined), so a
-  // gap doesn't shift PAY2/3/4 onto the wrong month.
-  const payments = [1, 2, 3, 4].map((n) => {
-    const amount = parseFloat(row[`pay${n}`]);
-    if (isNaN(amount) || amount <= 0) return undefined;
-    return { amount, date: row[`pay${n}_date`] ? new Date(row[`pay${n}_date`]) : null };
-  });
 
   let reconciliationWarning = null;
   if (payoffStatus !== 'completed' && remain !== null) {
@@ -277,7 +254,7 @@ async function importOneRow(row, { adminUserId, payoffStatus }) {
       // installments (e.g. a partial payment was made) — paidCount above is
       // still the closest whole-months match, this just flags the row for a
       // human to double check the exact figure against the source ledger.
-      reconciliationWarning = `Nearest whole-month match leaves ${expectedRemain}, sheet says remain is ${remain} — check this row's exact PAY figures.`;
+      reconciliationWarning = `Nearest whole-month match leaves ${expectedRemain}, sheet says remain is ${remain} — check this row's exact figures.`;
     }
   }
 
@@ -463,7 +440,7 @@ async function importOneRow(row, { adminUserId, payoffStatus }) {
   });
 
   // 5. InstallmentLedger — backfilled payment history from the sheet.
-  const ledgerRows = buildLedgerRows({ orderDate, advanceAmount: advance, monthlyAmount: installment, months, paidCount, payments });
+  const ledgerRows = buildLedgerRows({ orderDate, advanceAmount: advance, monthlyAmount: installment, months, paidCount });
   const imeiStr = serial ? serial.replace(/\D/g, '') : '';
   // short_id is unique across the whole table — a bulk import can plausibly
   // hit two rows whose last-6-serial-digits (or, with no serial, random hex

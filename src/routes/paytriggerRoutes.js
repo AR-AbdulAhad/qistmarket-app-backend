@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateJWT } = require('../middlewares/authMiddleware');
+const upload = require('../middlewares/uploadMiddleware');
+const fixUploadPath = require('../middlewares/fixUploadPath');
 const {
   enrollDevice,
   getDeviceStatus,
@@ -9,6 +11,7 @@ const {
   manualUnlock,
   promiseToPay,
   cancelPendingEnrollment,
+  submitManualLockPhoto,
   handleCallback,
   listDevices,
   getDeviceSummary,
@@ -38,6 +41,7 @@ router.post('/paytrigger/device/:imei/lock', authenticateJWT, manualLock);
 router.post('/paytrigger/device/:imei/unlock', authenticateJWT, manualUnlock);
 router.post('/paytrigger/device/:imei/ptp', authenticateJWT, promiseToPay);
 router.post('/paytrigger/order/:order_id/cancel-enrollment', authenticateJWT, cancelPendingEnrollment);
+router.post('/paytrigger/order/:order_id/manual-lock-photo', authenticateJWT, upload.single('manual_lock_photo'), fixUploadPath, submitManualLockPhoto);
 router.post('/paytrigger/device/:imei/unenroll', authenticateJWT, unenrollDevice);
 router.post('/paytrigger/device/:imei/temp-unlock', authenticateJWT, tempUnlockDevice);
 router.post('/paytrigger/device/:imei/set-rule', authenticateJWT, setDeviceRule);

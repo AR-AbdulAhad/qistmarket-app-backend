@@ -1,5 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
+const { logAction } = require('../utils/auditLogger');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { sendOrderAssignmentNotification } = require('./ordersController');
 const { checkBlacklistStatus } = require('../utils/blacklistUtils');
@@ -818,7 +819,7 @@ const deleteVerificationLocation = async (req, res) => {
       where: { id: location.verification_id }
     });
 
-    if (verification.verification_officer_id !== req.user.id && req.user.role !== 'admin') {
+    if (verification.verification_officer_id !== req.user.id && req.user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
         error: { code: 403, message: 'Not authorized to delete this location' }
@@ -1114,7 +1115,7 @@ const deleteDocument = async (req, res) => {
       where: { id: document.verification_id }
     });
 
-    if (verification.verification_officer_id !== req.user.id && req.user.role !== 'admin') {
+    if (verification.verification_officer_id !== req.user.id && req.user.role !== 'Super Admin') {
       return res.status(403).json({
         success: false,
         error: { code: 403, message: 'Not authorized to delete this document' }
@@ -1301,6 +1302,7 @@ const getVerificationByOrderId = async (req, res) => {
             zone: true,
             assigned_to: true,
             assigned_to_user_id: true,
+            delivery_officer_name_override: true,
             alternate_contact: true,
             channel: true,
             created_at: true,
@@ -2541,6 +2543,7 @@ const getDeliveredProductDetails = async (req, res) => {
       }
 
       installmentDetails = {
+        ledger_id: ledger.id,
         token: ledger.short_id || ledger.token,
         advance_payment: normalized.advance_payment,
         installments: normalized.installment_ledger.map((row) => ({
@@ -3426,12 +3429,109 @@ const getVerificationDashboardStats = async (req, res) => {
 };
 
 /**
+ * updateVerificationDetails — Super Admin only. Direct correction of the
+ * Verification record's own fields (status, start/end time, created_at,
+ * updated_at) — same "raw data-correction" spirit as the ledger/product
+ * edit endpoints added alongside this one, for the same reason: legacy and
+ * mis-keyed records need a way to be fixed, and Verification.status has no
+ * downstream conditional logic elsewhere reading it (unlike Order.status,
+ * which is deliberately never touched by any of these correction tools).
+ * updated_at is genuinely settable here (confirmed: Prisma only auto-fills
+ * an @updatedAt field when it's omitted from `data` — an explicit value is
+ * respected) but defaults to "now" when the caller doesn't send one, same
+ * as any other update.
+ */
+const updateVerificationDetails = async (req, res) => {
+  const { verification_id } = req.params;
+  const { status, start_time, end_time, created_at, updated_at } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit this.' });
+  }
+
+  try {
+    const verId = parseInt(verification_id, 10);
+    if (isNaN(verId)) {
+      return res.status(400).json({ success: false, message: 'Invalid verification ID.' });
+    }
+
+    const verification = await prisma.verification.findUnique({ where: { id: verId } });
+    if (!verification) {
+      return res.status(404).json({ success: false, message: 'Verification record not found.' });
+    }
+
+    const data = {};
+    if (status !== undefined) {
+      if (!status) return res.status(400).json({ success: false, message: 'status cannot be empty.' });
+      data.status = status;
+    }
+    if (start_time !== undefined) {
+      const d = new Date(start_time);
+      if (!start_time || isNaN(d.getTime())) return res.status(400).json({ success: false, message: 'start_time is required and must be a valid date.' });
+      data.start_time = d;
+    }
+    if (end_time !== undefined) {
+      if (end_time === null || end_time === '') {
+        data.end_time = null;
+      } else {
+        const d = new Date(end_time);
+        if (isNaN(d.getTime())) return res.status(400).json({ success: false, message: 'end_time must be a valid date.' });
+        data.end_time = d;
+      }
+    }
+    if (created_at !== undefined) {
+      const d = new Date(created_at);
+      if (!created_at || isNaN(d.getTime())) return res.status(400).json({ success: false, message: 'created_at is required and must be a valid date.' });
+      data.created_at = d;
+    }
+    if (updated_at !== undefined) {
+      const d = new Date(updated_at);
+      if (!updated_at || isNaN(d.getTime())) return res.status(400).json({ success: false, message: 'updated_at must be a valid date.' });
+      data.updated_at = d;
+    }
+
+    const updatedVerification = await prisma.verification.update({ where: { id: verId }, data });
+
+    await logAction(
+      req,
+      'VERIFICATION_DETAILS_EDITED',
+      `Verification #${verId} (order ${verification.order_id}) details manually edited by ${req.user.full_name || req.user.username}: ${Object.keys(data).join(', ')}.`,
+      verification.order_id,
+      'Order',
+    );
+
+    return res.json({ success: true, message: 'Verification details updated successfully', data: { verification: updatedVerification } });
+  } catch (error) {
+    console.error('updateVerificationDetails error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+/**
  * updateVerificationAssignment
  * Updates verification_officer_id on Verification and outlet_id on Order.
  */
 const updateVerificationAssignment = async (req, res) => {
   const { verification_id } = req.params;
-  const { verification_officer_id, outlet_id, delivery_officer_id } = req.body;
+  const {
+    verification_officer_id,
+    outlet_id,
+    delivery_officer_id,
+    verification_officer_name_override,
+    delivery_officer_name_override,
+    self_pickup,
+  } = req.body;
+
+  // Free-text name overrides, self-pickup toggling, and correcting
+  // assignments on already-delivered/non-legacy orders are data-correction
+  // tools, not part of the live verification workflow — restricted to Super
+  // Admin like every other correction added alongside this endpoint.
+  const touchingNewFields = verification_officer_name_override !== undefined
+    || delivery_officer_name_override !== undefined
+    || self_pickup !== undefined;
+  if (touchingNewFields && req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit this.' });
+  }
 
   try {
     const verId = parseInt(verification_id, 10);
@@ -3441,7 +3541,7 @@ const updateVerificationAssignment = async (req, res) => {
 
     const verification = await prisma.verification.findUnique({
       where: { id: verId },
-      include: { order: true }
+      include: { order: { include: { delivery: true } } }
     });
 
     if (!verification) {
@@ -3451,12 +3551,27 @@ const updateVerificationAssignment = async (req, res) => {
     const officerId = verification_officer_id !== undefined ? (verification_officer_id ? parseInt(verification_officer_id, 10) : null) : undefined;
     const outletIdVal = outlet_id !== undefined ? (outlet_id ? parseInt(outlet_id, 10) : null) : undefined;
     const deliveryOfficerIdVal = delivery_officer_id !== undefined ? (delivery_officer_id ? parseInt(delivery_officer_id, 10) : null) : undefined;
+    // A name override and its matching *_id are mutually exclusive — picking
+    // one clears the other, same as picking "Unassigned" already clears an id.
+    const voNameOverride = verification_officer_name_override !== undefined ? (verification_officer_name_override || null) : undefined;
+    const doNameOverride = delivery_officer_name_override !== undefined ? (delivery_officer_name_override || null) : undefined;
 
-    // Update Verification officer
+    // Update Verification officer. Regardless of what the caller explicitly
+    // sends for the override field, an id and its name-override are kept
+    // mutually exclusive here — setting a real officerId always clears any
+    // stale override, and vice versa, so the two can never disagree in the
+    // database even if a future caller forgets to clear one explicitly.
     const updatedVerification = await prisma.verification.update({
       where: { id: verId },
       data: {
-        ...(officerId !== undefined && { verification_officer_id: officerId }),
+        ...(officerId !== undefined && {
+          verification_officer_id: officerId,
+          ...(officerId !== null && { verification_officer_name_override: null }),
+        }),
+        ...(voNameOverride !== undefined && {
+          verification_officer_name_override: voNameOverride,
+          ...(voNameOverride && { verification_officer_id: null }),
+        }),
         updated_at: now(),
       },
       include: {
@@ -3471,10 +3586,24 @@ const updateVerificationAssignment = async (req, res) => {
         data: {
           ...(outletIdVal !== undefined && { outlet_id: outletIdVal }),
           ...(officerId !== undefined && { assigned_to_user_id: officerId }),
-          ...(deliveryOfficerIdVal !== undefined && { delivery_officer_id: deliveryOfficerIdVal }),
+          ...(deliveryOfficerIdVal !== undefined && {
+            delivery_officer_id: deliveryOfficerIdVal,
+            ...(deliveryOfficerIdVal !== null && { delivery_officer_name_override: null }),
+          }),
+          ...(doNameOverride !== undefined && {
+            delivery_officer_name_override: doNameOverride,
+            ...(doNameOverride && { delivery_officer_id: null }),
+          }),
           updated_at: now(),
         }
       });
+
+      if (self_pickup !== undefined && verification.order.delivery) {
+        await prisma.delivery.update({
+          where: { id: verification.order.delivery.id },
+          data: { self_pickup: !!self_pickup, updated_at: now() },
+        });
+      }
 
       // Log status change audit
       await logOrderStatusChange(
@@ -3532,4 +3661,5 @@ module.exports = {
   updateVerificationMedia,
   replaceLocationPhoto,
   updateVerificationAssignment,
+  updateVerificationDetails,
 };

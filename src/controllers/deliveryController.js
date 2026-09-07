@@ -2030,6 +2030,72 @@ const replaceDeliveryUpload = async (req, res) => {
   }
 };
 
+// Admin-direct upload of a delivery photo (e.g. backfilling a legacy order,
+// or correcting a missing/wrong one) — modeled on updateLocationVerified
+// (verificationController.js), which already lets Super Admin manually add
+// a VerificationLocation the exact same way. Super Admin only, since this
+// creates records that will read as if they came from a real delivery.
+const addManualDeliveryUpload = async (req, res) => {
+  const { delivery_id } = req.params;
+  const { upload_type, tag } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can add delivery photos manually.' });
+  }
+
+  try {
+    const delivery = await prisma.delivery.findUnique({ where: { id: parseInt(delivery_id, 10) } });
+    if (!delivery) {
+      return res.status(404).json({ success: false, message: 'Delivery record not found.' });
+    }
+
+    const files = req.files || [];
+    if (files.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one photo is required.' });
+    }
+
+    const created = await Promise.all(
+      files.map((file) => prisma.deliveryUpload.create({
+        data: {
+          delivery_id: delivery.id,
+          upload_type: upload_type || 'face_photo',
+          file_url: file.url,
+          tag: tag || null,
+          uploaded_at: now(),
+        },
+      }))
+    );
+
+    return res.status(200).json({ success: true, message: 'Delivery photo(s) added successfully', data: { uploads: created } });
+  } catch (error) {
+    console.error('addManualDeliveryUpload error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// Delete a delivery photo — no delete path existed for DeliveryUpload before
+// this (only replace-in-place). Super Admin only, with confirmation handled
+// on the frontend.
+const deleteDeliveryUpload = async (req, res) => {
+  const { upload_id } = req.params;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can delete delivery photos.' });
+  }
+
+  try {
+    const existing = await prisma.deliveryUpload.findUnique({ where: { id: parseInt(upload_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Upload not found.' });
+    }
+    await prisma.deliveryUpload.delete({ where: { id: existing.id } });
+    return res.status(200).json({ success: true, message: 'Delivery photo deleted successfully' });
+  } catch (error) {
+    console.error('deleteDeliveryUpload error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 const getDeliveryDashboardStats = async (req, res) => {
   try {
     const { filter = 'today', startDate, endDate } = req.query;
@@ -2417,5 +2483,7 @@ module.exports = {
   initiateReturnExchange,
   getDeliveryOfficerOTPLogs,
   submitSelfPickupDelivery,
-  replaceDeliveryUpload
+  replaceDeliveryUpload,
+  addManualDeliveryUpload,
+  deleteDeliveryUpload
 };

@@ -168,6 +168,10 @@ model Order {
   created_by_user_id       Int?
   assigned_to_user_id      Int?
   delivery_officer_id      Int?
+  // Free-text fallback for legacy/older orders whose real delivery officer
+  // was never entered as a User in the system. Mutually exclusive with
+  // delivery_officer_id — set one, the other gets cleared.
+  delivery_officer_name_override String?
   is_delivered             Boolean               @default(false)
   otp_expires_at           DateTime?
   otp_generated_at         DateTime?
@@ -830,6 +834,10 @@ model Verification {
   id                      Int                       @id @default(autoincrement())
   order_id                Int                       @unique
   verification_officer_id Int?
+  // Free-text fallback for legacy/older orders whose real verification
+  // officer was never entered as a User in the system. Mutually exclusive
+  // with verification_officer_id — set one, the other gets cleared.
+  verification_officer_name_override String?
   status                  String                    @default("in_progress")
   start_time              DateTime
   end_time                DateTime?

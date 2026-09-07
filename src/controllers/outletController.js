@@ -269,14 +269,60 @@ const getDashboardStats = async (req, res) => {
             where: { outlet_id, status: 'delivered', ...deliveredDateFilter(prevStart, prevEnd) }
         });
 
-        // Sales calculation: Shifting from ledger advance to total order amount of delivered orders
-        const getSalesSum = (ordersList) => {
-            const deliveredList = ordersList.filter(o => o.status === 'delivered');
-            return deliveredList.reduce((sum, o) => sum + (o.total_amount || 0), 0);
+        // Sales calculation: Matches getSalesReport calculation (delivered date filter + ledger sales_value + active Cash Sales)
+        const getSalesSum = async (periodStart, periodEnd) => {
+            const dateRangeWhere = periodEnd 
+                ? deliveredDateFilter(periodStart, periodEnd)
+                : { OR: [{ delivered_at: { gte: periodStart } }, { AND: [{ delivered_at: null }, { updated_at: { gte: periodStart } }] }] };
+
+            const orders = await prisma.order.findMany({
+                where: {
+                    outlet_id,
+                    status: 'delivered',
+                    ...dateRangeWhere
+                },
+                include: { installment_ledger: true }
+            });
+
+            let ordersTotal = 0;
+            for (const o of orders) {
+                const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
+                const { summary: ledgerSummary } = getNormalizedLedger(rows, o.advance_amount);
+                const hasLedger = rows.length > 0;
+                const sales_value = hasLedger && ledgerSummary.grandTotalDue > 0 ? ledgerSummary.grandTotalDue : (o.total_amount || 0);
+                ordersTotal += sales_value;
+            }
+
+            const cashSaleDateFilter = periodEnd 
+                ? { gte: periodStart, lte: periodEnd }
+                : { gte: periodStart };
+
+            const cashSaleRows = await prisma.cashSale.findMany({
+                where: {
+                    outlet_id,
+                    status: 'active',
+                    created_at: cashSaleDateFilter
+                }
+            });
+
+            const seenGroups = new Set();
+            let cashSalesTotal = 0;
+            for (const row of cashSaleRows) {
+                if (row.sale_group) {
+                    if (seenGroups.has(row.sale_group)) continue;
+                    seenGroups.add(row.sale_group);
+                    const siblings = cashSaleRows.filter(r => r.sale_group === row.sale_group);
+                    cashSalesTotal += siblings.reduce((s, r) => s + r.final_price, 0);
+                } else {
+                    cashSalesTotal += row.final_price;
+                }
+            }
+
+            return ordersTotal + cashSalesTotal;
         };
 
-        const currentSales = getSalesSum(currentOrders);
-        const prevSales = getSalesSum(prevOrders);
+        const currentSales = await getSalesSum(start, end);
+        const prevSales = await getSalesSum(prevStart, prevEnd);
 
         // Calculate sales for performance timelines (daily, weekly, monthly) using total order value of delivered orders
         const todayStart = new Date(now);
@@ -288,21 +334,9 @@ const getDashboardStats = async (req, res) => {
 
         const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-        const getSalesForTimeline = async (sinceDate) => {
-            const orders = await prisma.order.findMany({
-                where: {
-                    outlet_id,
-                    status: 'delivered',
-                    ...deliveredDateFilter(sinceDate, undefined)
-                },
-                select: { total_amount: true }
-            });
-            return orders.reduce((sum, o) => sum + (o.total_amount || 0), 0);
-        };
-
-        const dailySales = await getSalesForTimeline(todayStart);
-        const weeklySales = await getSalesForTimeline(firstDayOfWeek);
-        const monthlySales = await getSalesForTimeline(firstDayOfMonth);
+        const dailySales = await getSalesSum(todayStart, undefined);
+        const weeklySales = await getSalesSum(firstDayOfWeek, undefined);
+        const monthlySales = await getSalesSum(firstDayOfMonth, undefined);
 
         // Financial Overview (Live Today's Cash Register Snapshot)
         const todayEnd = new Date(todayStart);
@@ -469,7 +503,15 @@ const getDashboardStats = async (req, res) => {
                     status: 'delivered',
                     ...deliveredDateFilter(periodStart, periodEnd)
                 },
-                select: { delivered_at: true, updated_at: true, total_amount: true }
+                include: { installment_ledger: true }
+            });
+
+            const cashSaleRows = await prisma.cashSale.findMany({
+                where: {
+                    outlet_id,
+                    status: 'active',
+                    created_at: { gte: periodStart, lte: periodEnd }
+                }
             });
 
             const daily = {};
@@ -477,9 +519,35 @@ const getDashboardStats = async (req, res) => {
                 const effectiveDate = o.delivered_at || o.updated_at;
                 const dayIndex = Math.floor((effectiveDate - periodStart) / 86400000) + 1;
                 if (!daily[dayIndex]) daily[dayIndex] = { amount: 0, customers: 0 };
-                daily[dayIndex].amount += (o.total_amount || 0);
+
+                const rows = Array.isArray(o.installment_ledger?.ledger_rows) ? o.installment_ledger.ledger_rows : [];
+                const { summary: ledgerSummary } = getNormalizedLedger(rows, o.advance_amount);
+                const hasLedger = rows.length > 0;
+                const sales_value = hasLedger && ledgerSummary.grandTotalDue > 0 ? ledgerSummary.grandTotalDue : (o.total_amount || 0);
+
+                daily[dayIndex].amount += sales_value;
                 daily[dayIndex].customers += 1;
             });
+
+            const seenGroups = new Set();
+            for (const row of cashSaleRows) {
+                const effectiveDate = row.created_at;
+                const dayIndex = Math.floor((effectiveDate - periodStart) / 86400000) + 1;
+                if (!daily[dayIndex]) daily[dayIndex] = { amount: 0, customers: 0 };
+
+                if (row.sale_group) {
+                    if (seenGroups.has(row.sale_group)) continue;
+                    seenGroups.add(row.sale_group);
+                    const siblings = cashSaleRows.filter(r => r.sale_group === row.sale_group);
+                    const sales_value = siblings.reduce((s, r) => s + r.final_price, 0);
+                    daily[dayIndex].amount += sales_value;
+                    daily[dayIndex].customers += 1;
+                } else {
+                    daily[dayIndex].amount += row.final_price;
+                    daily[dayIndex].customers += 1;
+                }
+            }
+
             return daily;
         };
 
@@ -2009,13 +2077,23 @@ const verifyInstallmentPayment = async (req, res) => {
         if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
         if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
-        // Sequential collection only: months must be paid in order — you can't
-        // pay Month 3 while Month 1/2 still has an outstanding balance. Month 0
-        // (advance) is excluded from this ordering, it's tracked separately.
+        // Sequential collection: if prior unpaid months have passed their due dates, their balances
+        // roll over as arrears into the current/active month, allowing payment on the active month.
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
         const firstUnpaidIdx = rows.findIndex(r => (r.month ?? r.monthNumber ?? -1) > 0 && r.status !== 'paid');
-        if (firstUnpaidIdx !== -1 && firstUnpaidIdx !== rowIndex) {
-            const blockingRow = rows[firstUnpaidIdx];
-            return res.status(400).json({ success: false, message: `Please collect Month ${blockingRow.month ?? blockingRow.monthNumber} first before this installment.` });
+        if (firstUnpaidIdx !== -1 && firstUnpaidIdx < rowIndex) {
+            for (let k = firstUnpaidIdx; k < rowIndex; k++) {
+                const priorRow = rows[k];
+                if ((priorRow.month ?? priorRow.monthNumber ?? -1) <= 0 || priorRow.status === 'paid') continue;
+                const dDateStr = priorRow.due_date || priorRow.dueDate;
+                const dDate = dDateStr ? new Date(dDateStr) : null;
+                if (dDate && !isNaN(dDate.getTime())) {
+                    dDate.setHours(0, 0, 0, 0);
+                    if (dDate >= todayStart) {
+                        return res.status(400).json({ success: false, message: `Please collect Month ${priorRow.month ?? priorRow.monthNumber} first before this installment.` });
+                    }
+                }
+            }
         }
 
         // Update row details
@@ -2023,12 +2101,9 @@ const verifyInstallmentPayment = async (req, res) => {
         const existingPaid = parseFloat(rows[rowIndex].paid_amount || 0);
         const payingNow = amount !== undefined ? parseFloat(amount) : (dueAmount - existingPaid);
 
-        // Overpayment cascades forward: any amount beyond what's owed on this
-        // row automatically settles the next unpaid month(s) instead of being
-        // rejected outright — only reject if it exceeds the entire remaining
-        // loan balance.
+        // Waterfall allocation starts from the earliest unpaid row so arrears are settled first
         let remainingToApply = payingNow;
-        let cascadeIdx = rowIndex;
+        let cascadeIdx = firstUnpaidIdx !== -1 ? firstUnpaidIdx : rowIndex;
         while (remainingToApply > 0.01 && cascadeIdx < rows.length) {
             const row = rows[cascadeIdx];
             if ((row.month ?? row.monthNumber ?? -1) <= 0 || row.status === 'paid') { cascadeIdx++; continue; }
@@ -2736,6 +2811,60 @@ const getOutletInstallmentsDueList = async (req, res) => {
 
             const instDate = repInstallment.dueDate ? new Date(repInstallment.dueDate) : null;
             
+            // Calculate actual collections in the target month - advance/down
+            // payment and installment payments are tracked SEPARATELY. They used
+            // to be summed into one `collectedInTargetMonth` figure, which both
+            // hid the down-payment amount from view and silently corrupted
+            // "Months Remaining" (monthsDue - monthsCollected): monthsDue is
+            // installment-only, so subtracting a mixed collected figure from it
+            // understated remaining balance whenever an advance landed in the
+            // same target month.
+            let advanceCollectedInTargetMonth = 0;
+            let installmentCollectedInTargetMonth = 0;
+            if (month && year) {
+                const targetM = parseInt(month);
+                const targetY = parseInt(year);
+
+                // 1. Advance / Down Payment
+                const adv = normalized.advance_payment;
+                if (adv && adv.paid) {
+                    const pDate = adv.paidAt ? new Date(adv.paidAt) : (order.delivered_at || order.created_at ? new Date(order.delivered_at || order.created_at) : null);
+                    if (pDate && !isNaN(pDate.getTime()) && (pDate.getMonth() + 1) === targetM && pDate.getFullYear() === targetY) {
+                        advanceCollectedInTargetMonth += Number(adv.amount || 0);
+                    }
+                }
+
+                // 2. Installment Rows
+                rawLedgerRows.forEach(r => {
+                    if (r.month > 0) {
+                        const hist = r.payment_history || r.paymentHistory || [];
+                        if (Array.isArray(hist) && hist.length > 0) {
+                            hist.forEach(h => {
+                                if (h.date) {
+                                    const hd = new Date(h.date);
+                                    if (!isNaN(hd.getTime()) && (hd.getMonth() + 1) === targetM && hd.getFullYear() === targetY) {
+                                        installmentCollectedInTargetMonth += Number(h.amount || 0);
+                                    }
+                                }
+                            });
+                        } else if (r.status === 'paid' || r.status === 'Paid') {
+                            const pd = r.paid_at || r.paidAt ? new Date(r.paid_at || r.paidAt) : (r.due_date ? new Date(r.due_date) : null);
+                            if (pd && !isNaN(pd.getTime()) && (pd.getMonth() + 1) === targetM && pd.getFullYear() === targetY) {
+                                installmentCollectedInTargetMonth += Number(r.paid_amount || r.amount || 0);
+                            }
+                        } else if (r.status === 'partial' && r.paid_amount > 0) {
+                            const pd = r.paid_at || r.paidAt ? new Date(r.paid_at || r.paidAt) : (r.due_date ? new Date(r.due_date) : null);
+                            if (pd && !isNaN(pd.getTime()) && (pd.getMonth() + 1) === targetM && pd.getFullYear() === targetY) {
+                                installmentCollectedInTargetMonth += Number(r.paid_amount || 0);
+                            }
+                        }
+                    }
+                });
+            } else {
+                installmentCollectedInTargetMonth = (repInstallment.paidAmount > 0 && repInstallment.status !== 'paid') ? repInstallment.paidAmount : (repInstallment.status === 'paid' ? repInstallment.dueAmount : 0);
+            }
+            const collectedInTargetMonth = advanceCollectedInTargetMonth + installmentCollectedInTargetMonth;
+
             // Advance Filters Check
             let includeInGlobalList = true;
             if (start_date && end_date && instDate) {
@@ -2790,12 +2919,11 @@ const getOutletInstallmentsDueList = async (req, res) => {
                     imei_serial: imeiSerial || 'N/A',
                     monthlyAmount: repInstallment.dueAmount,
                     remainingAmount: summary.totalInstallmentRemaining,
-                    // Same metric that feeds the Outlet Dashboard's
-                    // Installment Recovery "Arrears" total (sum of every
-                    // overdue-and-unpaid installment's remaining balance) —
-                    // shown per-account here.
                     arrearsAmount: summary.totalArrears || 0,
                     partialPayment: (repInstallment.paidAmount > 0 && repInstallment.status !== 'paid') ? repInstallment.paidAmount : (repInstallment.status === 'paid' ? repInstallment.dueAmount : null),
+                    collectedInTargetMonth: collectedInTargetMonth,
+                    advanceCollectedInTargetMonth: advanceCollectedInTargetMonth,
+                    installmentCollectedInTargetMonth: installmentCollectedInTargetMonth,
                     paidDate: matchedRawRow?.paid_at || repInstallment.paidAt || null,
                     paymentHistory: paymentHistory,
                     note: matchedRawRow?.note || '',
@@ -2922,6 +3050,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
 
         let monthsDue = 0;
         let monthsCollected = 0;
+        let monthsCollectedAdvance = 0;
         let systemCollected = 0;
         let systemOutstanding = 0;
 
@@ -2929,7 +3058,11 @@ const getOutletInstallmentsDueList = async (req, res) => {
             systemOutstanding += inst.remainingAmount;
             systemCollected += inst.orderPaidTotal;
             monthsDue += inst.monthlyAmount;
-            monthsCollected += (inst.partialPayment || 0);
+            // Pure installment collections only - monthsDue is installment-only
+            // too, so this stays an apples-to-apples subtraction for "Months
+            // Remaining". Down-payment collections are tracked separately below.
+            monthsCollected += (inst.installmentCollectedInTargetMonth !== undefined ? inst.installmentCollectedInTargetMonth : (inst.partialPayment || 0));
+            monthsCollectedAdvance += (inst.advanceCollectedInTargetMonth || 0);
         });
 
         const totalItems = filtered.length;
@@ -2950,13 +3083,20 @@ const getOutletInstallmentsDueList = async (req, res) => {
                     // Legacy keys for /outlet/installments
                     months_due: monthsDue,
                     months_collected: monthsCollected,
+                    months_collected_advance: monthsCollectedAdvance,
                     months_remaining: monthsDue - monthsCollected,
                     system_outstanding: systemOutstanding,
                     system_collected: systemCollected,
-                    
+
                     // New keys for /outlet/installments/view
                     monthsDue: monthsDue,
+                    // Pure installment collected this month - down payment excluded
+                    // (see monthsCollectedAdvance below for that).
                     monthsCollected: monthsCollected,
+                    // Advance/down-payment collected this month, tracked separately.
+                    monthsCollectedAdvance: monthsCollectedAdvance,
+                    // Both combined, for a "Total Collected" view.
+                    monthsCollectedTotal: monthsCollected + monthsCollectedAdvance,
                     monthsRemainingAmount: monthsDue - monthsCollected,
                     overallSystemRemaining: systemOutstanding,
                     overallSystemPaid: systemCollected,

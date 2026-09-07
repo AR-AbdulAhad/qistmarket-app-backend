@@ -38,11 +38,15 @@ const {
   replaceLocationPhoto,
   getDashboardStats,
   checkVerificationPerson,
-  updateVerificationAssignment
+  updateVerificationAssignment,
+  updateVerificationDetails
 } = require('../controllers/verificationController');
 
 // Update Verification Officer and Outlet assignment
 router.put('/verification/:verification_id/assignment', authenticateJWT, updateVerificationAssignment);
+
+// Direct correction of the Verification record's own fields (Super Admin only, enforced in controller)
+router.patch('/verification/:verification_id/details', authenticateJWT, updateVerificationDetails);
 
 // Get all verifications
 router.get('/verifications', authenticateJWT, getVerifications);

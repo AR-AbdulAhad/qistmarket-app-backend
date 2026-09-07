@@ -1,6 +1,7 @@
 const prisma = require('../../lib/prisma');
 const { getOutletFilter } = require('../utils/outletFilter');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
+const { EXCLUDE_PENDING_LEGACY_IMPORT } = require('../utils/legacyImportFilter');
 
 /**
  * getDaybook
@@ -360,15 +361,176 @@ const getSalesReport = async (req, res) => {
         }
 
         const totalDownPaymentsReceived = combinedSales.reduce((acc, o) => acc + (o.down_payment_amount || 0), 0);
+        const totalCashSalesReceived = combinedSales.filter(o => o.sale_type === 'cash').reduce((acc, o) => acc + (o.down_payment_amount || o.sales_value || 0), 0);
+        // Legacy: down-payment-only sum (kept for backward compat)
+        const totalInstallmentsDownPayments = combinedSales.filter(o => o.sale_type === 'installment').reduce((acc, o) => acc + (o.down_payment_amount || 0), 0);
+
+        // Compute totalInstallmentsReceived = actual cash collected from installment
+        // ledger payment_history within the date range (or all-time if no date range is set).
+        // This matches the "Months Collected" card on the Installment View page, so both
+        // screens report aligned figures. We also build `installmentCollections` — individual
+        // payment rows — so the frontend table can show WHO paid (and how much).
+        let totalInstallmentsReceived = 0;
+        let totalAdvanceReceived = 0;
+        let installmentCollections = [];
+
+        // Fetch ledgers for delivered orders in this outlet.
+        // IMPORTANT: use is_delivered: true (same flag as Installment View) instead of
+        // status: 'delivered' — some orders have is_delivered=true but status='approved'
+        // or another transient state. Using the same filter ensures both pages count
+        // exactly the same orders and produce identical totals for the same date range.
+        const allLedgers = await prisma.installmentLedger.findMany({
+            where: {
+                order: {
+                    ...outletFilter,
+                    is_delivered: true,
+                    AND: [EXCLUDE_PENDING_LEGACY_IMPORT]
+                }
+            },
+            select: {
+                ledger_rows: true,
+                order: {
+                    select: {
+                        id: true,
+                        order_ref: true,
+                        customer_name: true,
+                        whatsapp_number: true,
+                        delivered_at: true,
+                        created_at: true,
+                        verification: { select: { purchaser: { select: { name: true } } } },
+                        customer: { select: { name: true } }
+                    }
+                }
+            }
+        });
+
+        for (const ledger of allLedgers) {
+            const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+            const orderRef = ledger.order?.order_ref || '—';
+            const customerName = ledger.order?.verification?.purchaser?.name
+                || ledger.order?.customer?.name
+                || ledger.order?.customer_name
+                || '—';
+            const orderId = ledger.order?.id;
+
+            for (const row of rows) {
+                // Advance / down-payment (month === 0)
+                if (row.month === 0) {
+                    if (row.status === 'paid' || row.status === 'Paid') {
+                        const pdRaw = row.paid_at || ledger.order?.delivered_at || ledger.order?.created_at;
+                        const pd = pdRaw ? new Date(pdRaw) : null;
+                        if (pd && !isNaN(pd.getTime())) {
+                            const inRange = (!rangeStart || pd >= rangeStart) && (!rangeEnd || pd <= rangeEnd);
+                            if (inRange) {
+                                const amt = Number(row.amount || row.paid_amount || 0);
+                                totalAdvanceReceived += amt;
+                                installmentCollections.push({
+                                    id: `ledger-adv-${orderId}-0`,
+                                    order_ref: orderRef,
+                                    customer_name: customerName,
+                                    month_number: 0,
+                                    month_label: 'Advance',
+                                    amount_collected: amt,
+                                    payment_date: pd.toISOString(),
+                                    payment_method: row.payment_method || 'Cash',
+                                    sale_type: 'installment_collection'
+                                });
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // Regular installment rows
+                const hist = row.payment_history || row.paymentHistory || [];
+                if (Array.isArray(hist) && hist.length > 0) {
+                    for (const h of hist) {
+                        const hd = h.date ? new Date(h.date) : null;
+                        if (hd && !isNaN(hd.getTime())) {
+                            const inRange = (!rangeStart || hd >= rangeStart) && (!rangeEnd || hd <= rangeEnd);
+                            if (inRange) {
+                                const amt = Number(h.amount || 0);
+                                totalInstallmentsReceived += amt;
+                                installmentCollections.push({
+                                    id: `ledger-${orderId}-${row.month}-${hd.getTime()}`,
+                                    order_ref: orderRef,
+                                    customer_name: customerName,
+                                    month_number: row.month,
+                                    month_label: `Month ${row.month}`,
+                                    amount_collected: amt,
+                                    payment_date: hd.toISOString(),
+                                    payment_method: h.method || 'Cash',
+                                    sale_type: 'installment_collection'
+                                });
+                            }
+                        }
+                    }
+                } else if (row.status === 'paid' || row.status === 'Paid') {
+                    const pd = row.paid_at ? new Date(row.paid_at) : null;
+                    if (pd && !isNaN(pd.getTime())) {
+                        const inRange = (!rangeStart || pd >= rangeStart) && (!rangeEnd || pd <= rangeEnd);
+                        if (inRange) {
+                            const amt = Number(row.paid_amount || row.amount || 0);
+                            totalInstallmentsReceived += amt;
+                            installmentCollections.push({
+                                id: `ledger-${orderId}-${row.month}`,
+                                order_ref: orderRef,
+                                customer_name: customerName,
+                                month_number: row.month,
+                                month_label: `Month ${row.month}`,
+                                amount_collected: amt,
+                                payment_date: pd.toISOString(),
+                                payment_method: row.payment_method || 'Cash',
+                                sale_type: 'installment_collection'
+                            });
+                        }
+                    }
+                } else if (row.status === 'partial' && row.paid_amount > 0) {
+                    const pd = row.paid_at ? new Date(row.paid_at) : null;
+                    if (pd && !isNaN(pd.getTime())) {
+                        const inRange = (!rangeStart || pd >= rangeStart) && (!rangeEnd || pd <= rangeEnd);
+                        if (inRange) {
+                            const amt = Number(row.paid_amount || 0);
+                            totalInstallmentsReceived += amt;
+                            installmentCollections.push({
+                                id: `ledger-${orderId}-${row.month}-partial`,
+                                order_ref: orderRef,
+                                customer_name: customerName,
+                                month_number: row.month,
+                                month_label: `Month ${row.month} (Partial)`,
+                                amount_collected: amt,
+                                payment_date: pd.toISOString(),
+                                payment_method: row.payment_method || 'Cash',
+                                sale_type: 'installment_collection'
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort collections by payment date descending
+        installmentCollections.sort((a, b) => new Date(b.payment_date) - new Date(a.payment_date));
 
         const summary = {
             totalOrders: combinedSales.length,
             totalGrossAmount: combinedSales.reduce((acc, o) => acc + (o.sales_value || 0), 0),
             totalDownPaymentsReceived,
+            totalCashSalesReceived,
+            // Pure installment recovery only (month > 0) - excludes the advance/down
+            // payment, which used to be lumped in here and inflated this figure.
+            totalInstallmentsReceived,
+            // Advance/down-payment cash actually collected within the date range
+            // (ledger-based, so it reflects real payment timing, not just orders
+            // that happen to be in the delivered-orders list for this range).
+            totalAdvanceReceived,
+            // Everything collected in the range - down payment + installments combined.
+            totalCollectedInRange: totalAdvanceReceived + totalInstallmentsReceived,
             totalReceived: totalDownPaymentsReceived
         };
 
-        res.json({ success: true, data: { summary, orders: combinedSales } });
+        res.json({ success: true, data: { summary, orders: combinedSales, installmentCollections } });
+
     } catch (error) {
         console.error('getSalesReport error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -606,12 +768,15 @@ const getInstallmentRecoveriesReport = async (req, res) => {
     const { startDate, endDate } = req.query;
 
     try {
-        const dateFilter = {};
-        if (startDate) dateFilter.gte = new Date(startDate);
+        let rangeStart = null;
+        if (startDate) {
+            rangeStart = new Date(startDate);
+            rangeStart.setHours(0, 0, 0, 0);
+        }
+        let rangeEnd = null;
         if (endDate) {
-            const end = new Date(endDate);
-            end.setHours(23, 59, 59, 999);
-            dateFilter.lte = end;
+            rangeEnd = new Date(endDate);
+            rangeEnd.setHours(23, 59, 59, 999);
         }
 
         const ledgers = await prisma.installmentLedger.findMany({
@@ -638,34 +803,54 @@ const getInstallmentRecoveriesReport = async (req, res) => {
         for (const ledger of ledgers) {
             const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
             const purchaserName = ledger.order?.verification?.purchaser?.name || ledger.order?.customer?.name || ledger.order?.customer_name || '—';
+            // Current outstanding arrears for this customer (sum of overdue unpaid
+            // months as of today) - shown alongside every payment row for the order
+            // so the collector can see what's still owed, not just what just came in.
+            const { summary: ledgerSummary } = getNormalizedLedger(rows);
+            const customerArrears = ledgerSummary.totalArrears || 0;
+
             for (const row of rows) {
                 if (row.month === 0) continue;
-                if (row.status === 'paid' && row.paid_at) {
-                    const paidDate = new Date(row.paid_at);
-                    let include = true;
-                    if (dateFilter.gte && paidDate < dateFilter.gte) include = false;
-                    if (dateFilter.lte && paidDate > dateFilter.lte) include = false;
 
-                    if (include) {
-                        const amount = parseFloat(row.amount || row.dueAmount || 0);
-                        totalRecovered += amount;
-                        recoveries.push({
-                            order_id: ledger.order.id,
-                            order_ref: ledger.order.order_ref,
-                            customer_name: purchaserName,
-                            purchaser_name: purchaserName,
-                            whatsapp_number: ledger.order.whatsapp_number,
-                            amount: amount,
-                            month: row.month,
-                            label: row.label || `Month ${row.month}`,
-                            paid_at: row.paid_at,
-                            payment_method: row.payment_method || 'Cash'
-                        });
+                const pushRecovery = (amount, paidAt, method, labelSuffix) => {
+                    const paidDate = paidAt ? new Date(paidAt) : null;
+                    if (!paidDate || isNaN(paidDate.getTime())) return;
+                    if (rangeStart && paidDate < rangeStart) return;
+                    if (rangeEnd && paidDate > rangeEnd) return;
+                    totalRecovered += amount;
+                    recoveries.push({
+                        order_id: ledger.order.id,
+                        order_ref: ledger.order.order_ref,
+                        customer_name: purchaserName,
+                        purchaser_name: purchaserName,
+                        whatsapp_number: ledger.order.whatsapp_number,
+                        amount,
+                        month: row.month,
+                        label: `${row.label || `Month ${row.month}`}${labelSuffix || ''}`,
+                        paid_at: paidDate.toISOString(),
+                        payment_method: method || 'Cash',
+                        arrears: customerArrears
+                    });
+                };
+
+                // Walk per-payment history when present so every individual cash
+                // collection is counted - not just months that ended up fully
+                // 'paid'. A month that's still 'partial' (multiple part-payments,
+                // none of which cleared it yet) was previously invisible here even
+                // though real cash had been collected against it.
+                const hist = row.payment_history || row.paymentHistory || [];
+                if (Array.isArray(hist) && hist.length > 0) {
+                    for (const h of hist) {
+                        pushRecovery(Number(h.amount || 0), h.date, h.method, '');
                     }
+                } else if (row.status === 'paid' && row.paid_at) {
+                    pushRecovery(parseFloat(row.amount || row.dueAmount || 0), row.paid_at, row.payment_method, '');
+                } else if (row.status === 'partial' && row.paid_amount > 0 && row.paid_at) {
+                    pushRecovery(parseFloat(row.paid_amount || 0), row.paid_at, row.payment_method, ' (Partial)');
                 }
             }
         }
-        
+
         // Sort by paid_at descending
         recoveries.sort((a, b) => new Date(b.paid_at) - new Date(a.paid_at));
 

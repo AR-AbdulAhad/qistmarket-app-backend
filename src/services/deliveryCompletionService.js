@@ -877,6 +877,98 @@ async function completePendingPaytriggerDelivery(device, io) {
   }
 }
 
+async function completePendingDeliveryWithManualLockPhoto({ orderId, fileUrl, user, io }) {
+  const delivery = await prisma.delivery.findFirst({
+    where: {
+      order_id: parseInt(orderId),
+      status: PENDING_STATUS,
+    },
+  });
+
+  if (!delivery) {
+    throw new Error('Pending Software Activation delivery record not found for this order');
+  }
+
+  if (fileUrl) {
+    await prisma.deliveryUpload.create({
+      data: {
+        delivery_id: delivery.id,
+        upload_type: 'manual_lock_photo',
+        file_url: fileUrl,
+        uploaded_at: now(),
+      },
+    });
+  }
+
+  const guard = await prisma.delivery.updateMany({
+    where: { id: delivery.id, status: PENDING_STATUS },
+    data: { status: COMPLETING_STATUS, updated_at: now() },
+  });
+
+  if (guard.count === 0) {
+    throw new Error('Delivery is already being completed or processed');
+  }
+
+  const payload = delivery.pending_payload || {};
+  if (user) {
+    payload.user = payload.user || user;
+  }
+
+  const order = await prisma.order.findUnique({
+    where: { id: delivery.order_id },
+    include: { delivery: true, verification: { include: { purchaser: true } }, outlet: true },
+  });
+
+  if (!order) {
+    await prisma.delivery.update({ where: { id: delivery.id }, data: { status: PENDING_STATUS } }).catch(() => {});
+    throw new Error('Order not found');
+  }
+
+  try {
+    let out;
+    if (payload.mode === 'self_pickup') {
+      out = await completeSelfPickupDelivery({
+        order,
+        payload,
+        io,
+        productNameSnapshot: payload.productNameSnapshot,
+        inventoryCategory: payload.inventoryCategory,
+        existingDeliveryId: delivery.id,
+      });
+    } else {
+      out = await completeAgentDelivery({
+        order,
+        payload,
+        io,
+        productNameSnapshot: payload.productNameSnapshot,
+        inventoryCategory: payload.inventoryCategory,
+        existingDeliveryId: delivery.id,
+      });
+    }
+
+    await prisma.delivery.update({
+      where: { id: delivery.id },
+      data: { pending_payload: null },
+    }).catch(() => {});
+
+    await logOrderStatusChange(order.id, PENDING_STATUS, 'delivered', user, 'Completed via manual lock screen photo submission');
+
+    const room = payload.mode === 'self_pickup' ? `outlet_${payload.outlet_id}` : `officer_${payload.user.id}`;
+    io?.to(room).emit('delivery_data_updated', {
+      reason: 'manual_lock_delivery_completed',
+      orderId: order.id,
+      delivery_id: delivery.id,
+      status: 'delivered',
+    });
+
+    return { completed: true, delivery: out.delivery, ledgerUrl: out.ledgerUrl };
+  } catch (err) {
+    console.error('[deliveryCompletionService] completePendingDeliveryWithManualLockPhoto error:', err);
+    await prisma.delivery.update({ where: { id: delivery.id }, data: { status: PENDING_STATUS } }).catch(() => {});
+    throw err;
+  }
+}
+
 module.exports = {
   PENDING_STATUS,
   COMPLETING_STATUS,
@@ -886,4 +978,5 @@ module.exports = {
   completeSelfPickupDelivery,
   initiateGatedDelivery,
   completePendingPaytriggerDelivery,
+  completePendingDeliveryWithManualLockPhoto,
 };

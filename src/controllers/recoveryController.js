@@ -583,11 +583,21 @@ const submitBranchPayment = async (req, res) => {
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
-    // Sequential collection only — see submitInstallment above for the same rule.
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const firstUnpaidIdx = rows.findIndex(r => (r.month ?? r.monthNumber ?? -1) > 0 && r.status !== 'paid');
-    if (firstUnpaidIdx !== -1 && firstUnpaidIdx !== rowIndex) {
-      const blockingRow = rows[firstUnpaidIdx];
-      return res.status(400).json({ success: false, message: `Please collect Month ${blockingRow.month ?? blockingRow.monthNumber} first before this installment.` });
+    if (firstUnpaidIdx !== -1 && firstUnpaidIdx < rowIndex) {
+      for (let k = firstUnpaidIdx; k < rowIndex; k++) {
+        const priorRow = rows[k];
+        if ((priorRow.month ?? priorRow.monthNumber ?? -1) <= 0 || priorRow.status === 'paid') continue;
+        const dDateStr = priorRow.due_date || priorRow.dueDate;
+        const dDate = dDateStr ? new Date(dDateStr) : null;
+        if (dDate && !isNaN(dDate.getTime())) {
+          dDate.setHours(0, 0, 0, 0);
+          if (dDate >= todayStart) {
+            return res.status(400).json({ success: false, message: `Please collect Month ${priorRow.month ?? priorRow.monthNumber} first before this installment.` });
+          }
+        }
+      }
     }
 
     const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
@@ -597,10 +607,8 @@ const submitBranchPayment = async (req, res) => {
     const imeiSerial = order.cash_in_hand?.[0]?.imei_serial || order.delivery?.product_imei || order.imei_serial;
     const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
 
-    // Overpayment cascades forward into the next unpaid month(s) — see
-    // submitInstallment above for the full rationale.
     let remainingToApply = payingNow;
-    let cascadeIdx = rowIndex;
+    let cascadeIdx = firstUnpaidIdx !== -1 ? firstUnpaidIdx : rowIndex;
     while (remainingToApply > 0.01 && cascadeIdx < rows.length) {
       const row = rows[cascadeIdx];
       if ((row.month ?? row.monthNumber ?? -1) <= 0 || row.status === 'paid') { cascadeIdx++; continue; }
@@ -1151,13 +1159,21 @@ const submitInstallment = async (req, res) => {
     if (rowIndex === -1) return res.status(404).json({ success: false, message: 'Installment month not found in ledger' });
     if (rows[rowIndex].status === 'paid') return res.status(400).json({ success: false, message: 'Installment already paid' });
 
-    // Sequential collection only: months must be paid in order — you can't
-    // pay Month 3 while Month 1/2 still has an outstanding balance. Month 0
-    // (advance) is excluded from this ordering, it's tracked separately.
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const firstUnpaidIdx = rows.findIndex(r => (r.month ?? r.monthNumber ?? -1) > 0 && r.status !== 'paid');
-    if (firstUnpaidIdx !== -1 && firstUnpaidIdx !== rowIndex) {
-      const blockingRow = rows[firstUnpaidIdx];
-      return res.status(400).json({ success: false, message: `Please collect Month ${blockingRow.month ?? blockingRow.monthNumber} first before this installment.` });
+    if (firstUnpaidIdx !== -1 && firstUnpaidIdx < rowIndex) {
+      for (let k = firstUnpaidIdx; k < rowIndex; k++) {
+        const priorRow = rows[k];
+        if ((priorRow.month ?? priorRow.monthNumber ?? -1) <= 0 || priorRow.status === 'paid') continue;
+        const dDateStr = priorRow.due_date || priorRow.dueDate;
+        const dDate = dDateStr ? new Date(dDateStr) : null;
+        if (dDate && !isNaN(dDate.getTime())) {
+          dDate.setHours(0, 0, 0, 0);
+          if (dDate >= todayStart) {
+            return res.status(400).json({ success: false, message: `Please collect Month ${priorRow.month ?? priorRow.monthNumber} first before this installment.` });
+          }
+        }
+      }
     }
 
     const dueAmount = parseFloat(rows[rowIndex].amount || rows[rowIndex].dueAmount || 0);
@@ -1168,12 +1184,8 @@ const submitInstallment = async (req, res) => {
     const finalProductName = order.cash_in_hand?.[0]?.product_name || order.product_name;
     const parsedPromisedDate = promised_date ? new Date(promised_date) : null;
 
-    // Overpayment cascades forward: any amount beyond what's owed on this row
-    // automatically settles the next unpaid month(s) instead of being
-    // rejected outright — only reject if it exceeds the entire remaining loan
-    // balance. Computed before the transaction since it's pure in-memory math.
     let remainingToApply = payingNow;
-    let cascadeIdx = rowIndex;
+    let cascadeIdx = firstUnpaidIdx !== -1 ? firstUnpaidIdx : rowIndex;
     while (remainingToApply > 0.01 && cascadeIdx < rows.length) {
       const row = rows[cascadeIdx];
       if ((row.month ?? row.monthNumber ?? -1) <= 0 || row.status === 'paid') { cascadeIdx++; continue; }
