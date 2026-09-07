@@ -125,7 +125,7 @@ const createCashSale = async (req, res) => {
 
     // Fire-and-forget: notifyCashSale fails soft (never throws) and must not
     // delay or block the sale response.
-    notifyCashSale(createdSales, outlet_id, { full_name: req.user.full_name, phone: req.user.phone });
+    notifyCashSale(createdSales, { full_name: req.user.full_name, phone: req.user.phone });
 
     return res.status(201).json({
       success: true,
@@ -197,6 +197,8 @@ const getCashSaleHistory = async (req, res) => {
           final_price: groupTotal(siblings),
           created_at: row.created_at,
           sold_by: row.sold_by,
+          status: row.status,
+          cancelled_at: row.cancelled_at,
         });
       } else {
         transactions.push({
@@ -211,6 +213,8 @@ const getCashSaleHistory = async (req, res) => {
           final_price: row.final_price,
           created_at: row.created_at,
           sold_by: row.sold_by,
+          status: row.status,
+          cancelled_at: row.cancelled_at,
         });
       }
     }
@@ -315,6 +319,11 @@ const updateCashSale = async (req, res) => {
       }
       if (!isWithinEditWindow(row)) {
         const err = new Error('EDIT_WINDOW_EXPIRED');
+        throw err;
+      }
+      if (row.status === 'cancelled') {
+        const err = new Error('This sale has been cancelled and can no longer be edited.');
+        err.statusCode = 409;
         throw err;
       }
 
@@ -464,10 +473,11 @@ const updateCashSale = async (req, res) => {
 /**
  * DELETE /api/outlet/cash-sale/:id
  * Cancels an entire transaction (every product in its cart, if it was a
- * multi-product sale): reverses the Cash Register impact, restores every
- * unit to sellable stock, and removes the record(s). Mirrors
- * deleteExpenseVoucher's pattern (expenseController.js) for consistency
- * across the outlet portal.
+ * multi-product sale): reverses the Cash Register impact and restores every
+ * unit to sellable stock — same as before — but now marks the record(s)
+ * `status: 'cancelled'` instead of deleting them, so the sale stays visible
+ * in Cash Sale History (and any report built on it) with its outcome
+ * clearly marked rather than disappearing without a trace.
  */
 const deleteCashSale = async (req, res) => {
   const { id } = req.params;
@@ -484,6 +494,11 @@ const deleteCashSale = async (req, res) => {
         err.statusCode = 404;
         throw err;
       }
+      if (row.status === 'cancelled') {
+        const err = new Error('This sale has already been cancelled.');
+        err.statusCode = 409;
+        throw err;
+      }
       if (!isWithinEditWindow(row)) {
         const err = new Error('EDIT_WINDOW_EXPIRED');
         throw err;
@@ -493,7 +508,11 @@ const deleteCashSale = async (req, res) => {
         ? await tx.cashSale.findMany({ where: { sale_group: row.sale_group, outlet_id } })
         : [row];
 
-      await tx.cashSale.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+      const cancelledAt = now();
+      await tx.cashSale.updateMany({
+        where: { id: { in: rows.map((r) => r.id) } },
+        data: { status: 'cancelled', cancelled_at: cancelledAt, updated_at: cancelledAt },
+      });
 
       // Restore every unit to sellable stock — only if it's still marked Sold
       // (defensive: avoids re-listing a unit that was independently moved on
@@ -501,7 +520,7 @@ const deleteCashSale = async (req, res) => {
       for (const r of rows) {
         await tx.outletInventory.updateMany({
           where: { id: r.inventory_id, status: 'Sold' },
-          data: { status: 'In Stock', updated_at: now() },
+          data: { status: 'In Stock', updated_at: cancelledAt },
         });
       }
 
@@ -512,7 +531,7 @@ const deleteCashSale = async (req, res) => {
 
     await logAction(
       req,
-      'CASH_SALE_DELETED',
+      'CASH_SALE_CANCELLED',
       `Cash sale #${result[0].id}: ${result.length} item(s) (PKR ${groupTotal(result)}) sold to ${result[0].customer_name} was cancelled.`,
       result[0].id,
       'CashSale'

@@ -14,6 +14,7 @@ const pt = require('../services/paytriggerService');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 const { notifyUser } = require('../utils/notificationUtils');
 const { logLoginAction } = require('../utils/auditLogger');
+const { EXCLUDE_PENDING_LEGACY_IMPORT } = require('../utils/legacyImportFilter');
 
 const now = () => new Date();
 
@@ -132,6 +133,7 @@ const loginOutletUser = async (req, res) => {
             full_name: user.full_name,
             email: user.email,
             username: user.username,
+            phone: user.phone,
             role_id: user.role_id,
             role: user.role.name,
             outlet_id: outlet.id,
@@ -1494,6 +1496,7 @@ const searchDeliveredOrders = async (req, res) => {
     try {
         const where = {
             is_delivered: true,
+            AND: [EXCLUDE_PENDING_LEGACY_IMPORT],
             OR: [
                 { order_ref: { contains: query } },
                 { token_number: { contains: query } },
@@ -1624,6 +1627,7 @@ const getOutletInstallments = async (req, res) => {
     try {
         const orderWhere = {
             is_delivered: true,
+            AND: [EXCLUDE_PENDING_LEGACY_IMPORT],
             ...((outlet_id && globalSearch !== 'true') && { outlet_id: outlet_id }),
             ...(q && {
                 OR: [
@@ -2548,6 +2552,7 @@ const getOutletInstallmentsDueList = async (req, res) => {
         const orders = await prisma.order.findMany({
             where: {
                 is_delivered: true,
+                AND: [EXCLUDE_PENDING_LEGACY_IMPORT],
                 ...(outlet_id && { outlet_id: outlet_id }),
             },
             include: {

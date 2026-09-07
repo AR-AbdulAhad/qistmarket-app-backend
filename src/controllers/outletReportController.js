@@ -181,7 +181,9 @@ const getStockSummary = async (req, res) => {
 
 /**
  * getSalesReport
- * Detailed list of sales/orders for the outlet.
+ * Detailed list of sales/orders for the outlet — installment orders
+ * (delivered) plus outright Cash Sales, merged into one list so the report
+ * reflects every way the outlet actually sells stock.
  */
 const getSalesReport = async (req, res) => {
     const outletFilter = getOutletFilter(req);
@@ -279,9 +281,72 @@ const getSalesReport = async (req, res) => {
                 sales_value,
                 tenure,
                 installment_amount,
-                balance
+                balance,
+                sale_type: 'installment'
             };
         });
+
+        // Outright Cash Sales — a separate model entirely from Order, so they're
+        // fetched and reshaped into the same row shape here rather than joined
+        // in the query above. Cancelled sales are excluded, same as a cancelled
+        // Order would never reach this report either.
+        const cashSaleDateFilter = {};
+        if (startDate) {
+            const start = new Date(startDate);
+            start.setHours(0, 0, 0, 0);
+            cashSaleDateFilter.gte = start;
+        }
+        if (endDate) {
+            const end = new Date(endDate);
+            end.setHours(23, 59, 59, 999);
+            cashSaleDateFilter.lte = end;
+        }
+
+        const cashSaleRows = await prisma.cashSale.findMany({
+            where: {
+                ...outletFilter,
+                status: 'active',
+                ...(startDate || endDate ? { created_at: cashSaleDateFilter } : {})
+            },
+            orderBy: { created_at: 'desc' }
+        });
+
+        // Collapse multi-product carts (rows sharing a sale_group) into one
+        // transaction row, same as the Cash Sale History list does.
+        const seenGroups = new Set();
+        const cashSaleTransactions = [];
+        for (const row of cashSaleRows) {
+            let siblings = [row];
+            if (row.sale_group) {
+                if (seenGroups.has(row.sale_group)) continue;
+                seenGroups.add(row.sale_group);
+                siblings = cashSaleRows.filter(r => r.sale_group === row.sale_group);
+            }
+            const sales_value = siblings.reduce((s, r) => s + r.final_price, 0);
+            const product_name = siblings.length > 1
+                ? `${siblings[0].product_name} +${siblings.length - 1} more`
+                : siblings[0].product_name;
+
+            cashSaleTransactions.push({
+                id: `cash-${row.id}`,
+                order_ref: `CASH-${row.id}`,
+                customer_name: row.customer_name,
+                purchaser_name: row.customer_name,
+                whatsapp_number: row.customer_phone,
+                product_name,
+                sales_value,
+                down_payment_amount: sales_value, // paid in full at time of sale
+                balance: 0,
+                tenure: 0,
+                installment_amount: 0,
+                updated_at: row.updated_at,
+                created_at: row.created_at,
+                sale_type: 'cash'
+            });
+        }
+
+        const combinedSales = [...ordersWithDownPayment, ...cashSaleTransactions]
+            .sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
 
         let rangeStart = null;
         if (startDate) {
@@ -294,16 +359,16 @@ const getSalesReport = async (req, res) => {
             rangeEnd.setHours(23, 59, 59, 999);
         }
 
-        const totalDownPaymentsReceived = ordersWithDownPayment.reduce((acc, o) => acc + (o.down_payment_amount || 0), 0);
+        const totalDownPaymentsReceived = combinedSales.reduce((acc, o) => acc + (o.down_payment_amount || 0), 0);
 
         const summary = {
-            totalOrders: orders.length,
-            totalGrossAmount: ordersWithDownPayment.reduce((acc, o) => acc + (o.sales_value || 0), 0),
+            totalOrders: combinedSales.length,
+            totalGrossAmount: combinedSales.reduce((acc, o) => acc + (o.sales_value || 0), 0),
             totalDownPaymentsReceived,
             totalReceived: totalDownPaymentsReceived
         };
 
-        res.json({ success: true, data: { summary, orders: ordersWithDownPayment } });
+        res.json({ success: true, data: { summary, orders: combinedSales } });
     } catch (error) {
         console.error('getSalesReport error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });

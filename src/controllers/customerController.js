@@ -1,6 +1,7 @@
 const prisma = require('../../lib/prisma');
 const { syncBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
+const { EXCLUDE_PENDING_LEGACY_IMPORT } = require('../utils/legacyImportFilter');
 
 // Largest overdue gap among this order's unpaid installments, in whole days.
 function computeDaysOverdue(rows) {
@@ -48,7 +49,7 @@ const getCustomers = async (req, res) => {
     }
 
     // Base where clause
-    const baseWhere = { is_delivered: true };
+    const baseWhere = { is_delivered: true, AND: [EXCLUDE_PENDING_LEGACY_IMPORT] };
 
     // Role-based filtering
     console.log(user.role.name)
@@ -293,12 +294,17 @@ const getBlacklistedCustomers = async (req, res) => {
 
     const orders = await prisma.order.findMany({
       where: {
-        verification: {
-          OR: [
-            { purchaser: { is_blacklisted: true } },
-            { grantors: { some: { is_blacklisted: true } } },
-          ],
-        },
+        AND: [
+          {
+            verification: {
+              OR: [
+                { purchaser: { is_blacklisted: true } },
+                { grantors: { some: { is_blacklisted: true } } },
+              ],
+            },
+          },
+          EXCLUDE_PENDING_LEGACY_IMPORT,
+        ],
       },
       include: {
         verification: {
@@ -505,7 +511,7 @@ const getBlacklistedCustomers = async (req, res) => {
 const getClearedCustomers = async (req, res) => {
   try {
     // Base where clause
-    const baseWhere = { is_delivered: true };
+    const baseWhere = { is_delivered: true, AND: [EXCLUDE_PENDING_LEGACY_IMPORT] };
 
 
     // Fetch all delivered orders

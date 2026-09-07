@@ -12,6 +12,7 @@ const jazzSmsService = require('../services/jazzSmsService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const customerNotify = require('../services/customerNotificationService');
 const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth } = require('../services/rankingService');
+const { EXCLUDE_PENDING_LEGACY_IMPORT, isRequestingLegacyImportChannel } = require('../utils/legacyImportFilter');
 
 const admin = require('firebase-admin');
 
@@ -964,6 +965,10 @@ const getOrders = async (req, res) => {
       }
     });
 
+    if (!isRequestingLegacyImportChannel(filters.channel)) {
+      where.AND = [...(where.AND || []), EXCLUDE_PENDING_LEGACY_IMPORT];
+    }
+
     const include = {
       created_by: { select: { username: true } },
       assigned_to: { select: { username: true, full_name: true } },
@@ -1129,6 +1134,10 @@ const getOrdersWithPagination = async (req, res) => {
         }
       }
     });
+
+    if (!isRequestingLegacyImportChannel(filters.channel)) {
+      baseWhere.AND = [...(baseWhere.AND || []), EXCLUDE_PENDING_LEGACY_IMPORT];
+    }
 
     const totalCount = await prisma.order.count({
       where: baseWhere
@@ -3142,6 +3151,10 @@ const getDeliveredOrders = async (req, res) => {
         }
       }
     });
+
+    if (!isRequestingLegacyImportChannel(filters.channel)) {
+      where.AND = [...(where.AND || []), EXCLUDE_PENDING_LEGACY_IMPORT];
+    }
 
     const orders = await prisma.order.findMany({
       where,

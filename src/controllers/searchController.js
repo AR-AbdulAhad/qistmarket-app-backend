@@ -141,7 +141,15 @@ const globalSearch = async (req, res) => {
             }
         });
 
-        const results = Array.from(orderResults.values()).map(order => {
+        // Legacy-imported orders still awaiting media/location must stay hidden
+        // from search until an admin marks them complete on the Pending Legacy
+        // Profiles screen (see legacyImportController.markComplete).
+        const isPendingLegacyImport = (order) =>
+            order.channel === 'legacy_import' && (order.needs_media_upload || order.needs_location);
+
+        const results = Array.from(orderResults.values())
+            .filter(order => !isPendingLegacyImport(order))
+            .map(order => {
             const purchaser = order.verification?.purchaser;
 
             let is_ledger_cleared = false;

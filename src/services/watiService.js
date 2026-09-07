@@ -1232,8 +1232,7 @@ const sendToMany = async (phones, sendFn) => {
 //
 // This template must be created and approved on the WATI dashboard before
 // sends will actually deliver — until then this call fails soft (same as
-// every other sendTemplate call) and the customer still gets the plain-text
-// SMS sent alongside it by customerNotificationService.notifyCashSale.
+// every other sendTemplate call).
 const WATI_CASH_SALE_TEMPLATE = process.env.WATI_CASH_SALE_TEMPLATE || 'cash_sale_confirmation';
 const WATI_CASH_SALE_BROADCAST = process.env.WATI_CASH_SALE_TEMPLATE || 'cash_sale_confirmation';
 

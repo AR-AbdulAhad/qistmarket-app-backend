@@ -787,6 +787,12 @@ model CashSale {
   // into a single receipt/invoice. Null for a single-product sale — existing
   // rows created before this field never need backfilling.
   sale_group      String?  @db.VarChar(64)
+  // "active" | "cancelled" — a cancelled sale stays in the table (for the
+  // invoice/audit trail) instead of being deleted; cancelling restores stock
+  // and reverses the Cash Register exactly like a hard delete used to.
+  status            String    @default("active") @db.VarChar(16)
+  cancelled_at      DateTime?
+  cancelled_reason  String?   @db.Text
   created_at      DateTime @default(now())
   updated_at      DateTime @updatedAt
 
@@ -797,6 +803,7 @@ model CashSale {
   @@index([outlet_id])
   @@index([created_at])
   @@index([sale_group])
+  @@index([status])
   @@map("cash_sales")
 }
 
