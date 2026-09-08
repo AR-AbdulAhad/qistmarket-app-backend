@@ -40,7 +40,10 @@ const {
   checkVerificationPerson,
   updateVerificationAssignment,
   updateVerificationDetails,
-  deleteLocationPhoto
+  deleteLocationPhoto,
+  updateVerificationLocation,
+  updateVerificationReview,
+  deleteVerificationReview
 } = require('../controllers/verificationController');
 
 // Update Verification Officer and Outlet assignment
@@ -100,6 +103,9 @@ router.get('/verification/:verification_id/locations', authenticateJWT, getVerif
 
 // NEW: Delete verification location
 router.delete('/verification/location/:location_id', authenticateJWT, deleteVerificationLocation);
+router.patch('/verification/location/:location_id', authenticateJWT, updateVerificationLocation);
+router.patch('/verification/review/:review_id', authenticateJWT, updateVerificationReview);
+router.delete('/verification/review/:review_id', authenticateJWT, deleteVerificationReview);
 
 // Upload purchaser document
 router.post(

@@ -2030,6 +2030,50 @@ const replaceDeliveryUpload = async (req, res) => {
   }
 };
 
+// Direct correction of a Delivery record's own fields — Super Admin only.
+// Order.delivery_officer_id (edited via updateVerificationAssignment) is a
+// separate, pending-assignment field; delivery_agent_id here is the officer
+// who actually completed the delivery, shown as "Delivery Agent" on the
+// Order Details page's Delivery Information card — no endpoint previously
+// existed to correct it or the rest of that card (feedback/verified/self_pickup).
+const updateDeliveryDetails = async (req, res) => {
+  const { delivery_id } = req.params;
+  const { self_pickup, feedback, verified, delivery_agent_id } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit this.' });
+  }
+
+  try {
+    const delivery = await prisma.delivery.findUnique({ where: { id: parseInt(delivery_id, 10) } });
+    if (!delivery) {
+      return res.status(404).json({ success: false, message: 'Delivery record not found.' });
+    }
+
+    const data = {};
+    if (self_pickup !== undefined) data.self_pickup = !!self_pickup;
+    if (feedback !== undefined) data.feedback = feedback || null;
+    if (verified !== undefined) data.verified = !!verified;
+    if (delivery_agent_id !== undefined) {
+      const agentId = delivery_agent_id ? parseInt(delivery_agent_id, 10) : null;
+      if (!agentId) {
+        return res.status(400).json({ success: false, message: 'delivery_agent_id is required (Delivery has no unassigned state).' });
+      }
+      const agent = await prisma.user.findUnique({ where: { id: agentId } });
+      if (!agent) {
+        return res.status(400).json({ success: false, message: 'delivery_agent_id does not match a real user.' });
+      }
+      data.delivery_agent_id = agentId;
+    }
+
+    const updated = await prisma.delivery.update({ where: { id: delivery.id }, data });
+    return res.status(200).json({ success: true, message: 'Delivery details updated successfully', data: { delivery: updated } });
+  } catch (error) {
+    console.error('updateDeliveryDetails error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 // Admin-direct upload of a delivery photo (e.g. backfilling a legacy order,
 // or correcting a missing/wrong one) — modeled on updateLocationVerified
 // (verificationController.js), which already lets Super Admin manually add
@@ -2485,5 +2529,6 @@ module.exports = {
   submitSelfPickupDelivery,
   replaceDeliveryUpload,
   addManualDeliveryUpload,
-  deleteDeliveryUpload
+  deleteDeliveryUpload,
+  updateDeliveryDetails
 };

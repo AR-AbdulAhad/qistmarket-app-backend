@@ -1726,6 +1726,117 @@ const deleteRecoveryVisitPhoto = async (req, res) => {
   }
 };
 
+// Admin-direct creation of a recovery visit — Super Admin only. For
+// backfilling a legacy/missed visit that was never logged through the real
+// officer app (logRecoveryVisit above), same "raw correction tool" spirit
+// as the delivery-photo/location manual-add endpoints built alongside this.
+const addManualRecoveryVisit = async (req, res) => {
+  const { order_id } = req.params;
+  const {
+    officer_id, visit_time, customer_feedback, visit_notes,
+    payment_collected, amount_collected, fuel_charges, promised_date, latitude, longitude,
+  } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can add a recovery visit manually.' });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({ where: { id: parseInt(order_id, 10) } });
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    const visit = await prisma.recoveryVisit.create({
+      data: {
+        order_id: order.id,
+        officer_id: officer_id ? parseInt(officer_id, 10) : req.user.id,
+        latitude: latitude ? parseFloat(latitude) : null,
+        longitude: longitude ? parseFloat(longitude) : null,
+        visit_time: visit_time ? new Date(visit_time) : now(),
+        customer_feedback: customer_feedback || null,
+        visit_notes: visit_notes || null,
+        payment_collected: !!payment_collected,
+        amount_collected: amount_collected ? parseFloat(amount_collected) : null,
+        fuel_charges: fuel_charges ? parseFloat(fuel_charges) : 0,
+        promised_date: promised_date ? new Date(promised_date) : null,
+        created_at: now(),
+      },
+      include: { officer: { select: { full_name: true, username: true } }, photos: true },
+    });
+
+    return res.status(200).json({ success: true, message: 'Recovery visit added successfully', data: { visit } });
+  } catch (error) {
+    console.error('addManualRecoveryVisit error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// Direct correction of an existing recovery visit's own fields — Super
+// Admin only.
+const updateRecoveryVisit = async (req, res) => {
+  const { visit_id } = req.params;
+  const {
+    officer_id, visit_time, customer_feedback, visit_notes,
+    payment_collected, amount_collected, fuel_charges, promised_date, latitude, longitude,
+  } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit this.' });
+  }
+
+  try {
+    const existing = await prisma.recoveryVisit.findUnique({ where: { id: parseInt(visit_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Recovery visit not found.' });
+    }
+
+    const data = {};
+    if (officer_id !== undefined && officer_id) data.officer_id = parseInt(officer_id, 10);
+    if (visit_time !== undefined && visit_time) data.visit_time = new Date(visit_time);
+    if (customer_feedback !== undefined) data.customer_feedback = customer_feedback || null;
+    if (visit_notes !== undefined) data.visit_notes = visit_notes || null;
+    if (payment_collected !== undefined) data.payment_collected = !!payment_collected;
+    if (amount_collected !== undefined) data.amount_collected = amount_collected === '' || amount_collected === null ? null : parseFloat(amount_collected);
+    if (fuel_charges !== undefined) data.fuel_charges = fuel_charges === '' || fuel_charges === null ? 0 : parseFloat(fuel_charges);
+    if (promised_date !== undefined) data.promised_date = promised_date ? new Date(promised_date) : null;
+    if (latitude !== undefined) data.latitude = latitude === '' || latitude === null ? null : parseFloat(latitude);
+    if (longitude !== undefined) data.longitude = longitude === '' || longitude === null ? null : parseFloat(longitude);
+
+    const updated = await prisma.recoveryVisit.update({
+      where: { id: existing.id },
+      data,
+      include: { officer: { select: { full_name: true, username: true } }, photos: true },
+    });
+
+    return res.status(200).json({ success: true, message: 'Recovery visit updated successfully', data: { visit: updated } });
+  } catch (error) {
+    console.error('updateRecoveryVisit error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// Delete a recovery visit (and its photos, via cascade) — Super Admin only.
+const deleteRecoveryVisit = async (req, res) => {
+  const { visit_id } = req.params;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can delete this.' });
+  }
+
+  try {
+    const existing = await prisma.recoveryVisit.findUnique({ where: { id: parseInt(visit_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Recovery visit not found.' });
+    }
+    await prisma.recoveryVisit.delete({ where: { id: existing.id } });
+    return res.status(200).json({ success: true, message: 'Recovery visit deleted successfully' });
+  } catch (error) {
+    console.error('deleteRecoveryVisit error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 const getRecoveryDashboardStats = async (req, res) => {
   try {
     const { filter = 'today', startDate, endDate } = req.query;
@@ -2870,5 +2981,9 @@ module.exports = {
   getOrderRecoveryVisits,
   getCustomerFullProfile,
   replaceRecoveryVisitPhoto,
+  deleteRecoveryVisitPhoto,
+  addManualRecoveryVisit,
+  updateRecoveryVisit,
+  deleteRecoveryVisit,
   getRecoveryPtpList,
 };

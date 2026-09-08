@@ -1398,13 +1398,16 @@ function addMonthsToDate(date, n) {
 // operation (setLedgerMonths below).
 const editLedgerRows = async (req, res) => {
   const { ledger_id } = req.params;
-  const { rows: editedRows } = req.body;
+  const { rows: editedRows, advance_payment: editedAdvance } = req.body;
 
   if (req.user?.role !== 'Super Admin') {
     return res.status(403).json({ success: false, message: 'Only Super Admin can edit the ledger.' });
   }
-  if (!Array.isArray(editedRows) || editedRows.length === 0) {
+  if (editedRows !== undefined && (!Array.isArray(editedRows) || editedRows.length === 0)) {
     return res.status(400).json({ success: false, message: 'rows must be a non-empty array.' });
+  }
+  if (editedRows === undefined && !editedAdvance) {
+    return res.status(400).json({ success: false, message: 'Provide rows and/or advance_payment to update.' });
   }
 
   try {
@@ -1417,13 +1420,13 @@ const editLedgerRows = async (req, res) => {
     }
 
     const allExistingRows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
-    // The advance payment (month 0) has its own separate, non-editable
-    // "Advance Payment" display and is never part of the Installment
-    // Schedule table the frontend sends back here — only compare/replace
-    // the month>0 rows, and carry the advance row through untouched.
+    // The advance payment (month 0) has its own separate "Advance Payment"
+    // display, edited independently of the Installment Schedule table below
+    // (editedAdvance, handled further down) — only compare/replace the
+    // month>0 rows here.
     const advanceRow = allExistingRows.find((r) => Number(r.month) === 0) || null;
     const existingRows = allExistingRows.filter((r) => Number(r.month) !== 0);
-    if (editedRows.length !== existingRows.length) {
+    if (editedRows !== undefined && editedRows.length !== existingRows.length) {
       return res.status(400).json({
         success: false,
         message: 'Row count mismatch — use the "change total months" action to add or remove installments, not a direct row edit.',
@@ -1431,7 +1434,7 @@ const editLedgerRows = async (req, res) => {
     }
 
     const changedMonths = [];
-    const newInstallmentRows = existingRows.map((existing, i) => {
+    const newInstallmentRows = editedRows === undefined ? existingRows : existingRows.map((existing, i) => {
       const edited = editedRows[i];
       if (Number(edited.month) !== Number(existing.month)) {
         throw Object.assign(new Error(`Row ${i} month mismatch (expected ${existing.month}, got ${edited.month}).`), { httpStatus: 400 });
@@ -1484,7 +1487,50 @@ const editLedgerRows = async (req, res) => {
       return row;
     });
 
-    const newRows = [...(advanceRow ? [advanceRow] : []), ...newInstallmentRows];
+    let finalAdvanceRow = advanceRow;
+    if (editedAdvance && advanceRow) {
+      const amount = parseFloat(editedAdvance.amount);
+      const paidAmount = Math.max(0, parseFloat(editedAdvance.paid_amount) || 0);
+      if (isNaN(amount) || amount < 0) {
+        throw Object.assign(new Error('Advance payment has an invalid amount.'), { httpStatus: 400 });
+      }
+      const status = paidAmount <= 0 ? 'pending' : (paidAmount >= amount ? 'paid' : 'partial');
+
+      const oldPaidAmount = Math.max(0, parseFloat(advanceRow.paid_amount) || 0);
+      const paidAmountChanged = Math.abs(paidAmount - oldPaidAmount) > 0.01;
+      if (paidAmountChanged) changedMonths.push('advance');
+
+      const paymentMethod = editedAdvance.payment_method || advanceRow.payment_method || null;
+
+      finalAdvanceRow = {
+        ...advanceRow,
+        amount,
+        paid_amount: status === 'pending' ? 0 : paidAmount,
+        status,
+        payment_method: status === 'pending' ? null : paymentMethod,
+      };
+
+      if (status === 'pending') {
+        finalAdvanceRow.paid_at = null;
+      } else if (paidAmountChanged || !advanceRow.paid_at) {
+        finalAdvanceRow.paid_at = now();
+      }
+
+      if (paidAmountChanged) {
+        const history = Array.isArray(advanceRow.payment_history) ? [...advanceRow.payment_history] : [];
+        history.push({
+          amount: paidAmount - oldPaidAmount,
+          date: now().toISOString(),
+          method: paymentMethod || 'Manual correction',
+          admin_edit: true,
+          edited_by: req.user.id,
+        });
+        finalAdvanceRow.payment_history = history;
+        finalAdvanceRow.collection_source = 'admin_edit';
+      }
+    }
+
+    const newRows = [...(finalAdvanceRow ? [finalAdvanceRow] : []), ...newInstallmentRows];
 
     await prisma.installmentLedger.update({
       where: { id: ledger.id },

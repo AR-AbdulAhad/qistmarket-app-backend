@@ -236,6 +236,53 @@ const getInventory = async (req, res) => {
     }
 };
 
+// Flat, unpaginated in-stock list for a specific outlet — built for the
+// "pick a real inventory unit" flow on the Order Details page's Product
+// Information edit form (Super Admin correcting a delivered order's product
+// against actual stock, with its real IMEI auto-filled). getInventory above
+// only works for the logged-in outlet user's own outlet and groups/paginates
+// by product name — overkill for a simple picker, and unusable for a Super
+// Admin looking at a DIFFERENT outlet's stock than their own.
+const getOutletInventoryForPicker = async (req, res) => {
+    const { outlet_id, search = '' } = req.query;
+
+    if (!outlet_id) {
+        return res.status(400).json({ success: false, message: 'outlet_id is required.' });
+    }
+
+    // An outlet user may only browse their own outlet's stock; Super Admin
+    // (no fixed outlet) can browse any outlet.
+    if (req.user?.outlet_id && parseInt(outlet_id, 10) !== req.user.outlet_id && req.user?.role !== 'Super Admin') {
+        return res.status(403).json({ success: false, message: 'Not authorized for this outlet.' });
+    }
+
+    try {
+        const rows = await prisma.outletInventory.findMany({
+            where: { outlet_id: parseInt(outlet_id, 10), is_used: false, status: 'In Stock' },
+            orderBy: [{ product_name: 'asc' }, { id: 'asc' }],
+            take: 500,
+        });
+        const filtered = search
+            ? rows.filter((row) => matchesSearch(row, search, ['product_name', 'imei_serial', 'category', 'color_variant']))
+            : rows;
+
+        return res.json({
+            success: true,
+            data: filtered.map((r) => ({
+                id: r.id,
+                product_name: r.product_name,
+                imei_serial: r.imei_serial,
+                category: r.category,
+                color_variant: r.color_variant,
+                installment_price: r.installment_price,
+            })),
+        });
+    } catch (error) {
+        console.error('getOutletInventoryForPicker error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 const getStockTransferInventory = async (req, res) => {
     const { outlet_id } = req.user;
     const { page = 1, limit = 20, search = "" } = req.query;
@@ -1960,6 +2007,7 @@ const searchByImeiGlobal = async (req, res) => {
 
 module.exports = {
     getInventory,
+    getOutletInventoryForPicker,
     getStockTransferInventory,
     getUsedInventory,
     getUsedInventoryReversalHistory,

@@ -17,6 +17,10 @@ const {
   getOrderRecoveryVisits,
   getCustomerFullProfile,
   replaceRecoveryVisitPhoto,
+  deleteRecoveryVisitPhoto,
+  addManualRecoveryVisit,
+  updateRecoveryVisit,
+  deleteRecoveryVisit,
   getRecoveryDashboardStats,
   getRecoveryFuelCharges,
   getRecoveryCollectedPayments,
@@ -80,5 +84,13 @@ router.put(
   fixUploadPath,
   replaceRecoveryVisitPhoto
 );
+
+// Delete recovery visit photo (Super Admin only)
+router.delete('/visit-photo/:photo_id', authenticateJWT, deleteRecoveryVisitPhoto);
+
+// Admin-direct recovery visit management (Super Admin only, enforced in controller)
+router.post('/order/:order_id/visit-manual', authenticateJWT, addManualRecoveryVisit);
+router.patch('/visit/:visit_id', authenticateJWT, updateRecoveryVisit);
+router.delete('/visit/:visit_id', authenticateJWT, deleteRecoveryVisit);
 
 module.exports = router;

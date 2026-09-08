@@ -2972,14 +2972,20 @@ const cancelOrder = async (req, res) => {
 
 const updateOrderItem = async (req, res) => {
   const { id } = req.params;
-  const { product_name, total_amount, advance_amount, monthly_amount, months, imei_serial } = req.body;
+  const {
+    product_name, total_amount, advance_amount, monthly_amount, months, imei_serial,
+    customer_name, whatsapp_number, alternate_contact, address, city, area, zone, block, house_no, street, gender, residential_type, order_notes,
+  } = req.body;
 
-  // imei_serial editing is a new, Super-Admin-only correction tool (added
-  // alongside the verification page's Product & Financial edit UI) — every
-  // other field this endpoint already accepted keeps its existing access so
-  // the pre-delivery "Edit Item" flow elsewhere in the app isn't affected.
-  if (imei_serial !== undefined && req.user?.role !== 'Super Admin') {
-    return res.status(403).json({ success: false, message: 'Only Super Admin can edit IMEI/Serial.' });
+  // imei_serial + the Customer Information fields below are newer,
+  // Super-Admin-only correction tools (added alongside the verification
+  // page's editable sections) — every field this endpoint already accepted
+  // keeps its existing access so the pre-delivery "Edit Item" flow
+  // elsewhere in the app isn't affected.
+  const newFieldValues = [customer_name, whatsapp_number, alternate_contact, address, city, area, zone, block, house_no, street, gender, residential_type, order_notes];
+  const touchingNewFields = imei_serial !== undefined || newFieldValues.some((v) => v !== undefined);
+  if (touchingNewFields && req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit these fields.' });
   }
 
   try {
@@ -3007,6 +3013,19 @@ const updateOrderItem = async (req, res) => {
         monthly_amount: monthly_amount ? parseFloat(monthly_amount) : undefined,
         months: months ? parseInt(months) : undefined,
         ...(imei_serial !== undefined && { imei_serial: imei_serial || null }),
+        ...(customer_name !== undefined && customer_name && { customer_name }),
+        ...(whatsapp_number !== undefined && whatsapp_number && { whatsapp_number }),
+        ...(alternate_contact !== undefined && { alternate_contact: alternate_contact || null }),
+        ...(address !== undefined && address && { address }),
+        ...(city !== undefined && { city: city || null }),
+        ...(area !== undefined && { area: area || null }),
+        ...(zone !== undefined && { zone: zone || null }),
+        ...(block !== undefined && { block: block || null }),
+        ...(house_no !== undefined && { house_no: house_no || null }),
+        ...(street !== undefined && { street: street || null }),
+        ...(gender !== undefined && { gender: gender || null }),
+        ...(residential_type !== undefined && { residential_type: residential_type || null }),
+        ...(order_notes !== undefined && { order_notes: order_notes || null }),
         updated_at: new Date(),
       },
     });

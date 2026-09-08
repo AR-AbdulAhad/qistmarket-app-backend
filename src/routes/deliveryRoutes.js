@@ -25,6 +25,7 @@ const {
   replaceDeliveryUpload,
   addManualDeliveryUpload,
   deleteDeliveryUpload,
+  updateDeliveryDetails,
   getDashboardStats
 } = require('../controllers/deliveryController');
 
@@ -95,5 +96,8 @@ router.post(
 
 // Delete a delivery photo (Super Admin only)
 router.delete('/delivery/upload/:upload_id', authenticateJWT, deleteDeliveryUpload);
+
+// Direct correction of a Delivery record's own fields (Super Admin only)
+router.patch('/delivery/:delivery_id/details', authenticateJWT, updateDeliveryDetails);
 
 module.exports = router;

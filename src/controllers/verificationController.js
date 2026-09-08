@@ -849,6 +849,106 @@ const deleteVerificationLocation = async (req, res) => {
   }
 };
 
+// Direct correction of a VerificationLocation's own fields — Super Admin
+// only. No endpoint previously existed to fix a captured location's own
+// data (only create/replace-photo/delete), matching the same "raw
+// correction tool" need as the ledger/product/verification-details edits.
+const updateVerificationLocation = async (req, res) => {
+  const { location_id } = req.params;
+  const { location_type, label, latitude, longitude, address, person_type } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, error: { code: 403, message: 'Only Super Admin can edit this.' } });
+  }
+
+  try {
+    const existing = await prisma.verificationLocation.findUnique({ where: { id: parseInt(location_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, error: { code: 404, message: 'Location not found' } });
+    }
+
+    const data = {};
+    if (location_type !== undefined) data.location_type = location_type || null;
+    if (label !== undefined) data.label = label || null;
+    if (person_type !== undefined) data.person_type = person_type || null;
+    if (address !== undefined) data.address = address || null;
+    if (latitude !== undefined) {
+      const lat = parseFloat(latitude);
+      data.latitude = isNaN(lat) ? null : lat;
+    }
+    if (longitude !== undefined) {
+      const lng = parseFloat(longitude);
+      data.longitude = isNaN(lng) ? null : lng;
+    }
+
+    const updated = await prisma.verificationLocation.update({
+      where: { id: existing.id },
+      data,
+      include: { photos: true },
+    });
+
+    return res.status(200).json({ success: true, message: 'Location updated successfully', data: { location: updated } });
+  } catch (error) {
+    console.error('updateVerificationLocation error:', error);
+    return res.status(500).json({ success: false, error: { code: 500, message: 'Internal server error' } });
+  }
+};
+
+// Direct correction of a VerificationReview's own fields — Super Admin
+// only. Reviews previously had no per-record edit path (only a bulk
+// delete-all as part of order deletion).
+const updateVerificationReview = async (req, res) => {
+  const { review_id } = req.params;
+  const { approved, remarks } = req.body;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can edit this.' });
+  }
+
+  try {
+    const existing = await prisma.verificationReview.findUnique({ where: { id: parseInt(review_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Review not found.' });
+    }
+
+    const data = {};
+    if (approved !== undefined) data.approved = !!approved;
+    if (remarks !== undefined) data.remarks = remarks || null;
+
+    const updated = await prisma.verificationReview.update({
+      where: { id: existing.id },
+      data,
+      include: { reviewer: { select: { full_name: true, username: true } } },
+    });
+
+    return res.status(200).json({ success: true, message: 'Review updated successfully', data: { review: updated } });
+  } catch (error) {
+    console.error('updateVerificationReview error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
+// Delete a single VerificationReview — Super Admin only.
+const deleteVerificationReview = async (req, res) => {
+  const { review_id } = req.params;
+
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can delete this.' });
+  }
+
+  try {
+    const existing = await prisma.verificationReview.findUnique({ where: { id: parseInt(review_id, 10) } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Review not found.' });
+    }
+    await prisma.verificationReview.delete({ where: { id: existing.id } });
+    return res.status(200).json({ success: true, message: 'Review deleted successfully' });
+  } catch (error) {
+    console.error('deleteVerificationReview error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 // Upload Purchaser Document
 const uploadPurchaserDocument = async (req, res) => {
   const { verification_id } = req.params;
@@ -2421,10 +2521,16 @@ const getDeliveredProductDetails = async (req, res) => {
           imei_serial: inventory.imei_serial,
           purchase_price: inventory.purchase_price,
           installment_price: inventory.installment_price,
-          status: inventory.status
+          status: inventory.status,
+          outlet_id: inventory.outlet_id
         };
       }
     }
+
+    // Older/legacy orders often never got Order.outlet_id set directly — fall
+    // back to the outlet of the inventory unit matched by IMEI above, so the
+    // product picker still knows which outlet's stock to offer.
+    const resolvedOutletId = order.outlet_id || inventoryDetails?.outlet_id || null;
 
     // Extract delivery details
     let deliveryDetails = null;
@@ -2593,7 +2699,8 @@ const getDeliveredProductDetails = async (req, res) => {
         whatsapp_number: order.whatsapp_number,
         is_delivered: order.is_delivered,
         status: order.status,
-        delivered_at: order.updated_at
+        delivered_at: order.updated_at,
+        outlet_id: resolvedOutletId
       },
       product_details: {
         product_name: inventoryDetails ? inventoryDetails.product_name : order.product_name,
@@ -3686,4 +3793,7 @@ module.exports = {
   updateVerificationAssignment,
   updateVerificationDetails,
   deleteLocationPhoto,
+  updateVerificationLocation,
+  updateVerificationReview,
+  deleteVerificationReview,
 };
