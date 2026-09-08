@@ -11,6 +11,14 @@ const now = () => new Date();
 
 const SMARTPAY_TOKEN_URL = 'https://smartpay.com.pk/services/api/v1/token';
 const SMARTPAY_DQR_URL = 'https://smartpay.com.pk/services/api/v1/DQR';
+// SmartPay's IPN `amount` is the gross amount debited from the customer,
+// which includes their own flat service charge on top of the bill amount —
+// e.g. a customer's bank receipt for a Rs 4,950 installment showed a debit
+// of Rs 4,975, and that full Rs 4,975 arrived in our `amount` field too.
+// Applied as-is, the extra Rs 25 spilled into the next installment row via
+// the FIFO loop below, showing up as a bogus "partial" payment on a month
+// the customer never touched. Subtract it before crediting anything.
+const SMARTPAY_SERVICE_CHARGE = 25;
 
 const generateSmartPayQr = async (req, res) => {
     const { order_id, month_number, amount, force_regenerate } = req.body;
@@ -471,18 +479,41 @@ const notifyPayment = async (req, res) => {
 
         let paidDateParsed = now();
         if (timestamp && timestamp.length >= 14) {
-            // format: yyyyddmmhhMMss
+            // Standard yyyyMMddHHmmss (matches 1Link/TPS's tran_date convention
+            // in tpsController.js) in Pakistan local time (PKT, UTC+5, no DST).
+            // This previously read day/month swapped (as if the format were
+            // yyyyddMMHHmmss) and then tagged the result as UTC — together
+            // that shifted confirmed payment times by both a day/month swap
+            // AND 5 hours, e.g. an actual payment at 05 Sep 2026 1:09 PM PKT
+            // was recorded and displayed as 09 May 2026 6:09 PM. Parse in the
+            // real field order and convert PKT -> UTC explicitly instead of
+            // mislabeling PKT digits as UTC.
             const year = timestamp.substring(0, 4);
-            const day = timestamp.substring(4, 6);
-            const month = timestamp.substring(6, 8);
+            const month = timestamp.substring(4, 6);
+            const day = timestamp.substring(6, 8);
             const hours = timestamp.substring(8, 10);
             const minutes = timestamp.substring(10, 12);
             const seconds = timestamp.substring(12, 14);
-            const constructed = new Date(`${year}-${month}-${day}T${hours}:${minutes}:${seconds}Z`);
+            const PKT_OFFSET_MS = 5 * 60 * 60 * 1000;
+            const constructed = new Date(Date.UTC(
+                parseInt(year, 10),
+                parseInt(month, 10) - 1,
+                parseInt(day, 10),
+                parseInt(hours, 10),
+                parseInt(minutes, 10),
+                parseInt(seconds, 10)
+            ) - PKT_OFFSET_MS);
             if (!isNaN(constructed.getTime())) {
                 paidDateParsed = constructed;
             }
         }
+
+        // Net amount actually attributable to the customer's bill/ledger, with
+        // SmartPay's own service charge stripped out (see SMARTPAY_SERVICE_CHARGE
+        // above). `parsedAmountFinal` stays untouched below — it's the exact
+        // gross figure SmartPay reported, kept in smartPayPaymentLog so it can
+        // still be reconciled against SmartPay's own settlement reports.
+        const netAmount = Math.max(0, parsedAmountFinal - SMARTPAY_SERVICE_CHARGE);
 
         // **Officer Cash Submission Flow**
         if (consumer.type === 'officer_cash') {
@@ -521,23 +552,23 @@ const notifyPayment = async (req, res) => {
                     bill_status: 'P',
                     amount_due: 0,
                     cash_submission_ref: null,
-                    amount_paid: parsedAmountFinal,
+                    amount_paid: netAmount,
                     date_paid: paidDateParsed,
                     tran_auth_id: String(transactionId),
                     updated_at: now()
                 }
             });
-            
+
             const io = req.app.get('io');
             if (io && consumer.user_id) {
                 io.to(`user_${consumer.user_id}`).emit('online_cash_submission_completed', {
                     status: 'paid',
-                    amount: parsedAmountFinal,
+                    amount: netAmount,
                     submission_ref: consumer.cash_submission_ref
                 });
                 io.to(`user_${consumer.user_id}`).emit('cash_submission_completed', {
                     status: 'paid',
-                    amount: parsedAmountFinal,
+                    amount: netAmount,
                     submission_ref: consumer.cash_submission_ref
                 });
             }
@@ -594,7 +625,7 @@ const notifyPayment = async (req, res) => {
 
         if (ledger && Array.isArray(ledger.ledger_rows)) {
             let rows = [...ledger.ledger_rows];
-            let remainingAmount = parsedAmountFinal;
+            let remainingAmount = netAmount;
             let paymentApplied = false;
             let lastTouchedRowIndex = -1;
 
@@ -701,7 +732,7 @@ const notifyPayment = async (req, res) => {
                                 rowIndex: lastTouchedRowIndex,
                                 customerName,
                                 productName,
-                                paidAmount: parsedAmountFinal,
+                                paidAmount: netAmount,
                                 paymentMethod: 'SmartPay QR',
                                 paymentDate: paidDateParsed.toLocaleDateString('en-PK'),
                                 transactionId,
@@ -714,7 +745,7 @@ const notifyPayment = async (req, res) => {
                                 rowIndex: lastTouchedRowIndex,
                                 customerName,
                                 productName,
-                                paidAmount: parsedAmountFinal,
+                                paidAmount: netAmount,
                                 paymentMethod: 'SmartPay QR',
                                 paymentDate: paidDateParsed.toLocaleDateString('en-PK'),
                                 transactionId,
@@ -737,7 +768,7 @@ const notifyPayment = async (req, res) => {
                             const notifications = outletUsers.map(u => ({
                                 userId: u.id,
                                 title: 'Online Payment Received',
-                                message: `Received Rs. ${parsedAmountFinal} via SmartPay for Order: ${order.order_ref}`,
+                                message: `Received Rs. ${netAmount} via SmartPay for Order: ${order.order_ref}`,
                                 type: 'payment',
                                 relatedId: order.id,
                                 createdAt: now(),
@@ -756,7 +787,7 @@ const notifyPayment = async (req, res) => {
                     // ── Online payment notification — Admin/Super Admin + outlet ──
                     const io = req.app.get('io');
                     const notifyTitle = 'Online Payment Received';
-                    const notifyMsg = `PKR ${parsedAmountFinal} received online from ${customerName} (Order #${order.order_ref})`;
+                    const notifyMsg = `PKR ${netAmount} received online from ${customerName} (Order #${order.order_ref})`;
                     notifyAdmins(notifyTitle, notifyMsg, 'online_payment', order.id, io)
                         .catch(err => console.error('notifyAdmins error:', err));
                     if (order.outlet_id) {
@@ -831,7 +862,7 @@ const notifyPayment = async (req, res) => {
                         amount_due: accumulatedDue,
                         billing_month: billingMonthStr,
                         due_date: bd,
-                        amount_paid: parsedAmountFinal,
+                        amount_paid: netAmount,
                         date_paid: paidDateParsed,          // ✅ explicit date_paid
                         tran_auth_id: String(transactionId),
                         bank_mnemonic: 'SMARTPAY',
@@ -843,7 +874,7 @@ const notifyPayment = async (req, res) => {
                     where: { ledger_id: consumer.ledger_id },
                     data: {
                         bill_status: 'P',
-                        amount_paid: parsedAmountFinal,
+                        amount_paid: netAmount,
                         date_paid: paidDateParsed,          // ✅ explicit date_paid
                         tran_auth_id: String(transactionId),
                         bank_mnemonic: 'SMARTPAY',
@@ -857,7 +888,7 @@ const notifyPayment = async (req, res) => {
                 where: { ledger_id: consumer.ledger_id },
                 data: {
                     bill_status: 'P',
-                    amount_paid: parsedAmountFinal,
+                    amount_paid: netAmount,
                     date_paid: paidDateParsed,          // ✅ explicit date_paid
                     tran_auth_id: String(transactionId),
                     bank_mnemonic: 'SMARTPAY',
