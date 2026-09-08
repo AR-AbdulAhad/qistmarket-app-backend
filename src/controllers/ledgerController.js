@@ -12,6 +12,7 @@ const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const { logAction } = require('../utils/auditLogger');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
+const { getPaymentInstructionsSettings } = require('../utils/paymentInstructionsSettingsUtils');
 // Was left as an empty string, so both <img src="${logoDataURI}"> spots below
 // rendered as a broken-image icon next to the "QistMarket" alt text on every
 // ledger page and PDF. Points at the frontend's own already-deployed static
@@ -424,6 +425,12 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   // Show whichever number actually produced qrImageSrc — never mix the two formats.
   const displayConsumerNumber = qrProvider === '1Bill' ? billConsumerNumber : smartPayConsumerNumber;
 
+  // Admin-configurable via /admin/security-settings — keeps the button disabled until a link is set.
+  const { payment_instructions_url: paymentInstructionsUrl } = getPaymentInstructionsSettings();
+  const paymentTareeqaButtonHtml = paymentInstructionsUrl
+    ? `<a href="${paymentInstructionsUrl.replace(/"/g, '&quot;')}" target="_blank" rel="noopener" class="btn-primary no-print" style="width:100%;margin-top:14px;display:block;text-align:center;text-decoration:none;box-sizing:border-box;">Payment Karne ka Tareeqa</a>`
+    : `<button class="btn-primary no-print" style="width:100%;margin-top:14px;" disabled>Payment Karne ka Tareeqa</button>`;
+
   const paymentBoxHtml = `
       <div class="section-title" style="color:#0f172a;">SCAN & PAY</div>
       ${displayConsumerNumber ? `
@@ -441,7 +448,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
         <li><span class="pm-dot" style="background:#16a34a;"></span>${paymentProviderLabel}</li>
         <li><span class="pm-dot" style="background:#0ea5e9;"></span>QR Payment</li>
       </ul>
-      <button class="btn-primary no-print" style="width:100%;margin-top:14px;" disabled>Payment Karne ka Tareeqa</button>`;
+      ${paymentTareeqaButtonHtml}`;
 
   const noteBoxHtml = `
       <div class="note-box">

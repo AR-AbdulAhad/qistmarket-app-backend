@@ -2,6 +2,7 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const { getOutletSettings, saveOutletSettings } = require('../utils/settingsUtils');
 const { getOtpSettings, saveOtpSettings } = require('../utils/otpSettingsUtils');
+const { getPaymentInstructionsSettings, savePaymentInstructionsSettings } = require('../utils/paymentInstructionsSettingsUtils');
 
 // Helper: resolve outlet_id from JWT or from DB (for users logged in via main auth)
 const resolveOutletId = async (req) => {
@@ -87,10 +88,46 @@ const updateOtpChannelSettings = async (req, res) => {
     }
 };
 
+const getPaymentInstructionsLink = async (req, res) => {
+    try {
+        const settings = getPaymentInstructionsSettings();
+        return res.json({ success: true, settings });
+    } catch (error) {
+        console.error('getPaymentInstructionsLink error:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+const updatePaymentInstructionsLink = async (req, res) => {
+    try {
+        const { payment_instructions_url } = req.body;
+        if (typeof payment_instructions_url !== 'string') {
+            return res.status(400).json({ success: false, message: 'payment_instructions_url must be a string.' });
+        }
+
+        const trimmed = payment_instructions_url.trim();
+        if (trimmed && !/^https?:\/\//i.test(trimmed)) {
+            return res.status(400).json({ success: false, message: 'Link must start with http:// or https://' });
+        }
+
+        const result = savePaymentInstructionsSettings({ payment_instructions_url: trimmed });
+        if (!result.success) {
+            return res.status(500).json({ success: false, message: result.error || 'Failed to save settings' });
+        }
+
+        return res.json({ success: true, message: 'Payment instructions link updated successfully', settings: result.settings });
+    } catch (error) {
+        console.error('updatePaymentInstructionsLink error:', error);
+        return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     getAutoAssignmentSettings,
     updateAutoAssignmentSettings,
     getOtpChannelSettings,
     updateOtpChannelSettings,
+    getPaymentInstructionsLink,
+    updatePaymentInstructionsLink,
 };
 

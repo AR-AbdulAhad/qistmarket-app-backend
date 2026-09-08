@@ -12,11 +12,13 @@ const {
 } = require('../controllers/adminPanelController');
 const { sendBroadcast, getRoleOptions } = require('../controllers/broadcastController');
 const { commitLegacyImport, listPendingLegacyProfiles, markLegacyProfileComplete } = require('../controllers/legacyImportController');
-const { getOtpChannelSettings, updateOtpChannelSettings } = require('../controllers/settingsController');
+const { getOtpChannelSettings, updateOtpChannelSettings, getPaymentInstructionsLink, updatePaymentInstructionsLink } = require('../controllers/settingsController');
 
 router.get('/users', authenticateJWT, requireSuperAdmin, getUsers);
 router.get('/settings/otp', authenticateJWT, requireSuperAdmin, getOtpChannelSettings);
 router.post('/settings/otp', authenticateJWT, requireSuperAdmin, updateOtpChannelSettings);
+router.get('/settings/payment-instructions', authenticateJWT, requireSuperAdmin, getPaymentInstructionsLink);
+router.post('/settings/payment-instructions', authenticateJWT, requireSuperAdmin, updatePaymentInstructionsLink);
 router.get('/scoring-rules', authenticateJWT, getScoringRulesConfig);
 router.post('/scoring-rules', authenticateJWT, requireSuperAdmin, updateScoringRulesConfig);
 router.post('/scoring-rules/recalculate', authenticateJWT, requireSuperAdmin, triggerRankingsRecalculation);
