@@ -534,6 +534,49 @@ const getCashInHand = async (req, res) => {
     // Re-sort descending for display (newest first)
     groupedHistory.sort((a, b) => new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime());
 
+    // Attach 1Bill/SmartPay consumer numbers to online debits so the officer
+    // (and SmartPay's own reconciliation, which needs the consumer number to
+    // trace a transaction) can still see them after the submission moves out
+    // of "pending" — previously only the submit-cash response carried these,
+    // so they vanished from history the moment the payment was confirmed.
+    // Each online submission gets its own fresh SmartPay consumer number
+    // (see submitCashToOutlet) permanently tied to submission_ref via
+    // cash_submission_ref, so this join stays accurate for old submissions
+    // too. The 1Bill number is reused per-officer, so only the submission
+    // that most recently touched it will resolve one here.
+    const onlineSubmissionRefs = [...new Set(
+      groupedHistory
+        .filter(item => item.type === 'debit' && item.submission_ref)
+        .map(item => item.submission_ref)
+    )];
+
+    if (onlineSubmissionRefs.length > 0) {
+      const consumerRows = await prisma.consumerNumber.findMany({
+        where: { cash_submission_ref: { in: onlineSubmissionRefs } },
+        select: { consumer_number: true, cash_submission_ref: true }
+      });
+
+      const consumerNumbersByRef = {};
+      consumerRows.forEach(row => {
+        if (!consumerNumbersByRef[row.cash_submission_ref]) {
+          consumerNumbersByRef[row.cash_submission_ref] = {};
+        }
+        if (row.consumer_number.startsWith('1017')) {
+          consumerNumbersByRef[row.cash_submission_ref].bill_consumer_number = row.consumer_number;
+        } else if (row.consumer_number.startsWith('6500')) {
+          consumerNumbersByRef[row.cash_submission_ref].smart_pay_consumer_number = row.consumer_number;
+        }
+      });
+
+      groupedHistory.forEach(item => {
+        const match = item.submission_ref && consumerNumbersByRef[item.submission_ref];
+        if (match) {
+          item.bill_consumer_number = match.bill_consumer_number || null;
+          item.smart_pay_consumer_number = match.smart_pay_consumer_number || null;
+        }
+      });
+    }
+
     // Calculate totals and running balance correctly
     const totalCredits = cashEntries.reduce((sum, e) => sum + e.amount, 0);
     const totalDebits = cashEntries.reduce((sum, e) => sum + (e.submitted_amount || 0), 0);

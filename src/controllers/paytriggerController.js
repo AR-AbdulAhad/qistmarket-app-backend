@@ -3,7 +3,7 @@ const pt = require('../services/paytriggerService');
 const { logAction } = require('../utils/auditLogger');
 const { getNormalizedLedger } = require('../utils/ledgerUtils');
 const { sendPtpConfirmation, sendToMany, getCompanyNotifyPhones, sendOverdueInstallment, sendGuarantorOverdue } = require('../services/watiService');
-const { completePendingPaytriggerDelivery } = require('../services/deliveryCompletionService');
+const { completePendingPaytriggerDelivery, completePendingDeliveryWithManualLockPhoto } = require('../services/deliveryCompletionService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
@@ -478,7 +478,7 @@ async function submitManualLockPhoto(req, res) {
     }
 
     const io = req.app.get('io');
-    const result = await deliveryCompletionService.completePendingDeliveryWithManualLockPhoto({
+    const result = await completePendingDeliveryWithManualLockPhoto({
       orderId: order_id,
       fileUrl,
       user: req.user,
