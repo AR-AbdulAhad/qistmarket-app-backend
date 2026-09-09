@@ -70,6 +70,7 @@ const {
   createScheduledPayment,
   getScheduledPayments,
   updateScheduledPaymentStatus,
+  getVendorList,
 } = require('../controllers/accountsVendorController');
 const {
   getCustomerPaymentSchedule,
@@ -175,6 +176,7 @@ router.post('/expenses/:id/invoice', upload.single('file'), uploadExpenseInvoice
 router.get('/expenses/salary', getSalaryExpenses);
 
 // Vendors (HO creation, vendor cash-in-hand, aging, alerts, scheduling)
+router.get('/vendors', getVendorList);
 router.post('/vendors', createHeadOfficeVendor);
 router.post('/vendors/cash-transactions', recordVendorCashTransaction);
 router.get('/vendors/:vendor_id/cash-ledger', getVendorCashLedger);

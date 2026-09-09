@@ -227,6 +227,42 @@ const updateScheduledPaymentStatus = async (req, res) => {
     }
 };
 
+/**
+ * getVendorList
+ * Company-wide vendor directory (head office + every outlet's vendors),
+ * search-filterable — the Vendors page has always been able to create a
+ * vendor and log a cash transaction against a typed-in vendor_id, but had
+ * no way to browse/find one first. vendorController.getVendors can't serve
+ * this: it 403s any user without req.user.outlet_id, which is every
+ * Accountant/Super Admin token.
+ */
+const getVendorList = async (req, res) => {
+    try {
+        const { search } = req.query;
+        const outletFilter = getOutletFilter(req);
+
+        const vendors = await prisma.vendor.findMany({
+            where: {
+                ...outletFilter,
+                ...(search ? {
+                    OR: [
+                        { name: { contains: search, mode: 'insensitive' } },
+                        { phone: { contains: search, mode: 'insensitive' } },
+                    ],
+                } : {}),
+            },
+            include: { outlet: { select: { id: true, name: true } } },
+            orderBy: { name: 'asc' },
+            take: 200,
+        });
+
+        res.json({ success: true, data: vendors });
+    } catch (error) {
+        console.error('getVendorList error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
 module.exports = {
     createHeadOfficeVendor,
     recordVendorCashTransaction,
@@ -236,4 +272,5 @@ module.exports = {
     createScheduledPayment,
     getScheduledPayments,
     updateScheduledPaymentStatus,
+    getVendorList,
 };
