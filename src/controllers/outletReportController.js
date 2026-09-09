@@ -163,19 +163,14 @@ const getStockSummary = async (req, res) => {
                 acc[key].sold += item.quantity;
             }
 
-            // Valuation = capital still tied up in stock as of the selected End Date,
-            // not just "what's in stock right now" — so it actually reacts to the date
-            // filter instead of showing the same number for every range. A unit counts
-            // if it had already been purchased by End Date AND was still unsold at that
-            // point: either it's in stock today (and was bought by then), or it shows
-            // "Sold" today but its sale (updated_at, our sale-date proxy) came after End
-            // Date — meaning it was still sitting in stock at that point in time. With no
-            // End Date selected this collapses to "purchased any time, still in stock
-            // today", i.e. the original always-current behavior.
-            const purchasedByEnd = !dateFilter.lte || new Date(item.created_at) <= dateFilter.lte;
-            const heldAsOfEnd = item.status === 'In Stock'
-                || (item.status === 'Sold' && dateFilter.lte && new Date(item.updated_at) > dateFilter.lte);
-            if (purchasedByEnd && heldAsOfEnd) {
+            // Valuation = purchase cost of what is physically in stock right now — the
+            // same "In Stock" rows counted above in inStock, so this card always agrees
+            // with the "Total Items in Stock" card and with a manual shelf count × cost
+            // price. It deliberately does NOT change with the From/To date filters
+            // (matching inStock, which also doesn't) — a date-dependent "value as of
+            // that date" number looked inconsistent next to a date-independent stock
+            // count and was confusing for outlet staff to reconcile by hand.
+            if (item.status === 'In Stock') {
                 // Sum each physical unit's actual purchase price (not qty × a single
                 // representative price) — units bought in different batches can have
                 // different prices.
