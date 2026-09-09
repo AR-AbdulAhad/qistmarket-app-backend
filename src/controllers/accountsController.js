@@ -245,10 +245,15 @@ const getRecoveryAnalytics = async (req, res) => {
                 outletMap[outletKey].due += amount;
                 officerMap[officerKey].due += amount;
 
-                if (row.status === 'paid') {
-                    totalRecovered += amount;
-                    outletMap[outletKey].recovered += amount;
-                    officerMap[officerKey].recovered += amount;
+                // A "partial" row has already collected some money against it — crediting
+                // only fully-"paid" rows counted that row's full due amount in totalDue
+                // but zero in totalRecovered, understating recovery % on every outlet/
+                // officer that has any partial payment.
+                const recoveredAmount = row.status === 'paid' ? amount : parseFloat(row.paidAmount || 0);
+                if (recoveredAmount > 0) {
+                    totalRecovered += recoveredAmount;
+                    outletMap[outletKey].recovered += recoveredAmount;
+                    officerMap[officerKey].recovered += recoveredAmount;
                 }
             }
         }
@@ -390,6 +395,11 @@ const getInstallmentAging = async (req, res) => {
 
                 const dueDate = new Date(row.dueDate);
                 const daysOverdue = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
+                // Not yet due — this is "aging" (how overdue something is), not a
+                // general outstanding-balance report, so a future due date has no
+                // bucket. Without this, not-yet-due balances were falling into
+                // "0-30 Days" and inflating that tile with money that isn't overdue.
+                if (daysOverdue < 0) continue;
                 const outstanding = parseFloat(row.remainingAmount ?? ((row.amount || 0) - (row.paidAmount || 0)));
                 if (!(outstanding > 0)) continue;
 

@@ -157,17 +157,29 @@ const getStockSummary = async (req, res) => {
             if (item.status === 'In Stock') {
                 acc[key].total += item.quantity;
                 acc[key].inStock += item.quantity;
-                // Sum each physical unit's actual purchase price (not qty × a single
-                // representative price) so this matches the Stock List page exactly —
-                // units bought in different batches can have different prices.
-                acc[key].valuation += item.purchase_price * item.quantity;
                 if (item.imei_serial) acc[key].serials.push(item.imei_serial);
             } else if (item.status === 'Sold' && includeSold) {
                 acc[key].total += item.quantity;
                 acc[key].sold += item.quantity;
-                // Sold units are no longer capital tied up in inventory — they're
-                // tracked in "total"/"sold" for movement, but must NOT be added into
-                // "valuation", which represents current stock value only.
+            }
+
+            // Valuation = capital still tied up in stock as of the selected End Date,
+            // not just "what's in stock right now" — so it actually reacts to the date
+            // filter instead of showing the same number for every range. A unit counts
+            // if it had already been purchased by End Date AND was still unsold at that
+            // point: either it's in stock today (and was bought by then), or it shows
+            // "Sold" today but its sale (updated_at, our sale-date proxy) came after End
+            // Date — meaning it was still sitting in stock at that point in time. With no
+            // End Date selected this collapses to "purchased any time, still in stock
+            // today", i.e. the original always-current behavior.
+            const purchasedByEnd = !dateFilter.lte || new Date(item.created_at) <= dateFilter.lte;
+            const heldAsOfEnd = item.status === 'In Stock'
+                || (item.status === 'Sold' && dateFilter.lte && new Date(item.updated_at) > dateFilter.lte);
+            if (purchasedByEnd && heldAsOfEnd) {
+                // Sum each physical unit's actual purchase price (not qty × a single
+                // representative price) — units bought in different batches can have
+                // different prices.
+                acc[key].valuation += item.purchase_price * item.quantity;
             }
 
             return acc;
