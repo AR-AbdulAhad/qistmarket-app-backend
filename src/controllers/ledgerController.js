@@ -2,7 +2,6 @@ const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const puppeteer = require('puppeteer');
 const axios = require('axios');
-const qrcode = require('qrcode');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { generateDqr } = require('../utils/smartPayGateway');
 const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services/watiService');
@@ -256,35 +255,40 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   };
   const purchaserMapUrl = purchaser ? verificationMapUrl('purchaser', purchaser.id) : null;
 
-  // Two distinct consumer-number formats live in consumer_numbers — SmartPay
-  // only accepts its own "6500"-prefixed one on the live /DQR API; the 1Bill
-  // ("1017100015"-prefixed) one is for the locally-built EMVCo fallback QR
-  // and on-page display only. Mixing them up sent SmartPay 1Bill-format
-  // numbers on every live DQR call, which they flagged as invalid Bill Number
-  // format (see plan doc for the incident this fixes).
+  // SmartPay is the only live gateway — 1Bill was never actually turned on,
+  // so the locally-built 1Bill EMVCo QR below used to be shown as a
+  // fallback whenever SmartPay failed (or whenever the cached QR just
+  // didn't have a "6500"-prefixed number to match against). That meant
+  // customers would sometimes get a real SmartPay QR and sometimes a
+  // non-functional 1Bill one with no visible difference between the two.
+  // Only ever generate/show SmartPay now; if it's unreachable, say so
+  // instead of handing out a QR that doesn't actually work.
   const consumerNumberRows = ledger.consumer_numbers || [];
   const smartPayConsumerNumber = consumerNumberRows.find((c) => c.consumer_number.startsWith('6500'))?.consumer_number || null;
-  let billConsumerNumber = consumerNumberRows.find((c) => !c.consumer_number.startsWith('6500'))?.consumer_number || null;
-  if (!billConsumerNumber && order?.id) {
-    billConsumerNumber = `1017100015${String(order.id).slice(-6).padStart(6, '0')}`;
-  }
 
-  const smartPayQr = order.smart_pay_qrs?.[0] || null;
-  let qrImageSrc = smartPayQr?.qr_image_base64 || null;
-  // Tracks which gateway actually produced qrImageSrc, so the "Powered by"
-  // branding and payment-method labels below reflect the real source instead
-  // of always claiming 1Bill — SmartPay is the live/working gateway, 1Bill is
-  // only a last-resort EMVCo QR built locally when SmartPay is unreachable.
-  let qrProvider = smartPayQr ? 'SmartPay' : null;
+  // The QR has to reflect what's actually owed right now — a cached QR is
+  // only reused while it's both unexpired AND still for the current total
+  // outstanding balance; otherwise (expired, or the balance moved since it
+  // was generated) it's regenerated live so the code always scans for the
+  // real current amount instead of a stale one.
+  const cachedSmartPayQr = order.smart_pay_qrs?.[0] || null;
+  const cachedQrIsFresh =
+    cachedSmartPayQr &&
+    cachedSmartPayQr.amount === remainingAmount &&
+    (!cachedSmartPayQr.expires_at || new Date(cachedSmartPayQr.expires_at) > now());
 
-  // 1. Try SmartPay Gateway API DQR generation to get the exact SmartPay QR image
-  //    — only ever with a real "6500"-prefixed SmartPay number, never the 1Bill one.
-  if (!qrImageSrc && smartPayConsumerNumber) {
+  let qrImageSrc = cachedQrIsFresh ? cachedSmartPayQr.qr_image_base64 : null;
+  let qrProvider = qrImageSrc ? 'SmartPay' : null;
+
+  // Generate live for the full outstanding balance when there's no
+  // still-valid cached QR — only ever with a real "6500"-prefixed SmartPay
+  // number, and only while there's actually something left to pay.
+  if (!qrImageSrc && smartPayConsumerNumber && remainingAmount > 0) {
     try {
       const dqrRes = await generateDqr({
         consumerNumber: smartPayConsumerNumber,
         consumerDetail: customerName,
-        amount: monthlyInstallment || 0,
+        amount: remainingAmount,
         cellNo: phone || '',
         referenceInfo: `QIST-${order.id}-${Date.now()}`.substring(0, 30),
       });
@@ -294,22 +298,6 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       }
     } catch (dqrErr) {
       console.error('[LedgerController] SmartPay generateDqr error:', dqrErr);
-    }
-  }
-
-  // 2. High-density EMVCo 1Bill DQR Payload String fallback (matches Picture 1 matrix density)
-  if (!qrImageSrc && billConsumerNumber) {
-    try {
-      const formattedAmount = parseFloat(monthlyInstallment || 0).toFixed(2);
-      const emvCoPayload = `00020101021226580016A0000006770101110216${billConsumerNumber}5204599953035865405${formattedAmount}5802PK5911Qist Market6007Karachi6304`;
-      qrImageSrc = await qrcode.toDataURL(emvCoPayload, {
-        errorCorrectionLevel: 'H',
-        margin: 2,
-        width: 350,
-      });
-      qrProvider = '1Bill';
-    } catch (qrErr) {
-      console.error('qrcode.toDataURL fallback error:', qrErr);
     }
   }
 
@@ -421,9 +409,8 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       <div class="info-row"><span class="info-label">Phone</span><span class="info-val">${QIST_SUPPORT_PHONE}</span></div>
       ${mapsUrl ? `<a class="btn-outline" style="margin-top:10px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a>` : ''}`;
 
-  const paymentProviderLabel = qrProvider || 'SmartPay';
-  // Show whichever number actually produced qrImageSrc — never mix the two formats.
-  const displayConsumerNumber = qrProvider === '1Bill' ? billConsumerNumber : smartPayConsumerNumber;
+  const paymentProviderLabel = 'SmartPay';
+  const displayConsumerNumber = smartPayConsumerNumber;
 
   // Admin-configurable via /admin/security-settings — keeps the button disabled until a link is set.
   const { payment_instructions_url: paymentInstructionsUrl } = getPaymentInstructionsSettings();
@@ -440,8 +427,10 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
         <button class="copy-btn no-print" onclick="navigator.clipboard.writeText('${displayConsumerNumber}').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);})">Copy</button>
       </div>` : ''}
       <div class="qr-box">
-        <img src="${qrImageSrc}" alt="Scan & Pay QR" />
-        <p>Powered by <strong>${paymentProviderLabel.toUpperCase()}</strong></p>
+        ${qrImageSrc
+          ? `<img src="${qrImageSrc}" alt="Scan & Pay QR" />
+        <p>Powered by <strong>${paymentProviderLabel.toUpperCase()}</strong></p>`
+          : `<p style="color:#94a3b8;font-size:0.8rem;padding:20px 0;">QR abhi generate nahi ho saka. Thodi dair baad page refresh karein ya outlet se rabta karein.</p>`}
       </div>
       <div class="section-title" style="color:#0f172a;margin-top:20px;">PAYMENT METHODS</div>
       <ul class="payment-methods-list">

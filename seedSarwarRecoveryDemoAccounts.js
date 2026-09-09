@@ -49,6 +49,12 @@ function addDays(date, days) {
 async function cleanup() {
     console.log('Cleaning up any previously seeded demo accounts...');
 
+    const existingOrders = await prisma.order.findMany({
+        where: { order_ref: { in: ORDER_REFS } },
+        select: { id: true },
+    });
+    const orderIds = existingOrders.map(o => o.id);
+
     await prisma.payTriggerDevice.deleteMany({ where: { order_ref: { in: ORDER_REFS } } });
     await prisma.recoveryVisit.deleteMany({ where: { order: { order_ref: { in: ORDER_REFS } } } });
     await prisma.installmentLedger.deleteMany({ where: { order: { order_ref: { in: ORDER_REFS } } } });
@@ -58,6 +64,22 @@ async function cleanup() {
     await prisma.purchaserVerification.deleteMany({ where: { verification: { order: { order_ref: { in: ORDER_REFS } } } } });
     await prisma.verification.deleteMany({ where: { order: { order_ref: { in: ORDER_REFS } } } });
     await prisma.orderPayment.deleteMany({ where: { order: { order_ref: { in: ORDER_REFS } } } });
+    // Extra order_id-referencing tables that don't have a Prisma relation
+    // field back to Order to filter through — go by the raw order ids
+    // instead. Anything created as a side effect of a previous seed run
+    // (status history logging, cash-in-hand entries, etc.) needs clearing
+    // before the Order rows themselves can be deleted.
+    if (orderIds.length > 0) {
+        await prisma.orderStatusHistory.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.cashInHand.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.dummyCustomer.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.returnExchange.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.orderProductHistory.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.smartPayQr.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.discountRequest.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.archivedDelivery.deleteMany({ where: { order_id: { in: orderIds } } });
+        await prisma.complaint.updateMany({ where: { order_id: { in: orderIds } }, data: { order_id: null } });
+    }
     await prisma.order.deleteMany({ where: { order_ref: { in: ORDER_REFS } } });
     await prisma.customer.deleteMany({ where: { mobile: { in: TEST_MOBILES } } });
 

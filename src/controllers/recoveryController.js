@@ -2,7 +2,6 @@ const prisma = require('../../lib/prisma');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const {
-  sendNextInstallmentReminder,
   sendPtpConfirmation,
   sendToMany,
   getCompanyNotifyPhones,
@@ -1353,19 +1352,12 @@ const submitInstallment = async (req, res) => {
       })).catch(err => console.error('Wati Partial Payment Error:', err));
     }
 
-    // Send Next Month Reminder if exists — skipped on the full-paid branch
-    // above since sendQistReceiving already carries the next-installment info.
-    const ledgerUrl = ledger.short_id ? `${ledger.short_id}` : null;
-    const nextRow = rows[rowIndex + 1];
-    if (nextRow && totalPaid < dueAmount) {
-      sendToMany(notifyPhones, (p) => sendNextInstallmentReminder(p, {
-        customerName,
-        productName: finalProductName,
-        monthlyAmount: nextRow.amount || nextRow.dueAmount,
-        dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
-        ledgerUrl
-      })).catch(err => console.error('Wati Reminder Error:', err));
-    }
+    // Note: the next-installment reminder is intentionally NOT sent here —
+    // it used to fire on every partial payment (in addition to the receipt
+    // above), which meant the customer got a "your next installment is due"
+    // message immediately after just paying, on both the Simple Payment and
+    // Visit flows. Reminders are handled solely by the daily
+    // installmentReminderService cron job instead.
 
     // Officer set a new Promise to Pay during this visit — send a dedicated
     // confirmation so the customer actually sees the promised date (the
@@ -2217,10 +2209,16 @@ const getRecoveryDashboardStats = async (req, res) => {
         if (last3Rows.length >= 3) {
           const totalPaidInPeriod = last3Rows.reduce((s, r) => s + (r.paidAmount || 0), 0);
           if (totalPaidInPeriod === 0) {
-            const missedAmount = last3Rows.reduce((s, r) => s + (r.dueAmount || 0), 0);
+            // last3Rows is only the 3-month ELIGIBILITY window. Once an
+            // account qualifies as a defaulter, the amount actually owed is
+            // every overdue unpaid installment — an account overdue for 4+
+            // months must show all of it, not just the most recent 3
+            // months' worth (which under-counts and drops whatever went
+            // overdue before that window).
+            const missedAmount = overdueRows.reduce((s, r) => s + (r.remainingAmount || 0), 0);
             defaulterAccounts.push({
               orderId, orderRef, customerName, cnicNumber, itemName,
-              missedMonths: last3Rows.length,
+              missedMonths: overdueRows.length,
               missedAmount,
               totalRemaining: normalized.summary.totalInstallmentRemaining,
               dueAmount: missedAmount,

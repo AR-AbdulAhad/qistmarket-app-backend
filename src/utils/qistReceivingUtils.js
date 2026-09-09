@@ -194,10 +194,26 @@ async function sendPartialPaymentForRow(phone, {
   try {
     const row = rows[rowIndex] || {};
     const installmentAmount = parseFloat(row.amount || row.dueAmount || 0);
-    const installmentRemaining = Math.max(0, installmentAmount - parseFloat(row.paid_amount || 0));
+
+    // "Due Remaining" — everything currently due, not just this one row's
+    // own share: every unpaid row whose due date has already arrived (this
+    // row included), so a customer who's behind on more than one month sees
+    // the real total they need to clear, the same "everything currently
+    // overdue" definition used elsewhere (recoveryController's defaulter/
+    // overdue due-amount calc).
+    const todayDateOnly = new Date();
+    todayDateOnly.setHours(0, 0, 0, 0);
+    const installmentRemaining = rows.reduce((sum, r) => {
+      if (r.status === 'paid') return sum;
+      const d = r.due_date || r.dueDate ? new Date(r.due_date || r.dueDate) : null;
+      if (!d || isNaN(d.getTime()) || d > todayDateOnly) return sum; // not due yet
+      const due = parseFloat(r.amount || r.dueAmount || 0);
+      const paid = parseFloat(r.paid_amount || 0);
+      return sum + Math.max(0, due - paid);
+    }, 0);
 
     // Total remaining across the whole loan — every row not yet fully paid,
-    // this one included since it's still only partially settled.
+    // due or not, this one included since it's still only partially settled.
     const remainingBalance = rows.reduce((sum, r) => {
       if (r.status === 'paid') return sum;
       const due = parseFloat(r.amount || r.dueAmount || 0);
