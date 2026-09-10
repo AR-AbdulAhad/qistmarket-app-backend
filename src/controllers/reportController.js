@@ -19,6 +19,15 @@ const getReportSummary = async (req, res) => {
       baseWhere.created_at = createdFilter;
     }
 
+    // For delivered orders, also filter by delivered_at to match the delivered orders list
+    const deliveredWhere = { ...baseWhere, status: 'delivered' };
+    if (createdFilter) {
+      deliveredWhere.OR = [
+        { delivered_at: createdFilter },
+        { AND: [{ delivered_at: null }, { updated_at: createdFilter }] }
+      ];
+    }
+
     if (status) {
       const list = String(status)
         .split(',')
@@ -79,12 +88,12 @@ const getReportSummary = async (req, res) => {
       prisma.order.groupBy({
         by: ['created_at'],
         _sum: { total_amount: true, advance_amount: true },
-        where: { ...baseWhere, is_delivered: true },
+        where: deliveredWhere,
       }),
       prisma.order.count({ where: baseWhere }),
       prisma.installmentLedger.findMany({
         where: {
-          order: baseWhere,
+          order: deliveredWhere,
         },
         select: {
           ledger_rows: true
@@ -111,6 +120,18 @@ const getReportSummary = async (req, res) => {
           }
         }
       }
+    }
+
+    // When filtering by date range, also calculate total sales amount from delivered orders
+    let totalSalesAmount = 0;
+    if (createdFilter) {
+      const deliveredSalesAgg = await prisma.order.aggregate({
+        where: deliveredWhere,
+        _sum: {
+          total_amount: true,
+        },
+      });
+      totalSalesAmount = deliveredSalesAgg._sum.total_amount || 0;
     }
 
     const collectionResults = [
@@ -171,7 +192,7 @@ const getReportSummary = async (req, res) => {
 
     const totalCustomers = totalOrders;
 
-    totalReceived = totalAdvance + totalInstallments;
+    const totalReceived = totalAdvance + totalInstallments;
 
     // Simple pending estimate based on orders in range
     const pendingAgg = await prisma.order.aggregate({
@@ -181,7 +202,7 @@ const getReportSummary = async (req, res) => {
       },
     });
     const grossAmount = pendingAgg._sum.total_amount || 0;
-    totalPending = Math.max(0, grossAmount - totalReceived);
+    const totalPending = Math.max(0, grossAmount - totalReceived);
 
     return res.json({
       success: true,
@@ -197,6 +218,7 @@ const getReportSummary = async (req, res) => {
           ordersByStatus,
           totalReceived,
           totalPending,
+          totalSalesAmount,
         },
         breakdown: {
           byChannel,
