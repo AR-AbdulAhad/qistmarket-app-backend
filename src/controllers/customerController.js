@@ -19,6 +19,122 @@ function computeDaysOverdue(rows) {
   return maxDays;
 }
 
+const cleanValue = (value) => (typeof value === 'string' && value.trim() && value.trim() !== '-' ? value.trim() : null);
+
+// Addresses reach us in two shapes: the app's composed
+// "H# .., St# .., Block .., <Zone>, <Area>, <City>" (see customAddressZone.dart)
+// and free-typed legacy text. Folding both onto the same token stream lets one
+// matcher serve both — punctuation, the "No."/"#" noise and the hyphens in
+// "Gulshan-e-Iqbal" carry no meaning for the comparison.
+const normalizeAddressText = (value) =>
+  (value || '')
+    .toLowerCase()
+    .replace(/[.,#/\\()]/g, ' ')
+    .replace(/[-_]+/g, ' ')
+    // "no1" / "13d" / "5a" are written both ways in the wild — splitting the
+    // letter/digit seam makes "Landhi No1" and "Landhi No. 1" the same tokens.
+    .replace(/([a-z])(\d)/g, '$1 $2')
+    .replace(/(\d)([a-z])/g, '$1 $2')
+    .replace(/\bblk\b/g, 'block')
+    .replace(/\bsect?r?\b/g, 'sector')
+    .replace(/\bno\b/g, ' ')
+    // The "-e-" connector in Gulshan-e-Iqbal / Khayaban-e-Ittehad is dropped as
+    // often as it is typed; ignoring it on both sides makes the two spellings equal.
+    .replace(/\be\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * Builds an area resolver over the Area/Zone tables.
+ *
+ * Only a minority of records carry a structured `present_area` — the rest keep
+ * the area buried inside the address string, which is why the Area column read
+ * "-" for so many rows. The resolver walks three tiers, widest confidence first,
+ * and reports which tier answered so the UI can flag the weaker ones.
+ */
+const buildAreaResolver = (areaNames, zoneNames) => {
+  // Longest name first: "Korangi No. 3.5" must win over the "Korangi" that is
+  // also a substring of it.
+  const toIndex = (names) =>
+    names
+      .map((name) => ({ name: (name || '').trim(), norm: normalizeAddressText(name) }))
+      .filter((entry) => entry.name && entry.norm)
+      .sort((a, b) => b.norm.length - a.norm.length);
+
+  const areaIndex = toIndex(areaNames);
+  const zoneIndex = toIndex(zoneNames);
+
+  // Space-padded containment = whole-token match, so "Gulberg" cannot be found
+  // inside "Gulbergabad" while "Gulberg Town" still matches mid-address.
+  const findIn = (index, text) => {
+    const normalized = normalizeAddressText(text);
+    if (!normalized) return null;
+    const haystack = ` ${normalized} `;
+    return index.find((entry) => haystack.includes(` ${entry.norm} `))?.name || null;
+  };
+
+  return ({ areas = [], addresses = [], landmarks = [] }) => {
+    const structured = areas.map(cleanValue).find(Boolean);
+    if (structured) return { area: structured, source: 'field' };
+
+    for (const text of [...addresses, ...landmarks]) {
+      const match = findIn(areaIndex, text);
+      if (match) return { area: match, source: 'address' };
+    }
+
+    // Nothing matched a real area. The composed address still ends
+    // "<Zone>, <City>" when the officer skipped the area dropdown, so fall back
+    // to the district rather than showing nothing. Landmarks are excluded here —
+    // a one-word zone name matches far too easily inside free text.
+    for (const text of addresses) {
+      const match = findIn(zoneIndex, text);
+      if (match) return { area: match, source: 'zone' };
+    }
+
+    return { area: null, source: null };
+  };
+};
+
+const AUTO_BLACKLIST_REASON = 'Auto-flagged (90+ days delinquency)';
+const NINETY_DAYS_MS = 90 * 86400000;
+
+/**
+ * Replays the 90-day rule from syncBlacklistStatus to recover WHEN an account
+ * was automatically blacklisted.
+ *
+ * Accounts flagged before BlacklistAction logging existed have no audit row at
+ * all, which is why their Blacklist Date read "Not recorded". The rule itself is
+ * deterministic, so the trigger date can be recomputed: 90 days past the
+ * earliest unpaid installment, or 90 days past delivery when nothing was ever
+ * paid. Whichever came first is the day the account first qualified.
+ */
+const deriveAutoFlagDate = (installmentLedger, deliveredAt) => {
+  const rows = Array.isArray(installmentLedger) ? installmentLedger : [];
+  if (rows.length === 0) return null;
+
+  const isPaid = (row) => (row.status || '').toLowerCase() === 'paid';
+  const triggers = [];
+
+  const unpaidDueDates = rows
+    .filter((row) => !isPaid(row))
+    .map((row) => (row.dueDate ? new Date(row.dueDate) : null))
+    .filter((date) => date && !isNaN(date.getTime()))
+    .map((date) => date.getTime());
+  if (unpaidDueDates.length) triggers.push(Math.min(...unpaidDueDates) + NINETY_DAYS_MS);
+
+  const delivered = deliveredAt ? new Date(deliveredAt) : null;
+  if (rows.every((row) => !isPaid(row)) && delivered && !isNaN(delivered.getTime())) {
+    triggers.push(delivered.getTime() + NINETY_DAYS_MS);
+  }
+
+  if (!triggers.length) return null;
+
+  const earliest = Math.min(...triggers);
+  // A trigger still in the future means the automatic rule never fired for this
+  // account — it was blacklisted by hand, so don't invent an automatic date.
+  return earliest > Date.now() ? null : new Date(earliest);
+};
+
 const getCustomers = async (req, res) => {
   const {
     page = 1,
@@ -347,15 +463,14 @@ const getBlacklistedCustomers = async (req, res) => {
       select: { imei_serial: true, product_name: true, color_variant: true }
     });
 
-    const knownAreas = await prisma.area.findMany({ select: { name: true } });
-    const cleanValue = (value) => typeof value === 'string' && value.trim() && value.trim() !== '-' ? value.trim() : null;
-    const resolveArea = (order, purchaser) => {
-      const structured = cleanValue(purchaser?.present_area) || cleanValue(order.area) || cleanValue(purchaser?.permanent_area);
-      if (structured) return structured;
-      const address = (purchaser?.present_address || order.address || '').toLowerCase();
-      return knownAreas.filter(a => address.split(',').some(part => part.trim() === a.name.toLowerCase()))
-        .sort((a, b) => b.name.length - a.name.length)[0]?.name || null;
-    };
+    const [knownAreas, knownZones] = await Promise.all([
+      prisma.area.findMany({ select: { name: true } }),
+      prisma.zone.findMany({ select: { name: true } }),
+    ]);
+    const resolveArea = buildAreaResolver(
+      knownAreas.map(a => a.name),
+      knownZones.map(z => z.name)
+    );
 
     const inventoryMap = new Map();
     for (const inv of inventories) {
@@ -392,20 +507,33 @@ const getBlacklistedCustomers = async (req, res) => {
       // Full guarantor roster for this order — surfaced so the UI can nest
       // guarantor details under the customer row instead of only exposing
       // the "which role triggered the blacklist" badge.
-      const guarantors = (order.verification?.grantors || []).map((g) => ({
-        id: g.id,
-        name: g.name,
-        cnic_number: g.cnic_number || null,
-        telephone_number: g.telephone_number || null,
-        relationship: g.relationship || null,
-        grantor_number: g.grantor_number,
-        area: g.present_area || g.permanent_area || null,
-        present_address: g.present_address || null,
-        permanent_address: g.permanent_address || null,
-        is_blacklisted: !!g.is_blacklisted,
-      }));
+      const guarantors = (order.verification?.grantors || []).map((g) => {
+        const resolvedArea = resolveArea({
+          areas: [g.present_area, g.permanent_area],
+          addresses: [g.present_address, g.full_residential_address, g.permanent_address],
+          landmarks: [g.nearest_location],
+        });
+        return {
+          id: g.id,
+          name: g.name,
+          cnic_number: g.cnic_number || null,
+          telephone_number: g.telephone_number || null,
+          relationship: g.relationship || null,
+          grantor_number: g.grantor_number,
+          area: resolvedArea.area,
+          area_source: resolvedArea.source,
+          present_address: g.present_address || null,
+          permanent_address: g.permanent_address || null,
+          is_blacklisted: !!g.is_blacklisted,
+        };
+      });
 
       if (!customerMap.has(key)) {
+        const resolvedArea = resolveArea({
+          areas: [purchaser?.present_area, order.area, purchaser?.permanent_area],
+          addresses: [purchaser?.present_address, order.address, purchaser?.permanent_address],
+          landmarks: [purchaser?.nearest_location],
+        });
         customerMap.set(key, {
           customer: {
             name: customerName,
@@ -417,11 +545,17 @@ const getBlacklistedCustomers = async (req, res) => {
             permanent_address: purchaser?.permanent_address || null,
             nearest_location: purchaser?.nearest_location || null,
             city: order.city,
-            area: resolveArea(order, purchaser),
+            area: resolvedArea.area,
+            // 'field' = stored area column, 'address' = parsed out of the address
+            // text, 'zone' = only the district could be identified.
+            area_source: resolvedArea.source,
             profile_photo: profilePhoto,
             is_blacklisted: isAccountBlacklisted, // Marker for UI
             created_at: order.created_at,
             delivered_at: order.delivered_at || delivery?.end_time || order.statusHistories?.[0]?.created_at || null,
+            // Replayed 90-day trigger, filled in below — the fallback for
+            // accounts blacklisted before BlacklistAction rows were written.
+            auto_flag_date: null,
             blacklisted_role: blacklistedRole,
             recovery_officer_name: order.recovery_officer?.full_name || null,
             guarantors,
@@ -476,6 +610,13 @@ const getBlacklistedCustomers = async (req, res) => {
       const { due: orderDue, current: orderCurrent } = computeDueAndCurrent(installmentLedger);
       const orderDaysOverdue = computeDaysOverdue(installmentLedger);
 
+      // Earliest day any of this account's orders crossed the automatic
+      // 90-day threshold — used as the blacklist date when no audit row exists.
+      const orderAutoFlagDate = deriveAutoFlagDate(installmentLedger, group.customer.delivered_at);
+      if (orderAutoFlagDate && (!group.customer.auto_flag_date || orderAutoFlagDate < group.customer.auto_flag_date)) {
+        group.customer.auto_flag_date = orderAutoFlagDate;
+      }
+
       group.ledgerSummary.totalOrders += 1;
       group.ledgerSummary.totalAdvanceReceived += advanceAmount;
       group.ledgerSummary.totalPaid += grandTotalPaid;
@@ -493,29 +634,37 @@ const getBlacklistedCustomers = async (req, res) => {
     // pending-whitelist status — for the customer AND for every guarantor
     // listed under them, each resolved from their own CNIC's BlacklistAction
     // history (syncBlacklistStatus now logs one for auto-flagged accounts too).
-    const applyDefaultBlacklistMeta = (entity) => {
-      entity.blacklist_reason = 'Blacklist history not recorded';
-      entity.blacklist_date = null;
+    //
+    // Accounts flagged before that logging landed have no row at all. Rather
+    // than leaving them as "Not recorded", fall back to the replayed 90-day
+    // trigger date so the list can still answer "when did this happen".
+    const applyDefaultBlacklistMeta = (entity, autoFlagDate) => {
+      entity.blacklist_reason = autoFlagDate ? AUTO_BLACKLIST_REASON : 'Blacklist history not recorded';
+      entity.blacklist_date = autoFlagDate || null;
+      entity.blacklist_date_source = autoFlagDate ? 'auto-estimated' : null;
       entity.blacklist_status = 'Blacklisted';
-      entity.blacklisted_by_name = null;
+      entity.blacklisted_by_name = autoFlagDate ? 'System (Auto-flagged)' : null;
     };
     // A guarantor riding along on a blacklisted order isn't necessarily
     // blacklisted themself — only give them reason/date/status/actor when
     // their own is_blacklisted flag is actually set, otherwise it would
     // falsely read as "Blacklisted" for someone who isn't.
-    const applyDefaultGuarantorMeta = (g) => {
+    const applyDefaultGuarantorMeta = (autoFlagDate) => (g) => {
       if (g.is_blacklisted) {
-        applyDefaultBlacklistMeta(g);
+        // The sync blacklists purchaser and guarantors in one pass, so the
+        // account's trigger date is the guarantor's trigger date too.
+        applyDefaultBlacklistMeta(g, autoFlagDate);
       } else {
         g.blacklist_reason = null;
         g.blacklist_date = null;
+        g.blacklist_date_source = null;
         g.blacklist_status = null;
         g.blacklisted_by_name = null;
       }
     };
     for (const c of allBlacklisted) {
-      applyDefaultBlacklistMeta(c.customer);
-      (c.customer.guarantors || []).forEach(applyDefaultGuarantorMeta);
+      applyDefaultBlacklistMeta(c.customer, c.customer.auto_flag_date);
+      (c.customer.guarantors || []).forEach(applyDefaultGuarantorMeta(c.customer.auto_flag_date));
     }
 
     const normalizeCnic = (value) => (value || '').replace(/[^0-9]/g, '');
@@ -574,26 +723,31 @@ const getBlacklistedCustomers = async (req, res) => {
         if (a.action === 'blacklist' && !blacklistActionMap.has(a.cnic)) blacklistActionMap.set(a.cnic, a);
       }
 
-      const applyBlacklistMeta = (entity) => {
+      const applyBlacklistMeta = (entity, autoFlagDate) => {
         const cnic = normalizeCnic(entity.cnic_number);
         const blacklistAction = cnic ? blacklistActionMap.get(cnic) : null;
         const latestAction = cnic ? latestActionMap.get(cnic) : null;
 
-        entity.blacklist_reason = blacklistAction
-          ? (blacklistAction.reason || 'Manual blacklist (No reason provided)')
-          : 'Blacklist history not recorded';
-        entity.blacklist_date = blacklistAction?.created_at || null;
-        entity.blacklisted_by_name = blacklistAction
-          ? (blacklistAction.created_by?.full_name || (blacklistAction.category === 'auto' ? 'System (Auto-flagged)' : 'Not recorded'))
-          : null;
+        if (blacklistAction) {
+          entity.blacklist_reason = blacklistAction.reason || 'Manual blacklist (No reason provided)';
+          entity.blacklist_date = blacklistAction.created_at;
+          entity.blacklist_date_source = 'recorded';
+          entity.blacklisted_by_name = blacklistAction.created_by?.full_name
+            || (blacklistAction.category === 'auto' ? 'System (Auto-flagged)' : 'Not recorded');
+        } else {
+          applyDefaultBlacklistMeta(entity, autoFlagDate);
+        }
+
         entity.blacklist_status = (latestAction?.action === 'whitelist' && latestAction.status === 'pending')
           ? 'Pending Whitelist'
           : 'Blacklisted';
       };
 
       for (const c of allBlacklisted) {
-        applyBlacklistMeta(c.customer);
-        (c.customer.guarantors || []).filter(g => g.is_blacklisted).forEach(applyBlacklistMeta);
+        applyBlacklistMeta(c.customer, c.customer.auto_flag_date);
+        (c.customer.guarantors || [])
+          .filter(g => g.is_blacklisted)
+          .forEach(g => applyBlacklistMeta(g, c.customer.auto_flag_date));
       }
     }
 
@@ -1016,6 +1170,9 @@ module.exports = {
   getCustomers,
   getBlacklistedCustomers,
   getClearedCustomers,
-  getCustomerLedger
+  getCustomerLedger,
+  // Exported for direct exercising against real address/ledger data.
+  buildAreaResolver,
+  deriveAutoFlagDate,
 };
 

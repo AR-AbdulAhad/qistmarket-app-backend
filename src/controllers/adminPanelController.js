@@ -765,39 +765,102 @@ const getDeliveryManagementOverview = async (req, res) => {
     }
 };
 
+const BADGE_DEPARTMENTS = [
+    { key: 'csr', model: prisma.csrRanking, idField: 'csr_id' },
+    { key: 'verification', model: prisma.verificationRanking, idField: 'officer_id' },
+    { key: 'delivery', model: prisma.deliveryRanking, idField: 'officer_id' },
+    { key: 'recovery', model: prisma.recoveryRanking, idField: 'officer_id' },
+];
+const BADGE_TOP_N = 3;
+
+/**
+ * Every (month, year) that any department has a persisted monthly ranking
+ * snapshot for, newest first. The ranking services upsert a row per officer
+ * per month and never delete, so this is the full history the badge board
+ * can legitimately cover.
+ */
+async function listRankedPeriods() {
+    const seen = new Map();
+    for (const dept of BADGE_DEPARTMENTS) {
+        const groups = await dept.model.groupBy({ by: ['month', 'year'], where: { period: 'month' } });
+        for (const g of groups) {
+            // period='today'/'week' rows are stored with month/year 0 — not a
+            // real calendar period, so they can't carry a monthly badge.
+            if (!g.month || !g.year) continue;
+            seen.set(`${g.year}-${g.month}`, { month: g.month, year: g.year });
+        }
+    }
+    return Array.from(seen.values()).sort((a, b) => b.year - a.year || b.month - a.month);
+}
+
 /**
  * syncBadges
  * Admin/Super Admin-triggered (not an auto-cron, to avoid adding a new
- * background job to a live system). Reads the same current-month ranking
- * rows getUnifiedRankings already reads and upserts a persisted Badge row
- * for rank <= 3 per department, so achievements survive past the current
- * ranking period instead of being purely derived/ephemeral.
+ * background job to a live system). Reads the same ranking rows
+ * getUnifiedRankings reads and upserts a persisted Badge row for the top 3
+ * per department, so achievements survive past the current ranking period
+ * instead of being purely derived/ephemeral.
+ *
+ * Covers EVERY month that has ranking data, not just the current one. The
+ * sync is manual, so any month nobody happened to press the button in used
+ * to end up with no badges at all — leaving permanent holes in the history
+ * (and in the month filter above it) that no later run could fill.
+ *
+ * Ranks are recomputed here from `score` rather than read off the row's
+ * `rank` column: the ranking services never write that column, so it sits
+ * at its default 0 and `rank <= 3` silently matched every officer.
  */
 const syncBadges = async (req, res) => {
     try {
-        const { period, month, year } = currentPeriod();
-        const departments = [
-            { key: 'csr', model: prisma.csrRanking },
-            { key: 'verification', model: prisma.verificationRanking },
-            { key: 'delivery', model: prisma.deliveryRanking },
-            { key: 'recovery', model: prisma.recoveryRanking },
-        ];
+        // ?month=&year= syncs one period; omitted, every ranked month is synced.
+        const onlyMonth = parseInt(req.query.month, 10);
+        const onlyYear = parseInt(req.query.year, 10);
+        const scoped = Number.isInteger(onlyMonth) && Number.isInteger(onlyYear);
+
+        const period = 'month';
+        const periods = scoped ? [{ month: onlyMonth, year: onlyYear }] : await listRankedPeriods();
 
         let awarded = 0;
-        for (const dept of departments) {
-            const topRows = await dept.model.findMany({ where: { period, month, year, rank: { lte: 3 } } });
-            for (const row of topRows) {
-                const badge_type = row.rank === 1 ? 'champion' : 'top_performer';
-                await prisma.badge.upsert({
-                    where: { user_id_department_period_month_year: { user_id: row.officer_id ?? row.csr_id, department: dept.key, period, month, year } },
-                    update: { badge_type, awarded_at: new Date() },
-                    create: { user_id: row.officer_id ?? row.csr_id, department: dept.key, badge_type, period, month, year },
-                });
-                awarded += 1;
+        let pruned = 0;
+        for (const { month, year } of periods) {
+            for (const dept of BADGE_DEPARTMENTS) {
+                const rows = await dept.model.findMany({ where: { period, month, year } });
+                const winners = rows
+                    .slice()
+                    .sort((a, b) => (b.score || 0) - (a.score || 0))
+                    .slice(0, BADGE_TOP_N)
+                    .map((row, idx) => ({ user_id: row[dept.idField], rank: idx + 1 }))
+                    .filter((w) => w.user_id);
+
+                for (const winner of winners) {
+                    const badge_type = winner.rank === 1 ? 'champion' : 'top_performer';
+                    await prisma.badge.upsert({
+                        where: { user_id_department_period_month_year: { user_id: winner.user_id, department: dept.key, period, month, year } },
+                        update: { badge_type },
+                        create: { user_id: winner.user_id, department: dept.key, badge_type, period, month, year },
+                    });
+                    awarded += 1;
+                }
+
+                // Drop badges this period awarded to someone who is no longer in
+                // the top 3 — otherwise the earlier `rank <= 3`-matches-everyone
+                // bug leaves every officer permanently decorated. Only periods
+                // with ranking rows are touched, so a month can never be emptied.
+                if (rows.length > 0) {
+                    const stale = await prisma.badge.deleteMany({
+                        where: { department: dept.key, period, month, year, user_id: { notIn: winners.map((w) => w.user_id) } },
+                    });
+                    pruned += stale.count;
+                }
             }
         }
 
-        res.json({ success: true, message: `Synced ${awarded} badge(s) for ${month}/${year}.`, data: { awarded } });
+        const scope = scoped ? `${onlyMonth}/${onlyYear}` : `${periods.length} month(s)`;
+        res.json({
+            success: true,
+            message: `Synced ${awarded} badge(s) across ${scope}${pruned ? `, removed ${pruned} stale badge(s)` : ''}.`,
+            data: { awarded, pruned, periods: periods.length },
+        });
     } catch (error) {
         console.error('syncBadges error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
@@ -807,14 +870,30 @@ const syncBadges = async (req, res) => {
 /**
  * getBadges
  * Badge history — most recent first, with the user's name/outlet resolved.
+ *
+ * Also returns `periods`: every distinct month that has a badge, taken
+ * straight from the table rather than inferred from `data`. The client used
+ * to build its month filter by scanning the returned rows, so the old
+ * `take: 100` cap meant only the newest month or two could ever appear as
+ * options — and older months were unreachable even via "All Months".
  */
 const getBadges = async (req, res) => {
     try {
-        const badges = await prisma.badge.findMany({
-            orderBy: [{ year: 'desc' }, { month: 'desc' }, { awarded_at: 'desc' }],
-            include: { user: { select: { full_name: true, username: true, outlet: { select: { name: true } } } } },
-            take: 100,
-        });
+        const month = parseInt(req.query.month, 10);
+        const year = parseInt(req.query.year, 10);
+        const where = Number.isInteger(month) && Number.isInteger(year) ? { month, year } : {};
+
+        const [badges, periodGroups] = await Promise.all([
+            prisma.badge.findMany({
+                where,
+                orderBy: [{ year: 'desc' }, { month: 'desc' }, { awarded_at: 'desc' }],
+                include: { user: { select: { full_name: true, username: true, outlet: { select: { name: true } } } } },
+                // Bounded by design — top 3 per department per month — so this
+                // only ever bites on absurd histories, unlike the old cap.
+                take: 2000,
+            }),
+            prisma.badge.groupBy({ by: ['month', 'year'], _count: { _all: true } }),
+        ]);
 
         res.json({
             success: true,
@@ -829,6 +908,9 @@ const getBadges = async (req, res) => {
                 year: b.year,
                 awarded_at: b.awarded_at,
             })),
+            periods: periodGroups
+                .map((g) => ({ month: g.month, year: g.year, count: g._count._all }))
+                .sort((a, b) => b.year - a.year || b.month - a.month),
         });
     } catch (error) {
         console.error('getBadges error:', error);
