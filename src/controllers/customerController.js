@@ -406,6 +406,7 @@ const getBlacklistedCustomers = async (req, res) => {
             profile_photo: profilePhoto,
             is_blacklisted: isAccountBlacklisted, // Marker for UI
             created_at: order.created_at,
+            delivered_at: order.delivered_at || null,
             blacklisted_role: blacklistedRole,
             recovery_officer_name: order.recovery_officer?.full_name || null,
             guarantors,

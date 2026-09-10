@@ -28,7 +28,22 @@ const sanitizeWatiParamValue = (value) => {
   return value.replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ').trim();
 };
 
+// Payment reminders and guarantor blacklist notices are disabled for every caller,
+// including cron jobs, payment callbacks, bulk actions and device-lock events.
+const DISABLED_MESSAGE_TEMPLATES = new Set([
+  'next_installment_reminder', process.env.WATI_INSTALLMENT_REMINDER_TEMPLATE,
+  'installment_reminder', process.env.WATI_INSTALLMENT_REMINDER_V2_TEMPLATE,
+  'payment_overdue', process.env.WATI_PAYMENT_OVERDUE_TEMPLATE,
+  'notice_guarantor_overdue', process.env.WATI_GUARANTOR_OVERDUE_TEMPLATE,
+  'overdue_installment', process.env.WATI_OVERDUE_INSTALLMENT_TEMPLATE,
+  'guarantor_overdue', process.env.WATI_GUARANTOR_OVERDUE_LOCK_TEMPLATE,
+  'guarantor_notice', process.env.WATI_GUARANTOR_NOTICE_TEMPLATE,
+].filter(Boolean));
+
 const sendTemplate = async (phone, templateName, broadcastName, parameters) => {
+  if (DISABLED_MESSAGE_TEMPLATES.has(templateName)) {
+    return { success: false, skipped: true, reason: 'notification_disabled' };
+  }
   try {
     const whatsappNumber = normalizePhone(phone);
     if (!whatsappNumber) return { success: false, error: 'Invalid phone number' };

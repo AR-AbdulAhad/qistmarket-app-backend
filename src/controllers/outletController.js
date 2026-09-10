@@ -3163,51 +3163,7 @@ const updateInstallmentNote = async (req, res) => {
 };
 
 const sendBulkReminders = async (req, res) => {
-    try {
-        const { order_ids } = req.body;
-        if (!order_ids || !Array.isArray(order_ids) || order_ids.length === 0) {
-            return res.status(400).json({ success: false, message: 'No orders provided' });
-        }
-
-        const orders = await prisma.order.findMany({
-            where: { id: { in: order_ids } },
-            include: { delivery: true, customer: true }
-        });
-
-        const today = new Date();
-        today.setHours(0,0,0,0);
-        let sentCount = 0;
-        const { getNormalizedLedger } = require('../utils/ledgerUtils');
-
-        for (const order of orders) {
-            const rawLedger = Array.isArray(order.delivery?.installment_ledger) ? order.delivery.installment_ledger : JSON.parse(order.delivery?.installment_ledger || '[]');
-            const normalized = getNormalizedLedger(rawLedger);
-            const installmentLedger = normalized.installment_ledger;
-            
-            const pendingInstallment = installmentLedger.find(i => i.status === 'pending');
-            if (!pendingInstallment) continue;
-
-            const phone = order.whatsapp_number;
-            const customerName = order.customer?.name || order.customer_name;
-            const dueDate = pendingInstallment.dueDate;
-            const dueAmount = pendingInstallment.remainingAmount || pendingInstallment.dueAmount;
-
-            if (phone && dueDate) {
-                await sendNextInstallmentReminder(phone, {
-                    customer_name: customerName,
-                    amount_due: dueAmount,
-                    due_date: new Date(dueDate).toLocaleDateString('en-PK'),
-                    order_ref: order.order_ref
-                }).catch(err => console.error('Wati bulk reminder error:', err));
-                sentCount++;
-            }
-        }
-
-        res.json({ success: true, message: `Reminders sent to ${sentCount} customers` });
-    } catch (error) {
-        console.error('sendBulkReminders error:', error);
-        res.status(500).json({ success: false, message: 'Internal server error' });
-    }
+    return res.status(403).json({ success: false, message: 'Installment reminder messages are disabled.' });
 };
 
 // =====================
