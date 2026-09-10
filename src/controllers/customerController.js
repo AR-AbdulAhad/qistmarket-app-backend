@@ -326,6 +326,11 @@ const getBlacklistedCustomers = async (req, res) => {
           orderBy: { created_at: 'desc' },
           take: 1,
         },
+        statusHistories: {
+          where: { new_status: 'delivered' },
+          orderBy: { created_at: 'desc' },
+          take: 1,
+        },
         recovery_officer: {
           select: { id: true, full_name: true },
         },
@@ -341,6 +346,16 @@ const getBlacklistedCustomers = async (req, res) => {
       where: { imei_serial: { in: allImeis } },
       select: { imei_serial: true, product_name: true, color_variant: true }
     });
+
+    const knownAreas = await prisma.area.findMany({ select: { name: true } });
+    const cleanValue = (value) => typeof value === 'string' && value.trim() && value.trim() !== '-' ? value.trim() : null;
+    const resolveArea = (order, purchaser) => {
+      const structured = cleanValue(purchaser?.present_area) || cleanValue(order.area) || cleanValue(purchaser?.permanent_area);
+      if (structured) return structured;
+      const address = (purchaser?.present_address || order.address || '').toLowerCase();
+      return knownAreas.filter(a => address.split(',').some(part => part.trim() === a.name.toLowerCase()))
+        .sort((a, b) => b.name.length - a.name.length)[0]?.name || null;
+    };
 
     const inventoryMap = new Map();
     for (const inv of inventories) {
@@ -402,11 +417,11 @@ const getBlacklistedCustomers = async (req, res) => {
             permanent_address: purchaser?.permanent_address || null,
             nearest_location: purchaser?.nearest_location || null,
             city: order.city,
-            area: order.area,
+            area: resolveArea(order, purchaser),
             profile_photo: profilePhoto,
             is_blacklisted: isAccountBlacklisted, // Marker for UI
             created_at: order.created_at,
-            delivered_at: order.delivered_at || null,
+            delivered_at: order.delivered_at || delivery?.end_time || order.statusHistories?.[0]?.created_at || null,
             blacklisted_role: blacklistedRole,
             recovery_officer_name: order.recovery_officer?.full_name || null,
             guarantors,
@@ -479,7 +494,7 @@ const getBlacklistedCustomers = async (req, res) => {
     // listed under them, each resolved from their own CNIC's BlacklistAction
     // history (syncBlacklistStatus now logs one for auto-flagged accounts too).
     const applyDefaultBlacklistMeta = (entity) => {
-      entity.blacklist_reason = 'Auto-flagged (90+ days delinquency)';
+      entity.blacklist_reason = 'Blacklist history not recorded';
       entity.blacklist_date = null;
       entity.blacklist_status = 'Blacklisted';
       entity.blacklisted_by_name = null;
@@ -503,6 +518,7 @@ const getBlacklistedCustomers = async (req, res) => {
       (c.customer.guarantors || []).forEach(applyDefaultGuarantorMeta);
     }
 
+    const normalizeCnic = (value) => (value || '').replace(/[^0-9]/g, '');
     const cnics = Array.from(new Set(
       allBlacklisted.flatMap(c => [
         c.customer.cnic_number,
@@ -512,31 +528,63 @@ const getBlacklistedCustomers = async (req, res) => {
 
     if (cnics.length > 0) {
       const actions = await prisma.blacklistAction.findMany({
-        where: { cnic: { in: cnics } },
+        where: { cnic: { in: Array.from(new Set(cnics.flatMap(cnic => {
+          const digits = normalizeCnic(cnic);
+          return [cnic, digits, digits.length === 13 ? `${digits.slice(0, 5)}-${digits.slice(5, 12)}-${digits.slice(12)}` : cnic];
+        }))) } },
         include: { created_by: { select: { full_name: true } } },
         orderBy: { created_at: 'desc' }
       });
+
+      // Older manual actions can survive in the audit log even when the
+      // corresponding blacklist history row is missing. Use only an exact CNIC match.
+      const recordedCnics = new Set(actions.filter(a => a.action === 'blacklist').map(a => normalizeCnic(a.cnic)));
+      const missingCnics = cnics.filter(cnic => !recordedCnics.has(normalizeCnic(cnic)));
+      if (missingCnics.length) {
+        const logs = await prisma.securityLog.findMany({
+          where: {
+            action: 'MANUAL_BLACKLIST',
+            OR: missingCnics.flatMap(cnic => {
+              const digits = normalizeCnic(cnic);
+              const formatted = digits.length === 13 ? `${digits.slice(0, 5)}-${digits.slice(5, 12)}-${digits.slice(12)}` : cnic;
+              return [cnic, digits, formatted].filter(Boolean).map(value => ({ details: { contains: value } }));
+            }),
+          },
+          select: { details: true, created_at: true, user_name: true },
+          orderBy: { created_at: 'desc' },
+        });
+        const missingKeys = new Set(missingCnics.map(normalizeCnic));
+        for (const log of logs) {
+          const cnic = normalizeCnic(log.details.match(/CNIC\s+([\d-]+)/i)?.[1]);
+          if (!cnic || !missingKeys.has(cnic)) continue;
+          actions.push({ cnic, action: 'blacklist', status: 'approved', reason: log.details,
+            created_at: log.created_at, created_by: { full_name: log.user_name } });
+          missingKeys.delete(cnic);
+        }
+        actions.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      }
 
       // Latest "blacklist" action per cnic — drives reason + blacklist date + actor.
       const blacklistActionMap = new Map();
       // Latest action of any kind per cnic — a pending whitelist request overrides the "Blacklisted" status.
       const latestActionMap = new Map();
       for (const a of actions) {
+        a.cnic = normalizeCnic(a.cnic);
         if (!latestActionMap.has(a.cnic)) latestActionMap.set(a.cnic, a);
         if (a.action === 'blacklist' && !blacklistActionMap.has(a.cnic)) blacklistActionMap.set(a.cnic, a);
       }
 
       const applyBlacklistMeta = (entity) => {
-        const cnic = entity.cnic_number;
+        const cnic = normalizeCnic(entity.cnic_number);
         const blacklistAction = cnic ? blacklistActionMap.get(cnic) : null;
         const latestAction = cnic ? latestActionMap.get(cnic) : null;
 
         entity.blacklist_reason = blacklistAction
           ? (blacklistAction.reason || 'Manual blacklist (No reason provided)')
-          : 'Auto-flagged (90+ days delinquency)';
+          : 'Blacklist history not recorded';
         entity.blacklist_date = blacklistAction?.created_at || null;
         entity.blacklisted_by_name = blacklistAction
-          ? (blacklistAction.created_by?.full_name || 'System (Auto-flagged)')
+          ? (blacklistAction.created_by?.full_name || (blacklistAction.category === 'auto' ? 'System (Auto-flagged)' : 'Not recorded'))
           : null;
         entity.blacklist_status = (latestAction?.action === 'whitelist' && latestAction.status === 'pending')
           ? 'Pending Whitelist'
