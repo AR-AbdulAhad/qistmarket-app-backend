@@ -214,6 +214,14 @@ const getInventory = async (req, res) => {
             })
         ]);
 
+        // Sum of purchase_price × quantity across ALL in-stock rows for this outlet
+        // (not just the current page) — matches the Outlet Reports "Inventory
+        // Report" valuation definition so the two screens agree.
+        const stockValue = allRows.reduce(
+            (sum, row) => row.status === 'In Stock' ? sum + (row.purchase_price || 0) * (row.quantity || 0) : sum,
+            0
+        );
+
         res.json({
             success: true,
             inventory, // Frontend will group these by product_name
@@ -221,7 +229,8 @@ const getInventory = async (req, res) => {
                 totalStock: totalStock || 0,
                 inStock: inStock || 0,
                 sold: sold || 0,
-                outOfStock: outOfStock || 0
+                outOfStock: outOfStock || 0,
+                stockValue: stockValue || 0
             },
             pagination: {
                 total, // total unique products
