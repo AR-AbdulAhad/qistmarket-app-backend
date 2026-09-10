@@ -1340,24 +1340,24 @@ const getCsrDashboardStats = async (req, res) => {
 
     // 1.1 Target tracking base — total_amount from delivered orders for current period
     // Use delivered_at filter (with fallback to updated_at) to match delivered orders list logic
-    const deliveredWhere = { ...baseWhere, status: 'delivered' };
-    if (filter !== 'today') {
-      // For month/custom filters, use delivered_at to match the delivered orders list
-      deliveredWhere.OR = [
-        { delivered_at: dateFilter },
-        { AND: [{ delivered_at: null }, { updated_at: dateFilter }] }
-      ];
-      // Remove the updated_at from base level to avoid conflict
-      delete deliveredWhere.updated_at;
-    }
+    // const deliveredWhere = { ...baseWhere, status: 'delivered' };
+    // if (filter !== 'today') {
+    //   // For month/custom filters, use delivered_at to match the delivered orders list
+    //   deliveredWhere.OR = [
+    //     { delivered_at: dateFilter },
+    //     { AND: [{ delivered_at: null }, { updated_at: dateFilter }] }
+    //   ];
+    //   // Remove the updated_at from base level to avoid conflict
+    //   delete deliveredWhere.updated_at;
+    // }
 
-    const deliveredOrders = await prisma.order.findMany({
-      where: deliveredWhere,
-      select: { total_amount: true }
-    });
-    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
-    const deliveredCount = deliveredOrders.length;
-    const achievedCustomers = deliveredCount;
+    // const deliveredOrders = await prisma.order.findMany({
+    //   where: deliveredWhere,
+    //   select: { total_amount: true }
+    // });
+    // const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
+    // const deliveredCount = deliveredOrders.length;
+    // const achievedCustomers = deliveredCount;
 
     const successRate = totalOrders > 0 ? Math.round((deliveredCount / totalOrders) * 100) : 0;
     const cancelRate = totalOrders > 0 ? Math.round((cancelledCount / totalOrders) * 100) : 0;
@@ -1384,24 +1384,24 @@ const getCsrDashboardStats = async (req, res) => {
 
     // 1.1 Target tracking base — total_amount from delivered orders for current period
     // Use delivered_at filter (with fallback to updated_at) to match delivered orders list logic
-    // const deliveredWhere = { ...baseWhere, status: 'delivered' };
-    // if (filter !== 'today') {
-    //   // For month/custom filters, use delivered_at to match the delivered orders list
-    //   deliveredWhere.OR = [
-    //     { delivered_at: dateFilter },
-    //     { AND: [{ delivered_at: null }, { updated_at: dateFilter }] }
-    //   ];
-    //   // Remove the updated_at from base level to avoid conflict
-    //   delete deliveredWhere.updated_at;
-    // }
+    const deliveredWhere = { ...baseWhere, status: 'delivered' };
+    if (filter !== 'today') {
+      // For month/custom filters, use delivered_at to match the delivered orders list
+      deliveredWhere.OR = [
+        { delivered_at: dateFilter },
+        { AND: [{ delivered_at: null }, { updated_at: dateFilter }] }
+      ];
+      // Remove the updated_at from base level to avoid conflict
+      delete deliveredWhere.updated_at;
+    }
 
-    // const deliveredOrders = await prisma.order.findMany({
-    //   where: deliveredWhere,
-    //   select: { total_amount: true }
-    // });
-    // const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
+    const deliveredOrders = await prisma.order.findMany({
+      where: deliveredWhere,
+      select: { total_amount: true }
+    });
+    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
     // const achievedCustomers = deliveredOrders.length;
-    // const achievedCustomers = achievedCustomers;
+    const achievedCustomers = achievedCustomers;
 
     const calcIncrement = (curr, prev) => {
       if (!prev || prev === 0) return curr > 0 ? 100 : 0;
