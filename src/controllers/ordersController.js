@@ -11,7 +11,7 @@ const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const jazzSmsService = require('../services/jazzSmsService');
 const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const customerNotify = require('../services/customerNotificationService');
-const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth } = require('../services/rankingService');
+const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth, getOrderSalesValue } = require('../services/rankingService');
 const { EXCLUDE_PENDING_LEGACY_IMPORT, isRequestingLegacyImportChannel } = require('../utils/legacyImportFilter');
 
 const admin = require('firebase-admin');
@@ -1353,9 +1353,9 @@ const getCsrDashboardStats = async (req, res) => {
 
     const deliveredOrders = await prisma.order.findMany({
       where: deliveredWhere,
-      select: { total_amount: true }
+      select: { total_amount: true, advance_amount: true, installment_ledger: { select: { ledger_rows: true } } }
     });
-    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
+    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + getOrderSalesValue(order), 0);
     const deliveredCount = deliveredOrders.length;
     const achievedCustomers = deliveredCount;
 
@@ -1371,7 +1371,7 @@ const getCsrDashboardStats = async (req, res) => {
       }),
       prisma.order.findMany({
         where: { ...baseWhere, status: 'delivered', updated_at: { gte: yesterdayStart, lte: yesterdayEnd } },
-        select: { total_amount: true }
+        select: { total_amount: true, advance_amount: true, installment_ledger: { select: { ledger_rows: true } } }
       })
     ]);
 
@@ -1380,7 +1380,7 @@ const getCsrDashboardStats = async (req, res) => {
       return acc;
     }, {});
 
-    const yesterdaySales = yesterdayDeliveredOrders.reduce((sum, o) => sum + (o.total_amount || 0), 0);
+    const yesterdaySales = yesterdayDeliveredOrders.reduce((sum, o) => sum + getOrderSalesValue(o), 0);
 
     // 1.1 Target tracking base — total_amount from delivered orders for current period
     // Use delivered_at filter (with fallback to updated_at) to match delivered orders list logic

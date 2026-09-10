@@ -1,7 +1,21 @@
 const prisma = require('../../lib/prisma');
+const { getNormalizedLedger } = require('../utils/ledgerUtils');
 
 // Helper for current timestamp
 const now = () => new Date();
+
+// The plan actually agreed at delivery (e.g. an adjusted advance on self-pickup)
+// can diverge from Order.total_amount, which only holds the originally suggested
+// plan from order creation — the installment ledger has the real figure. Mirrors
+// the sales_value fix already applied to the Sales Report / outlet analytics
+// (outletController.js, outletReportController.js), so a CSR's "Total Sales"
+// here matches the amount shown on that order's own Delivered Product Details page.
+function getOrderSalesValue(order) {
+    const rows = Array.isArray(order?.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+    if (rows.length === 0) return order?.total_amount || 0;
+    const { summary } = getNormalizedLedger(rows, order.advance_amount);
+    return summary.grandTotalDue > 0 ? summary.grandTotalDue : (order.total_amount || 0);
+}
 
 /**
  * Identifies or creates a unique customer based on CNIC or Mobile Number.
@@ -121,7 +135,8 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             ],
         },
         include: {
-            customer: true
+            customer: true,
+            installment_ledger: true
         }
     });
 
@@ -144,7 +159,7 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     orders.forEach(order => {
         if (order.status === 'delivered') {
             deliveredCount++;
-            totalSales += (order.total_amount || 0);
+            totalSales += getOrderSalesValue(order);
         }
         if (order.status === 'completed') completedCount++;
         if (order.status === 'returned') returnedCount++;
@@ -282,7 +297,7 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
         },
         include: {
             order: {
-                include: { customer: true }
+                include: { customer: true, installment_ledger: true }
             }
         }
     });
@@ -299,7 +314,7 @@ async function updateDeliveryRanking(officerId, periodType = 'month') {
     deliveries.forEach(d => {
         if (d.status === 'delivered') {
             deliveredCount++;
-            totalSales += (d.order?.total_amount || 0);
+            totalSales += getOrderSalesValue(d.order);
         }
         if (d.status === 'completed') completedCount++;
         if (d.status === 'cancelled') cancelledCount++;
@@ -377,5 +392,6 @@ module.exports = {
     checkRepeatStatus,
     updateCsrRanking,
     getWorkingDaysLeftInMonth,
-    updateDeliveryRanking
+    updateDeliveryRanking,
+    getOrderSalesValue
 };
