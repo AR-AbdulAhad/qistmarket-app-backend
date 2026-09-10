@@ -1145,8 +1145,8 @@ const sendPaymentOverdue = async (phone, {
 // payment_overdue's siblings). Sent to every GRANTOR on an account the same
 // moment sendPaymentOverdue fires for the customer — see
 // paymentOverdueService.js, same pairing as sendMarkBlacklist/sendGuarantorNotice.
-const WATI_GUARANTOR_OVERDUE_TEMPLATE = process.env.WATI_GUARANTOR_OVERDUE_TEMPLATE || 'notice_guarantor_overdue';
-const WATI_GUARANTOR_OVERDUE_BROADCAST = process.env.WATI_GUARANTOR_OVERDUE_TEMPLATE || 'notice_guarantor_overdue';
+// const WATI_GUARANTOR_OVERDUE_TEMPLATE = process.env.WATI_GUARANTOR_OVERDUE_TEMPLATE || 'notice_guarantor_overdue';
+// const WATI_GUARANTOR_OVERDUE_BROADCAST = process.env.WATI_GUARANTOR_OVERDUE_TEMPLATE || 'notice_guarantor_overdue';
 
 const sendGuarantorOverdueNotice = async (phone, {
   guarantorName,
