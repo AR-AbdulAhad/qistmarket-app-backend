@@ -359,7 +359,7 @@ const getBlacklistedCustomers = async (req, res) => {
       const purchaser = order.verification?.purchaser || null;
       const cashInHand = order.cash_in_hand?.[0] || null;
       const delivery = order.delivery;
-      const installmentLedgerModel = delivery?.installment_ledger || null;
+      const installmentLedgerModel = order.installment_ledger || delivery?.installment_ledger || null;
       const profilePhoto = order.verification?.documents?.[0]?.file_url || null;
 
       const customerName = purchaser?.name || order.customer_name;
