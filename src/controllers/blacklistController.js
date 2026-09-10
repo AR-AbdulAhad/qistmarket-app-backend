@@ -1,6 +1,12 @@
 const prisma = require('../../lib/prisma');
 const { syncBlacklistStatus, notifyBlacklistedOrder } = require('../utils/blacklistUtils');
 const { logAction } = require('../utils/auditLogger');
+const {
+    BLACKLIST_REASON_TYPES,
+    BLACKLIST_REASON_LABELS,
+    MANUAL_BLACKLIST_REASON_CODES,
+    classifyBlacklistReason,
+} = require('../utils/blacklistReasonUtils');
 
 // Notifies every delivered order under this CNIC with a live ledger —
 // normally one, but a repeat customer can have more than one order on file.
@@ -98,6 +104,21 @@ const setBlacklistStatus = async (req, res) => {
             });
         }
 
+        // `category` used to be free-form (and in practice was left null on
+        // every manual entry), which is why the Blacklisted Customers "Reason"
+        // filter had nothing structured to group by. Blacklists must now pick a
+        // canonical bucket; anything unrecognised falls back to 'other' instead
+        // of null so no record is left uncategorised. Whitelist reasons are
+        // narrative, not a risk classification, so they stay untagged.
+        let resolvedCategory = null;
+        if (action === 'blacklist') {
+            const requested = (category || '').trim().toLowerCase();
+            resolvedCategory = MANUAL_BLACKLIST_REASON_CODES.includes(requested)
+                ? requested
+                : classifyBlacklistReason({ category: requested, reason }).code;
+            if (!MANUAL_BLACKLIST_REASON_CODES.includes(resolvedCategory)) resolvedCategory = 'other';
+        }
+
         const cleanCnic = cnic.trim();
         const type = targetType || 'all'; // 'all' | 'purchaser' | 'grantor'
         const targetId = grantorId || id;
@@ -128,12 +149,12 @@ const setBlacklistStatus = async (req, res) => {
 
             txActions.push(
                 prisma.blacklistAction.create({
-                    data: { cnic: cleanCnic, action, category: category || null, reason: reason.trim(), status: 'approved', approved_by_id: req.user.id, approved_at: new Date(), created_by_id: req.user.id },
+                    data: { cnic: cleanCnic, action, category: resolvedCategory, reason: reason.trim(), status: 'approved', approved_by_id: req.user.id, approved_at: new Date(), created_by_id: req.user.id },
                 })
             );
 
             await prisma.$transaction(txActions);
-            await logAction(req, 'MANUAL_BLACKLIST', `CNIC ${cleanCnic} (${type}) manually blacklisted. ${category ? `Category: ${category}. ` : ''}${reason ? 'Reason: ' + reason : ''}`, null, 'BlacklistAction');
+            await logAction(req, 'MANUAL_BLACKLIST', `CNIC ${cleanCnic} (${type}) manually blacklisted. Category: ${BLACKLIST_REASON_LABELS[resolvedCategory] || resolvedCategory}. Reason: ${reason.trim()}`, null, 'BlacklistAction');
             notifyManualBlacklist(cleanCnic);
             return res.json({ success: true, message: `${type === 'grantor' ? 'Guarantor' : type === 'purchaser' ? 'Purchaser' : 'Account'} blacklisted.` });
         }
@@ -291,11 +312,38 @@ const getBlacklistHistory = async (req, res) => {
             orderBy: { created_at: 'desc' },
             take: 200,
         });
-        res.json({ success: true, data: history });
+        res.json({
+            success: true,
+            // Rows written before the vocabulary existed carry a null/legacy
+            // category, so classify on read rather than leaving the History
+            // tab showing a blank where every other view shows a bucket.
+            // Whitelist rows are skipped on purpose: their reason is narrative
+            // ("customer cleared arrears"), and keyword-matching it would tag a
+            // clearance with a risk bucket it never had.
+            data: history.map((h) => {
+                if (h.action !== 'blacklist') return { ...h, reason_code: null, reason_label: null };
+                const type = classifyBlacklistReason({
+                    category: h.category,
+                    reason: h.reason,
+                    isAuto: h.category === 'auto',
+                });
+                return { ...h, reason_code: type.code, reason_label: type.label };
+            }),
+            reasonTypes: BLACKLIST_REASON_TYPES,
+        });
     } catch (error) {
         console.error('getBlacklistHistory error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
+};
+
+/**
+ * getBlacklistReasonTypes
+ * The canonical reason vocabulary on its own, for entry points that need the
+ * picker without pulling a customer list or 200 history rows with it.
+ */
+const getBlacklistReasonTypes = async (req, res) => {
+    res.json({ success: true, data: BLACKLIST_REASON_TYPES });
 };
 
 /**
@@ -361,6 +409,7 @@ module.exports = {
     getPendingWhitelistRequests,
     getCustomerRiskScore,
     getBlacklistHistory,
+    getBlacklistReasonTypes,
     triggerSync,
     getBlacklistStatusForCnic,
 };

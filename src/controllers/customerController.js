@@ -2,6 +2,7 @@ const prisma = require('../../lib/prisma');
 const { syncBlacklistStatus } = require('../utils/blacklistUtils');
 const { getNormalizedLedger, computeDueAndCurrent } = require('../utils/ledgerUtils');
 const { EXCLUDE_PENDING_LEGACY_IMPORT } = require('../utils/legacyImportFilter');
+const { BLACKLIST_REASON_TYPES, classifyBlacklistReason } = require('../utils/blacklistReasonUtils');
 
 // Largest overdue gap among this order's unpaid installments, in whole days.
 function computeDaysOverdue(rows) {
@@ -644,6 +645,9 @@ const getBlacklistedCustomers = async (req, res) => {
       entity.blacklist_date_source = autoFlagDate ? 'auto-estimated' : null;
       entity.blacklist_status = 'Blacklisted';
       entity.blacklisted_by_name = autoFlagDate ? 'System (Auto-flagged)' : null;
+      const type = classifyBlacklistReason({ isAuto: !!autoFlagDate, reason: null });
+      entity.blacklist_reason_code = type.code;
+      entity.blacklist_reason_label = type.label;
     };
     // A guarantor riding along on a blacklisted order isn't necessarily
     // blacklisted themself — only give them reason/date/status/actor when
@@ -660,6 +664,8 @@ const getBlacklistedCustomers = async (req, res) => {
         g.blacklist_date_source = null;
         g.blacklist_status = null;
         g.blacklisted_by_name = null;
+        g.blacklist_reason_code = null;
+        g.blacklist_reason_label = null;
       }
     };
     for (const c of allBlacklisted) {
@@ -734,6 +740,15 @@ const getBlacklistedCustomers = async (req, res) => {
           entity.blacklist_date_source = 'recorded';
           entity.blacklisted_by_name = blacklistAction.created_by?.full_name
             || (blacklistAction.category === 'auto' ? 'System (Auto-flagged)' : 'Not recorded');
+          // Free-text reasons are unbounded, so every record also carries the
+          // canonical bucket the Reason filter actually works on.
+          const type = classifyBlacklistReason({
+            category: blacklistAction.category,
+            reason: blacklistAction.reason,
+            isAuto: blacklistAction.category === 'auto',
+          });
+          entity.blacklist_reason_code = type.code;
+          entity.blacklist_reason_label = type.label;
         } else {
           applyDefaultBlacklistMeta(entity, autoFlagDate);
         }
@@ -758,6 +773,11 @@ const getBlacklistedCustomers = async (req, res) => {
         total: allBlacklisted.length,
         totalDueAmount: allBlacklisted.reduce((s, c) => s + (c.ledgerSummary.totalDue || 0), 0),
         totalCurrentAmount: allBlacklisted.reduce((s, c) => s + (c.ledgerSummary.totalCurrent || 0), 0),
+        // The Reason filter's fixed vocabulary, sent from here so the backend
+        // stays the single source of truth for it — the dropdown used to be
+        // built from distinct free-text reasons, which grew by one option for
+        // every typo an officer ever entered.
+        reasonTypes: BLACKLIST_REASON_TYPES,
       },
     });
   } catch (error) {

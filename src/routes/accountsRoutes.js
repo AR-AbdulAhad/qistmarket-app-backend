@@ -44,6 +44,7 @@ const {
   getPendingWhitelistRequests,
   getCustomerRiskScore,
   getBlacklistHistory,
+  getBlacklistReasonTypes,
   triggerSync,
 } = require('../controllers/blacklistController');
 const { getSecurityLogs } = require('../controllers/securityLogController');
@@ -152,6 +153,8 @@ router.get('/blacklist', getBlacklistedCustomers);
 router.get('/blacklist/search', searchByCnicOrPhone);
 router.post('/blacklist/action', setBlacklistStatus);
 router.get('/blacklist/history', getBlacklistHistory);
+// The canonical reason vocabulary, for pickers that don't need the list itself.
+router.get('/blacklist/reason-types', getBlacklistReasonTypes);
 router.post('/blacklist/sync', triggerSync);
 router.get('/blacklist/pending-whitelist', getPendingWhitelistRequests);
 router.post('/blacklist/:id/approve', approveBlacklistAction);
