@@ -1333,11 +1333,31 @@ const getCsrDashboardStats = async (req, res) => {
     const inProgressCount = statusCounts['in_progress'] || 0;
     const cancelledCount = statusCounts['cancelled'] || 0;
     const completedCount = statusCounts['completed'] || 0;
-    const deliveredCount = statusCounts['delivered'] || 0;
     const expiredCount = statusCounts['expired'] || 0;
     const approvedCount = statusCounts['approved'] || 0;
     const pickedCount = statusCounts['picked'] || 0;
     const rejectedCount = statusCounts['rejected'] || 0;
+
+    // 1.1 Target tracking base — total_amount from delivered orders for current period
+    // Use delivered_at filter (with fallback to updated_at) to match delivered orders list logic
+    const deliveredWhere = { ...baseWhere, status: 'delivered' };
+    if (filter !== 'today') {
+      // For month/custom filters, use delivered_at to match the delivered orders list
+      deliveredWhere.OR = [
+        { delivered_at: dateFilter },
+        { AND: [{ delivered_at: null }, { updated_at: dateFilter }] }
+      ];
+      // Remove the updated_at from base level to avoid conflict
+      delete deliveredWhere.updated_at;
+    }
+
+    const deliveredOrders = await prisma.order.findMany({
+      where: deliveredWhere,
+      select: { total_amount: true }
+    });
+    const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
+    const deliveredCount = deliveredOrders.length;
+    const achievedCustomers = deliveredCount;
 
     const successRate = totalOrders > 0 ? Math.round((deliveredCount / totalOrders) * 100) : 0;
     const cancelRate = totalOrders > 0 ? Math.round((cancelledCount / totalOrders) * 100) : 0;
@@ -1363,12 +1383,25 @@ const getCsrDashboardStats = async (req, res) => {
     const yesterdaySales = yesterdayDeliveredOrders.reduce((sum, o) => sum + (o.total_amount || 0), 0);
 
     // 1.1 Target tracking base — total_amount from delivered orders for current period
+    // Use delivered_at filter (with fallback to updated_at) to match delivered orders list logic
+    const deliveredWhere = { ...baseWhere, status: 'delivered' };
+    if (filter !== 'today') {
+      // For month/custom filters, use delivered_at to match the delivered orders list
+      deliveredWhere.OR = [
+        { delivered_at: dateFilter },
+        { AND: [{ delivered_at: null }, { updated_at: dateFilter }] }
+      ];
+      // Remove the updated_at from base level to avoid conflict
+      delete deliveredWhere.updated_at;
+    }
+
     const deliveredOrders = await prisma.order.findMany({
-      where: { ...baseWhere, status: 'delivered' },
+      where: deliveredWhere,
       select: { total_amount: true }
     });
     const achievedAmount = deliveredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0);
-    const achievedCustomers = deliveredCount;
+    const achievedCustomers = deliveredOrders.length;
+    const achievedCustomers = achievedCustomers;
 
     const calcIncrement = (curr, prev) => {
       if (!prev || prev === 0) return curr > 0 ? 100 : 0;
@@ -1379,7 +1412,7 @@ const getCsrDashboardStats = async (req, res) => {
       total: calcIncrement(totalOrders, Object.values(yesterdayCounts).reduce((a, b) => a + b, 0)),
       new: calcIncrement(newCount, yesterdayCounts['new']),
       pending: calcIncrement(pendingCount, yesterdayCounts['pending']),
-      delivered: calcIncrement(deliveredCount, yesterdayCounts['delivered']),
+      delivered: calcIncrement(achievedCustomers, yesterdayCounts['delivered']),
       approved: calcIncrement(approvedCount, yesterdayCounts['approved']),
       cancelled: calcIncrement(cancelledCount, yesterdayCounts['cancelled']),
       expired: calcIncrement(expiredCount, yesterdayCounts['expired']),
@@ -1395,7 +1428,7 @@ const getCsrDashboardStats = async (req, res) => {
     const yesterdaySuccessRate = yesterdayTotal > 0 ? Math.round(((yesterdayCounts['delivered'] || 0) / yesterdayTotal) * 100) : 0;
     const successRateIncrement = successRate - yesterdaySuccessRate;
 
-    const avgTicketSize = deliveredCount > 0 ? Math.round(achievedAmount / deliveredCount) : 0;
+    const avgTicketSize = achievedCustomers > 0 ? Math.round(achievedAmount / achievedCustomers) : 0;
     const yesterdayAvgTicketSize = (yesterdayCounts['delivered'] || 0) > 0 ? Math.round(yesterdaySales / yesterdayCounts['delivered']) : 0;
     const avgTicketIncrement = calcIncrement(avgTicketSize, yesterdayAvgTicketSize);
 
@@ -1484,18 +1517,22 @@ const getCsrDashboardStats = async (req, res) => {
     const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
 
     const getDailyStats = async (periodStart, periodEnd) => {
+        const dateFilter = { gte: periodStart, lte: periodEnd };
         const orders = await prisma.order.findMany({
             where: {
                 status: 'delivered',
-                updated_at: { gte: periodStart, lte: periodEnd },
+                OR: [
+                    { delivered_at: dateFilter },
+                    { AND: [{ delivered_at: null }, { updated_at: dateFilter }] }
+                ],
                 ...(isCsr ? { created_by_user_id: userId } : {})
             },
-            select: { updated_at: true, total_amount: true }
+            select: { delivered_at: true, updated_at: true, total_amount: true }
         });
 
         const daily = {};
         orders.forEach(o => {
-            const day = o.updated_at.getDate();
+            const day = (o.delivered_at || o.updated_at).getDate();
             if (!daily[day]) daily[day] = { amount: 0, customers: 0 };
             daily[day].amount += (o.total_amount || 0);
             daily[day].customers += 1;
@@ -1670,7 +1707,7 @@ const getCsrDashboardStats = async (req, res) => {
           in_progress: inProgressCount,
           cancelled: cancelledCount,
           completed: completedCount,
-          delivered: deliveredCount,
+          delivered: achievedCustomers,
           expired: expiredCount,
           approved: approvedCount,
           picked: pickedCount,
