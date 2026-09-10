@@ -2721,7 +2721,13 @@ const getDeliveredProductDetails = async (req, res) => {
       archived_deliveries: archivedDeliveries,
       payment_details: {
         advance_payment: advancePayment,
-        installment_plan: installmentDetails
+        installment_plan: installmentDetails,
+        // A delivered order with no ledger row is a broken record, not an
+        // "order not delivered yet" — delivery completion writes the ledger
+        // after the delivery transaction commits, so a failure there leaves
+        // exactly this state. Flagged explicitly so the UI can offer the
+        // Super Admin repair instead of just rendering nothing.
+        ledger_missing: !ledger && !!order.delivery
       }
     };
 

@@ -8,7 +8,8 @@ const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services
 const { sendQistReceivingForPayment, sendPartialPaymentForRow, getRepresentativeOfficerDetails } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
-const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
+const { getNormalizedLedger, normalizeLedger, buildLedgerRows, generateLedgerShortId } = require('../utils/ledgerUtils');
+const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { logAction } = require('../utils/auditLogger');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
 const { getPaymentInstructionsSettings } = require('../utils/paymentInstructionsSettingsUtils');
@@ -1654,6 +1655,189 @@ const setLedgerMonths = async (req, res) => {
   }
 };
 
+/**
+ * Repairs a delivered order that has no installment ledger.
+ *
+ * This exists because delivery completion is deliberately non-atomic: the
+ * order flips to "delivered", cash-in-hand is booked and the WATI message
+ * goes out inside a transaction, then the ledger is written afterwards. If
+ * that write fails (a `short_id` collision was the known culprit) the
+ * delivery still stands and the customer ends up with a delivered order and
+ * no installment schedule at all — invisible until recovery goes looking.
+ *
+ * The rebuild reuses the exact same row builder as the delivery flow and
+ * anchors the schedule to the ORIGINAL delivery date, not today, so the
+ * repaired ledger is what the delivery would have produced. It refuses to
+ * touch an order that already has a ledger — overwriting one would wipe
+ * recorded payments.
+ */
+const rebuildOrderLedger = async (req, res) => {
+  if (req.user?.role !== 'Super Admin') {
+    return res.status(403).json({ success: false, message: 'Only Super Admin can rebuild a ledger.' });
+  }
+
+  const orderId = parseInt(req.params.order_id, 10);
+  if (!Number.isInteger(orderId)) {
+    return res.status(400).json({ success: false, message: 'A valid order_id is required.' });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        delivery: true,
+        installment_ledger: { select: { id: true, short_id: true } },
+        verification: { include: { purchaser: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+    if (order.installment_ledger) {
+      return res.status(409).json({
+        success: false,
+        message: `Order ${order.order_ref} already has a ledger (${order.installment_ledger.short_id}). Use the ledger editor instead — rebuilding would discard recorded payments.`,
+      });
+    }
+    if (!order.delivery) {
+      return res.status(400).json({
+        success: false,
+        message: `Order ${order.order_ref} has no delivery record, so there is nothing to build a ledger from.`,
+      });
+    }
+
+    const delivery = order.delivery;
+
+    // Delivery.selected_plan is the plan as it stood at delivery time and is
+    // what the original ledger would have been built from; the Order columns
+    // are the fallback for deliveries saved without a plan snapshot.
+    let planObj = delivery.selected_plan;
+    if (typeof planObj === 'string') {
+      try { planObj = JSON.parse(planObj); } catch { planObj = null; }
+    }
+
+    const monthlyAmount = planObj?.monthly_amount || planObj?.monthlyAmount || order.monthly_amount || 0;
+    const totalMonths = planObj?.months || planObj?.duration || order.months || 0;
+    const advanceAmount = planObj?.advance ?? planObj?.advance_amount ?? order.advance_amount ?? 0;
+
+    if (!(totalMonths > 0 && monthlyAmount > 0)) {
+      return res.status(400).json({
+        success: false,
+        message: `Order ${order.order_ref} has no usable installment plan (months=${totalMonths}, monthly=${monthlyAmount}). Fix the order's plan first.`,
+      });
+    }
+
+    // Anchor to when the goods actually left, so month 1 falls where the
+    // customer expects it rather than a month after the repair.
+    const deliveryDate = delivery.end_time || delivery.updated_at || delivery.created_at || now();
+
+    const ledgerRows = buildLedgerRows({
+      advanceAmount,
+      monthlyAmount,
+      totalMonths,
+      customLedger: null,
+      startDate: deliveryDate,
+      feedbackLabel: delivery.self_pickup ? 'Self Pickup at Branch' : 'Collected at Delivery',
+    });
+
+    const ledgerToken = jwt.sign(
+      { order_id: order.id, delivery_id: delivery.id },
+      LEDGER_TOKEN_SECRET,
+      { expiresIn: '730d' }
+    );
+
+    // Same allocate-then-retry dance as the delivery flow: short_id is unique
+    // table-wide and the check is not atomic against a concurrent write.
+    let ledger = null;
+    for (let attempt = 0; attempt < 5 && !ledger; attempt += 1) {
+      const shortId = await generateLedgerShortId(delivery.product_imei, { excludeOrderId: order.id });
+      try {
+        ledger = await prisma.installmentLedger.create({
+          data: {
+            order_id: order.id,
+            delivery_id: delivery.id,
+            token: ledgerToken,
+            short_id: shortId,
+            ledger_rows: ledgerRows,
+            created_at: now(),
+            updated_at: now(),
+          },
+        });
+      } catch (createErr) {
+        const isShortIdRace = createErr?.code === 'P2002'
+          && (createErr.meta?.target || []).toString().includes('short_id');
+        if (!isShortIdRace) throw createErr;
+      }
+    }
+    if (!ledger) {
+      return res.status(500).json({ success: false, message: 'Could not allocate a unique ledger short_id. Please retry.' });
+    }
+
+    // Consumer numbers are what the bill-payment gateways look the customer
+    // up by, so a repaired ledger without them is still half-broken. Skipped
+    // when the delivery already has some (a partial failure mid-way).
+    let consumerNumbersCreated = 0;
+    try {
+      const existing = await prisma.consumerNumber.count({ where: { delivery_id: delivery.id } });
+      if (existing === 0) {
+        const purchaser = order.verification?.purchaser;
+        const mobile = purchaser?.telephone_number || order.whatsapp_number;
+        const firstInstallment = ledgerRows[1] || null;
+        const dueDate = firstInstallment?.due_date ? new Date(firstInstallment.due_date) : now();
+        const billingMonthStr = String(dueDate.getFullYear()).slice(-2) + String(dueDate.getMonth() + 1).padStart(2, '0');
+        const base = {
+          ledger_id: ledger.id,
+          delivery_id: delivery.id,
+          customer_name: purchaser?.name || order.customer_name || 'N/A',
+          mobile_number: mobile || 'N/A',
+          imei_serial: delivery.product_imei || null,
+          amount_due: firstInstallment?.amount || 0,
+          billing_month: billingMonthStr,
+          due_date: dueDate,
+          bill_status: 'U',
+          created_at: now(),
+          updated_at: now(),
+        };
+        const created = await prisma.consumerNumber.createMany({
+          data: [
+            { ...base, consumer_number: await generateConsumerNumber(delivery.product_imei, mobile) },
+            { ...base, consumer_number: await generateSmartPayConsumerNumber(delivery.product_imei, mobile) },
+          ],
+        });
+        consumerNumbersCreated = created.count;
+      }
+    } catch (consumerErr) {
+      // Non-fatal: the ledger itself is the thing the user came here for.
+      console.error('rebuildOrderLedger: consumer number creation failed (non-fatal):', consumerErr);
+    }
+
+    await logAction(
+      req,
+      'LEDGER_REBUILT',
+      `Missing installment ledger for order ${order.order_ref} rebuilt by ${req.user.full_name || req.user.username} ` +
+      `(${totalMonths} months x ${monthlyAmount}, anchored to delivery date ${new Date(deliveryDate).toISOString().slice(0, 10)}, short_id ${ledger.short_id}).`,
+      order.id,
+      'Order',
+    );
+
+    return res.json({
+      success: true,
+      message: `Ledger rebuilt for order ${order.order_ref}.`,
+      data: {
+        ledger_id: ledger.id,
+        short_id: ledger.short_id,
+        months: totalMonths,
+        consumer_numbers_created: consumerNumbersCreated,
+        normalized: getNormalizedLedger(ledgerRows, advanceAmount),
+      },
+    });
+  } catch (error) {
+    console.error('rebuildOrderLedger error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   viewLedger,
   downloadLedgerPdf,
@@ -1661,5 +1845,6 @@ module.exports = {
   verifyInstallmentPaymentOtp,
   sendLedgerToCustomer,
   editLedgerRows,
-  setLedgerMonths
+  setLedgerMonths,
+  rebuildOrderLedger
 };

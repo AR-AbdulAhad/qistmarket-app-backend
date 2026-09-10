@@ -7,7 +7,8 @@ const {
     verifyInstallmentPaymentOtp,
     sendLedgerToCustomer,
     editLedgerRows,
-    setLedgerMonths
+    setLedgerMonths,
+    rebuildOrderLedger
 } = require('../controllers/ledgerController');
 const { authenticateJWT } = require('../middlewares/authMiddleware');
 
@@ -27,5 +28,8 @@ router.post('/:shortId/send', authenticateJWT, sendLedgerToCustomer);
 // Admin-direct ledger correction (Super Admin only, enforced in the controller)
 router.patch('/:ledger_id/edit', authenticateJWT, editLedgerRows);
 router.post('/:ledger_id/set-months', authenticateJWT, setLedgerMonths);
+
+// Repair a delivered order whose ledger was never created (Super Admin only)
+router.post('/rebuild/:order_id', authenticateJWT, rebuildOrderLedger);
 
 module.exports = router;

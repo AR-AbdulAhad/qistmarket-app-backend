@@ -11,14 +11,13 @@
  */
 const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
 const { sendDeliveryConfirmation, sendCustomerLedger } = require('../services/watiService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
-const { getNormalizedLedger } = require('../utils/ledgerUtils');
+const { getNormalizedLedger, buildLedgerRows, generateLedgerShortId } = require('../utils/ledgerUtils');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const pt = require('../services/paytriggerService');
 
@@ -99,6 +98,29 @@ function resolvePaytriggerGate({ enrollPaytriggerFlag, product_imei, productName
 
 // ─── Ledger + consumer numbers (shared between both modes) ────────────────
 
+/**
+ * A delivery that completes without a ledger is not self-announcing: the order
+ * flips to "delivered", cash-in-hand is booked and the customer gets the WATI
+ * "Delivered" message, but the installment schedule simply never appears and
+ * nobody notices until recovery goes looking for it. Push it to the admin
+ * notification bell so it gets repaired instead of sitting silent.
+ */
+async function alertMissingLedger({ order, ledgerError, delivery, io }) {
+  if (!ledgerError) return;
+  try {
+    await notifyAdmins(
+      'Ledger Not Created',
+      `Order #${order.order_ref} was delivered but its installment ledger could not be created (${ledgerError}). ` +
+      `Open the delivered order as Super Admin and use "Generate Ledger" to repair it.`,
+      'ledger_missing',
+      delivery?.id ?? null,
+      io
+    );
+  } catch (notifyErr) {
+    console.error('[deliveryCompletionService] Failed to alert admins about missing ledger:', notifyErr);
+  }
+}
+
 async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, payload, advanceAmount, planObj, purchaser, feedbackLabel }) {
   let installmentLedger = null;
   let ledgerUrl = null;
@@ -109,46 +131,20 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
     const deliveryDate = now();
 
     if (!(totalMonths > 0 && monthlyAmt > 0)) {
-      return { installmentLedger: null, ledgerUrl: null };
+      console.error(
+        `[deliveryCompletionService] No ledger built for order ${order.order_ref}: plan has no usable months/monthly amount (months=${totalMonths}, monthly=${monthlyAmt}). Repair via POST /api/ledger/rebuild/:order_id once the order's plan is corrected.`
+      );
+      return { installmentLedger: null, ledgerUrl: null, ledgerError: 'missing_plan' };
     }
 
-    let ledgerRows = [];
-    const customLedger = parseCustomLedger(payload.custom_ledger);
-
-    ledgerRows.push({
-      month: 0,
-      label: 'Advance Payment',
-      due_date: deliveryDate,
-      amount: parseFloat(advanceAmount || 0),
-      status: 'paid',
-      paid_at: deliveryDate,
-      payment_method: 'Cash',
-      feedback: feedbackLabel,
+    const ledgerRows = buildLedgerRows({
+      advanceAmount,
+      monthlyAmount: monthlyAmt,
+      totalMonths,
+      customLedger: parseCustomLedger(payload.custom_ledger),
+      startDate: deliveryDate,
+      feedbackLabel,
     });
-
-    if (customLedger && Array.isArray(customLedger) && customLedger.length === totalMonths) {
-      customLedger.forEach((row, i) => {
-        ledgerRows.push({
-          month: i + 1,
-          label: `Month ${i + 1}`,
-          due_date: row.date ? new Date(row.date) : addMonths(deliveryDate, i + 1),
-          amount: parseFloat(row.amount) || parseFloat(monthlyAmt),
-          status: 'pending',
-          paid_at: null,
-        });
-      });
-    } else {
-      for (let i = 0; i < totalMonths; i++) {
-        ledgerRows.push({
-          month: i + 1,
-          label: `Month ${i + 1}`,
-          due_date: addMonths(deliveryDate, i + 1),
-          amount: parseFloat(monthlyAmt),
-          status: 'pending',
-          paid_at: null,
-        });
-      }
-    }
 
     const ledgerToken = jwt.sign(
       { order_id: order.id, delivery_id: delivery.id },
@@ -156,29 +152,42 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
       { expiresIn: '730d' }
     );
 
-    const imeiStr = payload.product_imei ? String(payload.product_imei).replace(/\D/g, '') : '';
-    const shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
-    ledgerUrl = `${shortId}`;
+    // short_id is unique table-wide and two devices can share the last 6 IMEI
+    // digits, so pick a free one and still retry the write — the check above
+    // and the write below are not atomic against a concurrent delivery.
+    for (let attempt = 0; attempt < 5 && !installmentLedger; attempt += 1) {
+      const shortId = await generateLedgerShortId(payload.product_imei, { excludeOrderId: order.id });
+      try {
+        installmentLedger = await prisma.installmentLedger.upsert({
+          where: { order_id: order.id },
+          create: {
+            order_id: order.id,
+            delivery_id: delivery.id,
+            token: ledgerToken,
+            short_id: shortId,
+            ledger_rows: ledgerRows,
+            created_at: now(),
+            updated_at: now(),
+          },
+          update: {
+            delivery_id: delivery.id,
+            token: ledgerToken,
+            short_id: shortId,
+            ledger_rows: ledgerRows,
+            updated_at: now(),
+          },
+        });
+        ledgerUrl = shortId;
+      } catch (upsertErr) {
+        // P2002 on short_id = lost the race to another delivery; regenerate.
+        // Anything else is a real failure and must not be retried blindly.
+        const isShortIdRace = upsertErr?.code === 'P2002'
+          && (upsertErr.meta?.target || []).toString().includes('short_id');
+        if (!isShortIdRace) throw upsertErr;
+      }
+    }
 
-    installmentLedger = await prisma.installmentLedger.upsert({
-      where: { order_id: order.id },
-      create: {
-        order_id: order.id,
-        delivery_id: delivery.id,
-        token: ledgerToken,
-        short_id: shortId,
-        ledger_rows: ledgerRows,
-        created_at: now(),
-        updated_at: now(),
-      },
-      update: {
-        delivery_id: delivery.id,
-        token: ledgerToken,
-        short_id: shortId,
-        ledger_rows: ledgerRows,
-        updated_at: now(),
-      },
-    });
+    if (!installmentLedger) throw new Error('Could not allocate a unique ledger short_id after 5 attempts');
 
     const mobile = purchaser?.telephone_number || order.whatsapp_number;
     const consumerNo = await generateConsumerNumber(payload.product_imei, mobile);
@@ -238,7 +247,28 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
       console.error('[deliveryCompletionService] Failed to create ConsumerNumbers (Non-fatal):', consumerErr);
     }
   } catch (ledgerErr) {
-    console.error('[deliveryCompletionService] Ledger creation error:', ledgerErr);
+    // The delivery is already committed by the time we get here, so throwing
+    // would leave a half-delivered order — but a delivered order with no
+    // ledger is broken (no schedule, no PDF link, no recovery rows) and this
+    // used to be a bare console.error nobody ever read. Shout about it and
+    // hand the reason back so the caller can surface it.
+    //
+    // `installmentLedger` is only null when the upsert itself failed; a later
+    // throw (consumer numbers, etc.) leaves a perfectly good ledger that must
+    // still be returned, or the WATI ledger link silently goes missing too.
+    if (installmentLedger) {
+      console.error(
+        `[deliveryCompletionService] Ledger for order ${order.order_ref} was created but post-processing failed:`,
+        ledgerErr
+      );
+    } else {
+      console.error(
+        `[deliveryCompletionService] LEDGER CREATION FAILED for order ${order.order_ref} (order_id=${order.id}, delivery_id=${delivery.id}). ` +
+        `The delivery is complete but has NO installment ledger — repair with POST /api/ledger/rebuild/${order.id}.`,
+        ledgerErr
+      );
+    }
+    return { installmentLedger, ledgerUrl, ledgerError: ledgerErr.message || 'unknown' };
   }
 
   return { installmentLedger, ledgerUrl };
@@ -437,10 +467,11 @@ async function completeAgentDelivery({ order, payload, io, productNameSnapshot, 
     });
   }
 
-  const { installmentLedger, ledgerUrl } = await buildInstallmentLedgerAndConsumerNumbers({
+  const { installmentLedger, ledgerUrl, ledgerError } = await buildInstallmentLedgerAndConsumerNumbers({
     order, delivery, payload, advanceAmount, planObj, purchaser,
     feedbackLabel: 'Collected at Delivery',
   });
+  if (!installmentLedger) await alertMissingLedger({ order, ledgerError, delivery, io });
 
   sendCompletionWatiMessages({
     purchaser, order, productNameSnapshot, colorVariant, advanceAmount,
@@ -612,10 +643,11 @@ async function completeSelfPickupDelivery({ order, payload, io, productNameSnaps
 
   await logOrderStatusChange(order.id, order.status, 'delivered', user);
 
-  const { installmentLedger, ledgerUrl } = await buildInstallmentLedgerAndConsumerNumbers({
+  const { installmentLedger, ledgerUrl, ledgerError } = await buildInstallmentLedgerAndConsumerNumbers({
     order, delivery, payload, advanceAmount, planObj, purchaser,
     feedbackLabel: 'Self Pickup at Branch',
   });
+  if (!installmentLedger) await alertMissingLedger({ order, ledgerError, delivery, io });
 
   sendCompletionWatiMessages({
     purchaser, order, productNameSnapshot, colorVariant, advanceAmount,

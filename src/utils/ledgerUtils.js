@@ -1,4 +1,5 @@
 const prisma = require('../../lib/prisma');
+const crypto = require('crypto');
 
 /**
  * Normalizes ledger rows by rolling over overdue unpaid amounts to the next month.
@@ -173,8 +174,95 @@ function computeDueAndCurrent(installmentLedgerRows) {
     return { due, current };
 }
 
+/**
+ * Picks a free `short_id` for a new installment ledger.
+ *
+ * The short id is the customer-facing ledger handle (it is what goes out in
+ * the WATI ledger link and what /api/ledger/pdf/:shortId resolves), so it is
+ * UNIQUE across the whole table. Deriving it from the IMEI's last 6 digits
+ * gives a memorable value, but those 6 digits are NOT unique across devices —
+ * two handsets from different batches collide routinely, and at a few
+ * thousand ledgers the birthday bound makes a collision near-certain.
+ *
+ * Callers used to hand the raw last-6 straight to create/upsert, so a
+ * collision raised P2002 and (in the delivery flow) got swallowed — the
+ * delivery completed with no ledger at all. Check first and fall back to
+ * random hex instead: a less pretty id beats a missing ledger.
+ *
+ * Not race-proof on its own — two concurrent deliveries can still pick the
+ * same free id between the check and the write — so writers must also retry
+ * the insert on P2002.
+ */
+async function generateLedgerShortId(imei, { excludeOrderId = null, attempts = 20 } = {}) {
+    const digits = imei ? String(imei).replace(/\D/g, '') : '';
+    let candidate = digits.length >= 6
+        ? digits.slice(-6)
+        : crypto.randomBytes(4).toString('hex').slice(0, 6);
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const clash = await prisma.installmentLedger.findUnique({
+            where: { short_id: candidate },
+            select: { order_id: true },
+        });
+        // Re-running against the order that already owns this id is a no-op,
+        // not a clash — matters for upsert-update and for repair reruns.
+        if (!clash || (excludeOrderId && clash.order_id === excludeOrderId)) return candidate;
+        candidate = crypto.randomBytes(4).toString('hex').slice(0, 6);
+    }
+    // Exhausted the short space; widen rather than fail.
+    return crypto.randomBytes(8).toString('hex').slice(0, 12);
+}
+
+const addMonths = (date, n) => {
+    const d = new Date(date);
+    d.setMonth(d.getMonth() + n);
+    return d;
+};
+
+/**
+ * Builds the canonical ledger_rows array: row 0 is the advance (already paid
+ * at delivery), rows 1..n are the monthly installments. `customLedger` (the
+ * per-month date/amount overrides an officer can set at delivery) wins when
+ * it covers exactly `totalMonths` rows, otherwise the plan's flat monthly
+ * amount is spread over month-anniversaries of `startDate`.
+ *
+ * Shared by the delivery-completion flow and the admin ledger repair so a
+ * rebuilt ledger is byte-for-byte the shape the delivery flow would have
+ * produced.
+ */
+function buildLedgerRows({ advanceAmount, monthlyAmount, totalMonths, customLedger, startDate, feedbackLabel }) {
+    const start = startDate ? new Date(startDate) : new Date();
+    const rows = [{
+        month: 0,
+        label: 'Advance Payment',
+        due_date: start,
+        amount: parseFloat(advanceAmount || 0),
+        status: 'paid',
+        paid_at: start,
+        payment_method: 'Cash',
+        feedback: feedbackLabel,
+    }];
+
+    const useCustom = Array.isArray(customLedger) && customLedger.length === totalMonths;
+    for (let i = 0; i < totalMonths; i += 1) {
+        const override = useCustom ? customLedger[i] : null;
+        rows.push({
+            month: i + 1,
+            label: `Month ${i + 1}`,
+            due_date: override?.date ? new Date(override.date) : addMonths(start, i + 1),
+            amount: (override && parseFloat(override.amount)) || parseFloat(monthlyAmount),
+            status: 'pending',
+            paid_at: null,
+        });
+    }
+
+    return rows;
+}
+
 module.exports = {
     normalizeLedger,
     getNormalizedLedger,
-    computeDueAndCurrent
+    computeDueAndCurrent,
+    generateLedgerShortId,
+    buildLedgerRows
 };
