@@ -1055,8 +1055,8 @@ const sendCustomerLedger = async (phone, {
 // ledger-linking template above). Sent the moment an account is NEWLY marked
 // blacklisted for non-payment — see blacklistUtils.js's notifyBlacklistedOrder,
 // called from both the automatic 90-day sync and the manual staff action.
-const WATI_MARK_BLACKLIST_TEMPLATE = process.env.WATI_MARK_BLACKLIST_TEMPLATE || 'mark_blacklist';
-const WATI_MARK_BLACKLIST_BROADCAST = process.env.WATI_MARK_BLACKLIST_TEMPLATE || 'mark_blacklist';
+// const WATI_MARK_BLACKLIST_TEMPLATE = process.env.WATI_MARK_BLACKLIST_TEMPLATE || 'mark_blacklist';
+// const WATI_MARK_BLACKLIST_BROADCAST = process.env.WATI_MARK_BLACKLIST_TEMPLATE || 'mark_blacklist';
 
 const sendMarkBlacklist = async (phone, {
   customerName,
@@ -1074,7 +1074,10 @@ const sendMarkBlacklist = async (phone, {
     { name: 'Overdue_Date', value: overdueDate || 'N/A' },
     { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
   ];
-  return sendTemplate(phone, WATI_MARK_BLACKLIST_TEMPLATE, WATI_MARK_BLACKLIST_BROADCAST, parameters);
+  return sendTemplate(phone,
+    //  WATI_MARK_BLACKLIST_TEMPLATE, WATI_MARK_BLACKLIST_BROADCAST,
+      parameters
+    );
 };
 
 // ─── Template 29: Guarantor Blacklist Notice ────────────────────────────────
@@ -1084,8 +1087,8 @@ const sendMarkBlacklist = async (phone, {
 // account is newly marked blacklisted — see blacklistUtils.js's
 // notifyBlacklistedOrder, which sends this alongside sendMarkBlacklist (the
 // customer's own copy) for the same event.
-const WATI_GUARANTOR_NOTICE_TEMPLATE = process.env.WATI_GUARANTOR_NOTICE_TEMPLATE || 'guarantor_notice';
-const WATI_GUARANTOR_NOTICE_BROADCAST = process.env.WATI_GUARANTOR_NOTICE_TEMPLATE || 'guarantor_notice';
+// const WATI_GUARANTOR_NOTICE_TEMPLATE = process.env.WATI_GUARANTOR_NOTICE_TEMPLATE || 'guarantor_notice';
+// const WATI_GUARANTOR_NOTICE_BROADCAST = process.env.WATI_GUARANTOR_NOTICE_TEMPLATE || 'guarantor_notice';
 
 const sendGuarantorNotice = async (phone, {
   guarantorName,
@@ -1103,7 +1106,9 @@ const sendGuarantorNotice = async (phone, {
     { name: 'Outstanding_Amount', value: String(outstandingAmount ?? 0) },
     { name: 'Ledger_Link', value: ledgerUrl || 'N/A' },
   ];
-  return sendTemplate(phone, WATI_GUARANTOR_NOTICE_TEMPLATE, WATI_GUARANTOR_NOTICE_BROADCAST, parameters);
+  return sendTemplate(phone,
+    //  WATI_GUARANTOR_NOTICE_TEMPLATE, WATI_GUARANTOR_NOTICE_BROADCAST, 
+     parameters);
 };
 
 // ─── Template 30: Payment Overdue (Defaulter Notice) ────────────────────────
