@@ -1385,6 +1385,7 @@ const getCsrDashboardStats = async (req, res) => {
     // 1.1 Target tracking base — total_amount from delivered orders for current period
     // Use delivered_at filter (with fallback to updated_at) to match delivered orders list logic
     // const deliveredWhere = { ...baseWhere, status: 'delivered' };
+    
     // if (filter !== 'today') {
     //   // For month/custom filters, use delivered_at to match the delivered orders list
     //   deliveredWhere.OR = [
