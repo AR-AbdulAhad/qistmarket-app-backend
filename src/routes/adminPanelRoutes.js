@@ -4,7 +4,7 @@ const { authenticateJWT, requireSuperAdmin } = require('../middlewares/authMiddl
 const { getUsers } = require('../controllers/authController');
 const {
     getOutletPerformanceSummary, getUnifiedRankings, getDeliveryManagementOverview, syncBadges, getBadges,
-    getOutletRankings, getMissedRecoveryTracking, getProductSalesReport, getInstallmentStatusCounts,
+    getOutletRankings, getGlobalRankings, getMissedRecoveryTracking, getProductSalesReport, getInstallmentStatusCounts,
     getAttendanceMonitoring, getPayrollSummary, getOutletStaffList, deleteOrderPermanently,
     listRecycleBinOrders, restoreOrders, permanentlyDeleteOrders,
     getScoringRulesConfig, updateScoringRulesConfig, triggerRankingsRecalculation,
@@ -36,6 +36,7 @@ router.post('/legacy-import/:orderId/mark-complete', authenticateJWT, requireSup
 router.get('/outlets/performance', authenticateJWT, getOutletPerformanceSummary);
 router.get('/outlets/rankings', authenticateJWT, getOutletRankings);
 router.get('/rankings', authenticateJWT, getUnifiedRankings);
+router.get('/rankings/global', authenticateJWT, getGlobalRankings);
 router.get('/delivery-overview', authenticateJWT, getDeliveryManagementOverview);
 router.post('/notifications/broadcast', authenticateJWT, sendBroadcast);
 router.get('/roles', authenticateJWT, getRoleOptions);

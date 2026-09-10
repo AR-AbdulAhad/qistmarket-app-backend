@@ -374,6 +374,22 @@ const getBlacklistedCustomers = async (req, res) => {
         blacklistedRole = blacklistedGrantor?.grantor_number === 2 ? 'G2' : 'Guarantor';
       }
 
+      // Full guarantor roster for this order — surfaced so the UI can nest
+      // guarantor details under the customer row instead of only exposing
+      // the "which role triggered the blacklist" badge.
+      const guarantors = (order.verification?.grantors || []).map((g) => ({
+        id: g.id,
+        name: g.name,
+        cnic_number: g.cnic_number || null,
+        telephone_number: g.telephone_number || null,
+        relationship: g.relationship || null,
+        grantor_number: g.grantor_number,
+        area: g.present_area || g.permanent_area || null,
+        present_address: g.present_address || null,
+        permanent_address: g.permanent_address || null,
+        is_blacklisted: !!g.is_blacklisted,
+      }));
+
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
@@ -392,6 +408,7 @@ const getBlacklistedCustomers = async (req, res) => {
             created_at: order.created_at,
             blacklisted_role: blacklistedRole,
             recovery_officer_name: order.recovery_officer?.full_name || null,
+            guarantors,
           },
           orders: [],
           ledgerSummary: {
@@ -456,20 +473,50 @@ const getBlacklistedCustomers = async (req, res) => {
       a.customer.name.localeCompare(b.customer.name)
     );
 
-    // Attach manual blacklist reasons, blacklist date, and pending-whitelist status
+    // Attach manual/auto blacklist reason, blacklist date, actor, and
+    // pending-whitelist status — for the customer AND for every guarantor
+    // listed under them, each resolved from their own CNIC's BlacklistAction
+    // history (syncBlacklistStatus now logs one for auto-flagged accounts too).
+    const applyDefaultBlacklistMeta = (entity) => {
+      entity.blacklist_reason = 'Auto-flagged (90+ days delinquency)';
+      entity.blacklist_date = null;
+      entity.blacklist_status = 'Blacklisted';
+      entity.blacklisted_by_name = null;
+    };
+    // A guarantor riding along on a blacklisted order isn't necessarily
+    // blacklisted themself — only give them reason/date/status/actor when
+    // their own is_blacklisted flag is actually set, otherwise it would
+    // falsely read as "Blacklisted" for someone who isn't.
+    const applyDefaultGuarantorMeta = (g) => {
+      if (g.is_blacklisted) {
+        applyDefaultBlacklistMeta(g);
+      } else {
+        g.blacklist_reason = null;
+        g.blacklist_date = null;
+        g.blacklist_status = null;
+        g.blacklisted_by_name = null;
+      }
+    };
     for (const c of allBlacklisted) {
-      c.customer.blacklist_reason = 'Auto-flagged (90+ days delinquency)';
-      c.customer.blacklist_date = null;
-      c.customer.blacklist_status = 'Blacklisted';
+      applyDefaultBlacklistMeta(c.customer);
+      (c.customer.guarantors || []).forEach(applyDefaultGuarantorMeta);
     }
-    const cnics = allBlacklisted.map(c => c.customer.cnic_number).filter(Boolean);
+
+    const cnics = Array.from(new Set(
+      allBlacklisted.flatMap(c => [
+        c.customer.cnic_number,
+        ...((c.customer.guarantors || []).map(g => g.cnic_number)),
+      ]).filter(Boolean)
+    ));
+
     if (cnics.length > 0) {
       const actions = await prisma.blacklistAction.findMany({
         where: { cnic: { in: cnics } },
+        include: { created_by: { select: { full_name: true } } },
         orderBy: { created_at: 'desc' }
       });
 
-      // Latest "blacklist" action per cnic — drives reason + blacklist date.
+      // Latest "blacklist" action per cnic — drives reason + blacklist date + actor.
       const blacklistActionMap = new Map();
       // Latest action of any kind per cnic — a pending whitelist request overrides the "Blacklisted" status.
       const latestActionMap = new Map();
@@ -478,18 +525,26 @@ const getBlacklistedCustomers = async (req, res) => {
         if (a.action === 'blacklist' && !blacklistActionMap.has(a.cnic)) blacklistActionMap.set(a.cnic, a);
       }
 
-      for (const c of allBlacklisted) {
-        const cnic = c.customer.cnic_number;
+      const applyBlacklistMeta = (entity) => {
+        const cnic = entity.cnic_number;
         const blacklistAction = cnic ? blacklistActionMap.get(cnic) : null;
         const latestAction = cnic ? latestActionMap.get(cnic) : null;
 
-        c.customer.blacklist_reason = blacklistAction
+        entity.blacklist_reason = blacklistAction
           ? (blacklistAction.reason || 'Manual blacklist (No reason provided)')
           : 'Auto-flagged (90+ days delinquency)';
-        c.customer.blacklist_date = blacklistAction?.created_at || null;
-        c.customer.blacklist_status = (latestAction?.action === 'whitelist' && latestAction.status === 'pending')
+        entity.blacklist_date = blacklistAction?.created_at || null;
+        entity.blacklisted_by_name = blacklistAction
+          ? (blacklistAction.created_by?.full_name || 'System (Auto-flagged)')
+          : null;
+        entity.blacklist_status = (latestAction?.action === 'whitelist' && latestAction.status === 'pending')
           ? 'Pending Whitelist'
           : 'Blacklisted';
+      };
+
+      for (const c of allBlacklisted) {
+        applyBlacklistMeta(c.customer);
+        (c.customer.guarantors || []).filter(g => g.is_blacklisted).forEach(applyBlacklistMeta);
       }
     }
 

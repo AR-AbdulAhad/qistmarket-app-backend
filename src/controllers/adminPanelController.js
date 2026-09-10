@@ -202,10 +202,14 @@ const getUnifiedRankings = async (req, res) => {
             }),
             ...csrShaped.map(async (row) => {
                 row.conversion_rate = row.unique_customers > 0 ? Math.round((row.delivered_customers / row.unique_customers) * 1000) / 10 : 0;
+                row.complaints_solved = await prisma.complaint.count({
+                    where: { assigned_to_user_id: row.officer_id, status: 'Solved', updated_at: { gte: startOfMonth, lt: endOfMonth } },
+                });
             }),
         ]);
 
         // Re-rank based on accurate live scores
+        csrShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
         verificationShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
         deliveryShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
         recoveryShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
@@ -243,6 +247,80 @@ const getUnifiedRankings = async (req, res) => {
  * ranking tables already set the precedent that "ranking" doesn't
  * require a dedicated always-on service for every board.
  */
+// Shared by getOutletRankings (current month) and getGlobalRankings
+// (all-time — pass no dateRange to include every delivered/returned/cancelled
+// order ever, not just one month's worth).
+async function computeOutletRankings(dateRange) {
+    const outlets = await prisma.outlet.findMany({ where: { type: { not: 'warehouse' } }, select: { id: true, name: true, code: true } });
+    const outletIds = outlets.map((o) => o.id);
+
+    const deliveredWhere = { outlet_id: { in: outletIds }, status: 'delivered' };
+    if (dateRange) {
+        deliveredWhere.OR = [
+            { delivered_at: dateRange },
+            { AND: [{ delivered_at: null }, { updated_at: dateRange }] },
+        ];
+    }
+    const orders = await prisma.order.findMany({
+        where: deliveredWhere,
+        select: { outlet_id: true, total_amount: true, installment_ledger: { select: { ledger_rows: true } } },
+    });
+
+    const returnedWhere = { outlet_id: { in: outletIds }, status: 'returned' };
+    if (dateRange) returnedWhere.updated_at = dateRange;
+    const returnedOrders = await prisma.order.findMany({ where: returnedWhere, select: { outlet_id: true } });
+
+    const cancelledWhere = { outlet_id: { in: outletIds }, status: 'cancelled' };
+    if (dateRange) cancelledWhere.updated_at = dateRange;
+    const cancelledOrders = await prisma.order.findMany({ where: cancelledWhere, select: { outlet_id: true } });
+
+    const stats = {};
+    for (const o of outlets) stats[o.id] = { outlet_id: o.id, outlet_name: o.name, outlet_code: o.code, totalSales: 0, dueAmount: 0, recoveredAmount: 0, customerCount: 0, returnedCount: 0, cancelledCount: 0 };
+
+    for (const order of orders) {
+        const entry = stats[order.outlet_id];
+        if (!entry) continue;
+
+        entry.totalSales += order.total_amount || 0;
+        entry.customerCount += 1;
+
+        const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
+        for (const row of rows) {
+            const amount = parseFloat(row.amount || row.dueAmount || 0);
+            const paidAmount = parseFloat(row.paid_amount || (row.status === 'paid' ? amount : 0)) || 0;
+            entry.dueAmount += amount;
+            entry.recoveredAmount += Math.min(paidAmount, amount);
+        }
+    }
+
+    for (const order of returnedOrders) {
+        const entry = stats[order.outlet_id];
+        if (entry) entry.returnedCount += 1;
+    }
+
+    for (const order of cancelledOrders) {
+        const entry = stats[order.outlet_id];
+        if (entry) entry.cancelledCount += 1;
+    }
+
+    const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
+
+    return Object.values(stats).map((s) => {
+        const recoveryPct = s.dueAmount > 0 ? (s.recoveredAmount / s.dueAmount) * 100 : 0;
+        const scoringCfg = getEffectiveScoringRules('outlet', 'outlet', s.outlet_id);
+
+        const salesPts = (s.totalSales / (scoringCfg.sales_divisor || 1000)) * (scoringCfg.sales_multiplier ?? 1);
+        const recPts = recoveryPct * (scoringCfg.recovery_pct_multiplier ?? 5);
+        const delPts = s.customerCount * (scoringCfg.points_per_delivered_order ?? 10);
+        const retPts = (s.returnedCount || 0) * (scoringCfg.points_deducted_per_returned_order ?? 10);
+        const canPts = (s.cancelledCount || 0) * (scoringCfg.points_deducted_per_cancelled_order ?? 0);
+
+        const score = Math.round(salesPts + recPts + delPts - retPts - canPts);
+        return { ...s, recoveryPercentage: Math.round(recoveryPct * 10) / 10, score };
+    }).sort((a, b) => b.score - a.score)
+      .map((s, idx) => ({ ...s, rank: idx + 1, tier: tierFor(s.score) }));
+}
+
 const getOutletRankings = async (req, res) => {
     try {
         const now = new Date();
@@ -252,87 +330,76 @@ const getOutletRankings = async (req, res) => {
         const startOfMonth = new Date(year, month - 1, 1);
         const startOfNextMonth = new Date(year, month, 1);
 
-        const outlets = await prisma.outlet.findMany({ where: { type: { not: 'warehouse' } }, select: { id: true, name: true, code: true } });
-
-        const orders = await prisma.order.findMany({
-            where: {
-                outlet_id: { in: outlets.map((o) => o.id) },
-                status: 'delivered',
-                OR: [
-                    { delivered_at: { gte: startOfMonth, lt: startOfNextMonth } },
-                    { AND: [{ delivered_at: null }, { updated_at: { gte: startOfMonth, lt: startOfNextMonth } }] },
-                ],
-            },
-            select: { outlet_id: true, total_amount: true, installment_ledger: { select: { ledger_rows: true } } },
-        });
-
-        const returnedOrders = await prisma.order.findMany({
-            where: {
-                outlet_id: { in: outlets.map((o) => o.id) },
-                status: 'returned',
-                updated_at: { gte: startOfMonth, lt: startOfNextMonth },
-            },
-            select: { outlet_id: true },
-        });
-
-        const cancelledOrders = await prisma.order.findMany({
-            where: {
-                outlet_id: { in: outlets.map((o) => o.id) },
-                status: 'cancelled',
-                updated_at: { gte: startOfMonth, lt: startOfNextMonth },
-            },
-            select: { outlet_id: true },
-        });
-
-        const stats = {};
-        for (const o of outlets) stats[o.id] = { outlet_id: o.id, outlet_name: o.name, outlet_code: o.code, totalSales: 0, dueAmount: 0, recoveredAmount: 0, customerCount: 0, returnedCount: 0, cancelledCount: 0 };
-
-        for (const order of orders) {
-            const entry = stats[order.outlet_id];
-            if (!entry) continue;
-
-            entry.totalSales += order.total_amount || 0;
-            entry.customerCount += 1;
-
-            const rows = Array.isArray(order.installment_ledger?.ledger_rows) ? order.installment_ledger.ledger_rows : [];
-            for (const row of rows) {
-                const amount = parseFloat(row.amount || row.dueAmount || 0);
-                const paidAmount = parseFloat(row.paid_amount || (row.status === 'paid' ? amount : 0)) || 0;
-                entry.dueAmount += amount;
-                entry.recoveredAmount += Math.min(paidAmount, amount);
-            }
-        }
-
-        for (const order of returnedOrders) {
-            const entry = stats[order.outlet_id];
-            if (entry) entry.returnedCount += 1;
-        }
-
-        for (const order of cancelledOrders) {
-            const entry = stats[order.outlet_id];
-            if (entry) entry.cancelledCount += 1;
-        }
-
-        const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
-
-        const ranked = Object.values(stats).map((s) => {
-            const recoveryPct = s.dueAmount > 0 ? (s.recoveredAmount / s.dueAmount) * 100 : 0;
-            const scoringCfg = getEffectiveScoringRules('outlet', 'outlet', s.outlet_id);
-            
-            const salesPts = (s.totalSales / (scoringCfg.sales_divisor || 1000)) * (scoringCfg.sales_multiplier ?? 1);
-            const recPts = recoveryPct * (scoringCfg.recovery_pct_multiplier ?? 5);
-            const delPts = s.customerCount * (scoringCfg.points_per_delivered_order ?? 10);
-            const retPts = (s.returnedCount || 0) * (scoringCfg.points_deducted_per_returned_order ?? 10);
-            const canPts = (s.cancelledCount || 0) * (scoringCfg.points_deducted_per_cancelled_order ?? 0);
-
-            const score = Math.round(salesPts + recPts + delPts - retPts - canPts);
-            return { ...s, recoveryPercentage: Math.round(recoveryPct * 10) / 10, score };
-        }).sort((a, b) => b.score - a.score)
-          .map((s, idx) => ({ ...s, rank: idx + 1, tier: tierFor(s.score) }));
+        const ranked = await computeOutletRankings({ gte: startOfMonth, lt: startOfNextMonth });
 
         res.json({ success: true, data: ranked, month, year });
     } catch (error) {
         console.error('getOutletRankings error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+};
+
+// Sums every persisted monthly snapshot (period='month') per user across
+// the ranking table's whole history — a lifetime total, not scoped to any
+// one month like getUnifiedRankings. Returns the FULL roster, not just the
+// top 10, since this is meant to answer "where does everyone stand overall."
+async function buildGlobalOfficerBoard(model, idField) {
+    const grouped = await model.groupBy({
+        by: [idField],
+        where: { period: 'month' },
+        _sum: { score: true, total_sales: true, delivered_customers: true, unique_customers: true },
+    });
+    if (grouped.length === 0) return [];
+
+    const userIds = grouped.map((g) => g[idField]);
+    const users = await prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: { id: true, full_name: true, username: true, outlet: { select: { id: true, name: true } } },
+    });
+    const userMap = new Map(users.map((u) => [u.id, u]));
+
+    return grouped
+        .map((g) => {
+            const u = userMap.get(g[idField]);
+            const score = g._sum.score || 0;
+            return {
+                id: g[idField],
+                officer_id: g[idField],
+                full_name: u?.full_name || 'Unknown',
+                username: u?.username || '',
+                outlet_name: u?.outlet?.name || 'Unassigned',
+                outlet_id: u?.outlet?.id || null,
+                score,
+                total_sales: g._sum.total_sales || 0,
+                delivered_customers: g._sum.delivered_customers || 0,
+                unique_customers: g._sum.unique_customers || 0,
+                tier: tierFor(score),
+            };
+        })
+        .sort((a, b) => b.score - a.score)
+        .map((r, idx) => ({ ...r, rank: idx + 1 }));
+}
+
+/**
+ * getGlobalRankings
+ * All-time, company-wide leaderboard — every CSR, Verification/Delivery/
+ * Recovery officer, and outlet, ranked by lifetime totals rather than the
+ * current month only. Complements getUnifiedRankings/getOutletRankings,
+ * which are both scoped to "this month."
+ */
+const getGlobalRankings = async (req, res) => {
+    try {
+        const [csr, verification, delivery, recovery, outlet] = await Promise.all([
+            buildGlobalOfficerBoard(prisma.csrRanking, 'csr_id'),
+            buildGlobalOfficerBoard(prisma.verificationRanking, 'officer_id'),
+            buildGlobalOfficerBoard(prisma.deliveryRanking, 'officer_id'),
+            buildGlobalOfficerBoard(prisma.recoveryRanking, 'officer_id'),
+            computeOutletRankings(null),
+        ]);
+
+        res.json({ success: true, data: { csr, verification, delivery, recovery, outlet } });
+    } catch (error) {
+        console.error('getGlobalRankings error:', error);
         res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
@@ -1068,6 +1135,7 @@ module.exports = {
     syncBadges,
     getBadges,
     getOutletRankings,
+    getGlobalRankings,
     getMissedRecoveryTracking,
     getProductSalesReport,
     getInstallmentStatusCounts,

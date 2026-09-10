@@ -113,6 +113,11 @@ async function syncBlacklistStatus() {
         // get notified — re-running the sync must not re-notify someone who
         // was already flagged on a previous pass.
         const newlyBlacklistedOrders = [];
+        // Same "crossing false -> true" set, but keyed by CNIC (purchaser AND
+        // every grantor) — drives a BlacklistAction row per person so the
+        // blacklist list has a real date/reason/actor for auto-flagged
+        // accounts instead of only for manually-blacklisted ones.
+        const newlyBlacklistedCnics = new Map();
 
         for (const order of orders) {
             const purchaserCnic = order.verification?.purchaser?.cnic_number;
@@ -154,8 +159,15 @@ async function syncBlacklistStatus() {
 
             if (isBlacklisted && order.verification?.id) {
                 blacklistedVerificationIds.push(order.verification.id);
-                if (!order.verification?.purchaser?.is_blacklisted) {
+                const purchaser = order.verification?.purchaser;
+                if (purchaser && !purchaser.is_blacklisted) {
                     newlyBlacklistedOrders.push({ order, rows });
+                    if (purchaser.cnic_number) newlyBlacklistedCnics.set(purchaser.cnic_number, true);
+                }
+                for (const grantor of order.verification?.grantors || []) {
+                    if (!grantor.is_blacklisted && grantor.cnic_number) {
+                        newlyBlacklistedCnics.set(grantor.cnic_number, true);
+                    }
                 }
             }
         }
@@ -174,6 +186,21 @@ async function syncBlacklistStatus() {
             });
 
             console.log(`[BlacklistSync] Successfully blacklisted ${blacklistedVerificationIds.length} verifications.`);
+
+            if (newlyBlacklistedCnics.size > 0) {
+                const now = new Date();
+                await prisma.blacklistAction.createMany({
+                    data: Array.from(newlyBlacklistedCnics.keys()).map((cnic) => ({
+                        cnic,
+                        action: 'blacklist',
+                        category: 'auto',
+                        reason: 'Auto-flagged (90+ days delinquency)',
+                        status: 'approved',
+                        approved_at: now,
+                        created_at: now,
+                    })),
+                });
+            }
 
             for (const { order, rows } of newlyBlacklistedOrders) {
                 notifyBlacklistedOrder(order, rows).catch((e) => console.error('[BlacklistSync] notify error:', e));
