@@ -164,6 +164,8 @@ const getUnifiedRankings = async (req, res) => {
         // (not stored on the ranking rows themselves) for the top-10 rows
         // already returned per board, so this stays a bounded query volume.
 
+        const { getEffectiveScoringRules } = require('../utils/scoringConfigUtils');
+
         await Promise.all([
             ...verificationShaped.map(async (row) => {
                 const orders = await prisma.order.findMany({
@@ -173,7 +175,27 @@ const getUnifiedRankings = async (req, res) => {
                 row.total_verifications = orders.length;
                 row.approved_verifications = orders.filter((o) => o.status === 'completed').length;
                 row.rejected_verifications = orders.filter((o) => o.status === 'rejected').length;
-                row.score = row.approved_verifications * 10;
+                // Cases actually resolved (approved or rejected) this month — the ranking
+                // criterion the outlet team wants primary: an officer who decided a handful
+                // of cases should outrank one sitting on a large pile of still-pending
+                // assignments, no matter how big that pending pile is.
+                row.decisions_made = row.approved_verifications + row.rejected_verifications;
+                const deliveredCount = orders.filter((o) => o.status === 'delivered').length;
+                const returnedCount = orders.filter((o) => o.status === 'returned').length;
+                const cancelledCount = orders.filter((o) => o.status === 'cancelled').length;
+                const expiredCount = orders.filter((o) => o.status === 'expired').length;
+                // Match the weighted/deducted formula updateVerificationRanking uses for the
+                // cached score, instead of the flat "approved * 10" this block used before —
+                // that dropped delivered orders and every deduction, which let officers with
+                // zero completions but very different order counts (e.g. one with a pending
+                // rejection) tie at score 0 and keep whatever order the stale cached `rank`
+                // column happened to have them in.
+                const cfg = getEffectiveScoringRules('verification', 'officer', row.officer_id);
+                row.score = (row.approved_verifications * (cfg.points_per_completed_verification || 10))
+                    + (deliveredCount * (cfg.points_per_delivered_order || 5))
+                    - (returnedCount * (cfg.points_deducted_per_returned_order || 5))
+                    - (cancelledCount * (cfg.points_deducted_per_cancelled_order || 2))
+                    - (expiredCount * (cfg.points_deducted_per_expired_order || 3));
                 row.tier = tierFor(row.score);
             }),
             ...deliveryShaped.map(async (row) => {
@@ -210,7 +232,13 @@ const getUnifiedRankings = async (req, res) => {
 
         // Re-rank based on accurate live scores
         csrShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
-        verificationShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
+        // Rank primarily by cases actually decided (approved + rejected) this month,
+        // not raw assigned volume — an officer with a handful of resolved cases should
+        // outrank one holding a much bigger pile of still-pending assignments. Score
+        // (which weighs approvals over rejections, plus delivered/deductions) breaks
+        // ties within the same decision count, and total assigned is the final,
+        // deterministic tiebreaker instead of falling back to the stale cached `rank`.
+        verificationShaped.sort((a,b) => (b.decisions_made - a.decisions_made) || (b.score - a.score) || (b.total_verifications - a.total_verifications)).forEach((r, i) => r.rank = i + 1);
         deliveryShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
         recoveryShaped.sort((a,b) => b.score - a.score).forEach((r, i) => r.rank = i + 1);
 
