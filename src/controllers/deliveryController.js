@@ -1314,6 +1314,38 @@ const verifyDeliveryOtp = async (req, res) => {
       try {
         const parsedLedger = typeof custom_ledger === 'string' ? JSON.parse(custom_ledger) : custom_ledger;
 
+        // This is the only ledger-creating path that doesn't already have a
+        // Delivery record (self-pickup/manual admin close-out), so there's
+        // no product_imei to key the 1Bill number off yet — fall back to
+        // the order's own imei_serial (set at order-creation time), then
+        // just the customer's phone, same fallback order every other
+        // consumer-number call site already uses.
+        const existingLedgerBefore = await prisma.installmentLedger.findUnique({ where: { order_id: order.id } });
+        const isFirstLedgerForOrder = !existingLedgerBefore;
+        const imeiForGen = order.imei_serial || null;
+        const mobileForGen = purchaserNumber || order.whatsapp_number || null;
+
+        // Only generate a real 1Bill/SmartPay ID pair when this is genuinely
+        // the first ledger for this order — an admin re-editing an already
+        // delivered order's ledger through this same endpoint must not
+        // silently swap out (and thereby break) an already-issued short_id
+        // and already-shared consumer numbers.
+        let newConsumerNo = null;
+        let newSmartPayConsumerNo = null;
+        if (isFirstLedgerForOrder) {
+          newConsumerNo = await generateConsumerNumber(imeiForGen, mobileForGen);
+          newSmartPayConsumerNo = await generateSmartPayConsumerNumber(imeiForGen, mobileForGen);
+        }
+
+        const ledgerToken = jwt.sign(
+          { order_id: order.id },
+          LEDGER_TOKEN_SECRET,
+          { expiresIn: '730d' }
+        );
+
+        let finalLedgerId = existingLedgerBefore?.id || null;
+        let finalDeliveryId = null;
+
         await prisma.$transaction(async (tx) => {
           // 1. Update Order Status with updated_at
           await tx.order.update({
@@ -1326,28 +1358,19 @@ const verifyDeliveryOtp = async (req, res) => {
             }
           });
 
-          // 2. Create/Update Ledger with timestamps
-          await tx.installmentLedger.upsert({
-            where: { order_id: order.id },
-            update: {
-              ledger_rows: parsedLedger,
-              updated_at: now()
-            },
-            create: {
-              order_id: order.id,
-              ledger_rows: parsedLedger,
-              created_at: now(),
-              updated_at: now()
-            }
-          });
-
-          // 3. Mark delivery as completed if exists
+          // 2. Resolve the Delivery record FIRST — InstallmentLedger.delivery_id
+          // is a required, unique field, so it must exist before the ledger
+          // upsert below can reference it (this order matters: the ledger
+          // create() previously ran before this and simply never supplied
+          // delivery_id or token at all, which would fail outright the very
+          // first time this endpoint tried to create a genuinely new ledger).
           const existingDelivery = await tx.delivery.findUnique({
             where: { order_id: order.id }
           });
 
+          let deliveryRecord;
           if (existingDelivery) {
-            await tx.delivery.update({
+            deliveryRecord = await tx.delivery.update({
               where: { id: existingDelivery.id },
               data: {
                 status: 'completed',
@@ -1358,7 +1381,7 @@ const verifyDeliveryOtp = async (req, res) => {
             });
           } else {
             // Create a basic delivery record if none exists (manual admin delivery)
-            await tx.delivery.create({
+            deliveryRecord = await tx.delivery.create({
               data: {
                 order_id: order.id,
                 delivery_agent_id: req.user.id,
@@ -1372,7 +1395,60 @@ const verifyDeliveryOtp = async (req, res) => {
               }
             });
           }
+          finalDeliveryId = deliveryRecord.id;
+
+          // 3. Create/Update Ledger with timestamps — short_id (only set on
+          // first creation) is the customer's real 1Bill consumer number
+          // itself, same as every other delivery-completion path, so the
+          // ledger URL sent out already is the customer's 1Bill ID.
+          const savedLedger = await tx.installmentLedger.upsert({
+            where: { order_id: order.id },
+            update: {
+              ledger_rows: parsedLedger,
+              updated_at: now()
+            },
+            create: {
+              order_id: order.id,
+              delivery_id: deliveryRecord.id,
+              token: ledgerToken,
+              short_id: newConsumerNo,
+              ledger_rows: parsedLedger,
+              created_at: now(),
+              updated_at: now()
+            }
+          });
+          finalLedgerId = savedLedger.id;
         });
+
+        // Consumer numbers are looked up outside the transaction (a slow
+        // TPS/SmartPay duplicate check shouldn't hold the delivery/ledger
+        // write locks) — non-fatal if this fails, same as the other repair
+        // paths: the ledger itself is what the customer/staff actually need.
+        if (isFirstLedgerForOrder && newConsumerNo && finalLedgerId) {
+          try {
+            const base = {
+              ledger_id: finalLedgerId,
+              delivery_id: finalDeliveryId,
+              customer_name: order.verification.purchaser.name || order.customer_name || 'N/A',
+              mobile_number: mobileForGen || 'N/A',
+              imei_serial: imeiForGen,
+              amount_due: parsedLedger?.[1]?.amount || 0,
+              billing_month: '0000',
+              due_date: parsedLedger?.[1]?.due_date ? new Date(parsedLedger[1].due_date) : now(),
+              bill_status: 'U',
+              created_at: now(),
+              updated_at: now(),
+            };
+            await prisma.consumerNumber.createMany({
+              data: [
+                { ...base, consumer_number: newConsumerNo },
+                { ...base, consumer_number: newSmartPayConsumerNo },
+              ],
+            });
+          } catch (consumerErr) {
+            console.error('[verifyDeliveryOtp] consumer number creation failed (non-fatal):', consumerErr);
+          }
+        }
 
         await notifyAdmins(
           'Delivery Completed (Manual)',

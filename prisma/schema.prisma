@@ -307,6 +307,7 @@ model Outlet {
   code                   String                 @unique
   name                   String
   address                String?
+  phone                  String?
   status                 String                 @default("active")
   type                   String                 @default("outlet") // "outlet" | "warehouse"
   created_at             DateTime               @default(now())

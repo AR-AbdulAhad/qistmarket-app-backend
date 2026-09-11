@@ -3346,15 +3346,36 @@ const getReturnedOrders = async (req, res) => {
         recovery_officer: { select: { username: true, full_name: true } },
         delivery: true,
         cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
-        verification: { select: { purchaser: { select: { name: true } } } },
+        customer: { select: { is_blacklisted: true } },
+        verification: {
+          select: {
+            purchaser: { select: { name: true, is_blacklisted: true } },
+            grantors: { select: { is_blacklisted: true } },
+          }
+        },
       },
     });
 
-    const formattedOrders = orders.map(order => ({
-      ...order,
-      delivered_product_name: getDeliveredProductName(order),
-      delivered_imei: getDeliveredImei(order),
-    }));
+    const formattedOrders = orders.map(order => {
+      const isCustomerBlacklisted = !!(
+        order.customer?.is_blacklisted ||
+        order.verification?.purchaser?.is_blacklisted ||
+        order.verification?.grantors?.some(g => g.is_blacklisted)
+      );
+      // Every row here already has status 'returned' (this list's own where
+      // clause), so eligibility for Self Pickup Exchange only depends on the
+      // account not being blacklisted — no ReturnExchange record is required
+      // (some returned orders, e.g. legacy/imported ones, never got one).
+      const canExchange = !isCustomerBlacklisted;
+
+      return {
+        ...order,
+        delivered_product_name: getDeliveredProductName(order),
+        delivered_imei: getDeliveredImei(order),
+        is_customer_blacklisted: isCustomerBlacklisted,
+        can_exchange: canExchange,
+      };
+    });
 
     const total = await prisma.order.count({ where });
     const totalPages = Math.ceil(total / take);
@@ -3967,10 +3988,22 @@ const createConvertedSale = async (req, res) => {
         select: {
           outlet_id: true,
           created_by_user_id: true,
-          created_by: { select: { id: true, role: { select: { name: true } } } }
+          created_by: { select: { id: true, role: { select: { name: true } } } },
+          customer: { select: { is_blacklisted: true } },
+          verification: { include: { purchaser: true, grantors: true } }
         }
       });
     }
+
+    const isOldOrderBlacklisted = !!(
+      oldOrder?.customer?.is_blacklisted ||
+      oldOrder?.verification?.purchaser?.is_blacklisted ||
+      oldOrder?.verification?.grantors?.some(g => g.is_blacklisted)
+    );
+    if (isOldOrderBlacklisted) {
+      return res.status(400).json({ success: false, message: 'This customer/account is blacklisted. Whitelist it from Blacklisted Customers before converting to a new sale.' });
+    }
+
     const isCsrOrigin = oldOrder?.created_by?.role?.name === 'Sales Officer';
     const attributedUserId = isCsrOrigin ? oldOrder.created_by_user_id : req.user.id;
 

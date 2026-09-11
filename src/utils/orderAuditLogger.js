@@ -111,7 +111,7 @@ async function logOrderStatusChange(order_id, old_status, new_status, user, rema
     }
 
     // Trigger CSR Ranking Update on specific status changes that affect scores
-    if (['delivered', 'completed', 'cancelled', 'expired'].includes(new_status.toLowerCase())) {
+    if (['delivered', 'completed', 'cancelled', 'expired', 'returned'].includes(new_status.toLowerCase())) {
         const orderForRanking = await prisma.order.findUnique({
             where: { id: parseInt(order_id) },
             select: { created_by_user_id: true }

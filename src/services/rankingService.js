@@ -150,7 +150,6 @@ async function updateCsrRanking(csrId, periodType = 'month') {
     // updateDeliveryRanking below already does for delivery officers.
     let deliveredCount = 0;
     let completedCount = 0;
-    let returnedCount = 0;
     let repeatCount = 0;
     let cancelledCount = 0;
     let expiredCount = 0;
@@ -162,10 +161,23 @@ async function updateCsrRanking(csrId, periodType = 'month') {
             totalSales += getOrderSalesValue(order);
         }
         if (order.status === 'completed') completedCount++;
-        if (order.status === 'returned') returnedCount++;
         if (order.status === 'cancelled') cancelledCount++;
         if (order.status === 'expired') expiredCount++;
         if (order.is_repeat_customer) repeatCount++;
+    });
+
+    // Counted independently of the order's *current* status (not from the
+    // `orders` array above): the write path sets Order.status = 'Returned'
+    // (capital R, never matching a plain 'returned' comparison), and an
+    // exchanged order flips back to 'delivered' afterwards anyway — so a
+    // return/exchange event's deduction has to be sourced from its own
+    // ReturnExchange row (which keeps its own created_at regardless of what
+    // happens to the order later) rather than from order.status.
+    const returnedCount = await prisma.returnExchange.count({
+        where: {
+            created_at: { gte: start, lte: end },
+            order: { created_by_user_id: csrId }
+        }
     });
 
     // Fetch Solved Complaints for the CSR in the period

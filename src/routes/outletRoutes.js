@@ -11,9 +11,7 @@ const {
     verifyCashSubmissionOTP,
     getOutletCashHistory,
     getReturnExchanges,
-    verifyReturnExchangeOtp,
     initiateDirectReturn,
-    resendReturnOtp,
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,
@@ -58,10 +56,8 @@ router.delete('/outlet/cash/limits/:id', authenticateJWT, deleteOutletCashLimit)
 
 // Return Module
 router.get('/outlet/return-exchanges', authenticateJWT, getReturnExchanges);
-router.post('/outlet/verify-return-otp', authenticateJWT, verifyReturnExchangeOtp);
 router.get('/outlet/search-delivered-orders', authenticateJWT, searchDeliveredOrders);
 router.post('/outlet/initiate-direct-return', authenticateJWT, initiateDirectReturn);
-router.post('/outlet/resend-return-otp', authenticateJWT, resendReturnOtp);
 router.get('/outlet/installments', authenticateJWT, getOutletInstallments);
 router.get('/outlet/installments/due-list', authenticateJWT, getOutletInstallmentsDueList);
 router.patch('/outlet/installments/:id/note', authenticateJWT, updateInstallmentNote);

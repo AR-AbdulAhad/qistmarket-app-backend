@@ -8,7 +8,7 @@ const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services
 const { sendQistReceivingForPayment, sendPartialPaymentForRow, getRepresentativeOfficerDetails } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
-const { getNormalizedLedger, normalizeLedger, buildLedgerRows, generateLedgerShortId } = require('../utils/ledgerUtils');
+const { getNormalizedLedger, normalizeLedger, buildLedgerRows, computeDueAndCurrent, classifyLedgerAccountStatus } = require('../utils/ledgerUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { logAction } = require('../utils/auditLogger');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
@@ -40,7 +40,7 @@ const formatDate = (d) => {
 
 const formatDatePK = (d) => formatDate(d);
 
-const statusBadge = (status) => {
+const statusBadge = (status, label = null) => {
   const colors = {
     paid: '#22c55e',
     partial: '#3b82f6',
@@ -48,7 +48,7 @@ const statusBadge = (status) => {
     overdue: '#ef4444'
   };
   const color = colors[status?.toLowerCase()] || '#6b7280';
-  return `<span style="background:${color};color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:capitalize;display:inline-block;">${status}</span>`;
+  return `<span style="background:${color};color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:capitalize;display:inline-block;">${label || status}</span>`;
 };
 
 // Masks a 13-digit CNIC as 42101-*******-1, keeping only the first block and last digit visible.
@@ -59,17 +59,31 @@ const maskCnic = (cnic) => {
 };
 
 const ACCOUNT_STATUS_STYLES = {
-  new: { label: 'Active', color: '#15803d', bg: '#dcfce7' },
-  in_progress: { label: 'Active', color: '#15803d', bg: '#dcfce7' },
-  delivered: { label: 'Active', color: '#15803d', bg: '#dcfce7' },
   completed: { label: 'Completed', color: '#1d4ed8', bg: '#dbeafe' },
   cancelled: { label: 'Cancelled', color: '#b91c1c', bg: '#fee2e2' },
-  defaulted: { label: 'Defaulted', color: '#b91c1c', bg: '#fee2e2' },
 };
 
-const accountStatusMeta = (status) => {
-  const key = (status || '').toLowerCase();
-  return ACCOUNT_STATUS_STYLES[key] || { label: (status || 'N/A').replace(/_/g, ' '), color: '#475569', bg: '#f1f5f9' };
+// Live classification (Cleared/Defaulter/Blacklist/Overdue/Regular/Active),
+// computed by classifyLedgerAccountStatus from the actual ledger rows — this
+// is what the client asked the ledger to reflect, matching the same labels
+// staff already see on the internal recovery dashboard.
+const LEDGER_STATUS_STYLES = {
+  cleared: { label: 'Cleared', color: '#1d4ed8', bg: '#dbeafe' },
+  defaulter: { label: 'Defaulter', color: '#b91c1c', bg: '#fee2e2' },
+  blacklist: { label: 'Blacklist', color: '#7c2d12', bg: '#ffedd5' },
+  overdue: { label: 'Overdue', color: '#b91c1c', bg: '#fee2e2' },
+  regular: { label: 'Regular', color: '#b45309', bg: '#fef3c7' },
+  active: { label: 'Active', color: '#15803d', bg: '#dcfce7' },
+};
+
+// Order-level terminal states (cancelled/completed) take priority over the
+// live payment-behavior classification below — once an order is cancelled or
+// fully closed out administratively, its ledger shouldn't still be graded as
+// Overdue/Defaulter etc.
+const accountStatusMeta = (orderStatus, ledgerStatusKey) => {
+  const orderKey = (orderStatus || '').toLowerCase();
+  if (ACCOUNT_STATUS_STYLES[orderKey]) return ACCOUNT_STATUS_STYLES[orderKey];
+  return LEDGER_STATUS_STYLES[ledgerStatusKey] || { label: (orderStatus || 'N/A').replace(/_/g, ' '), color: '#475569', bg: '#f1f5f9' };
 };
 
 const QIST_SUPPORT_PHONE = '0304-1111144';
@@ -110,6 +124,12 @@ async function fetchLedger(where) {
             orderBy: { month_number: 'desc' },
             take: 1,
           },
+          // Real per-transaction record (multiple payments against the same
+          // installment show up as separate rows here) — ledger_rows only
+          // ever holds the latest paid_amount/paid_at per month.
+          payments: {
+            orderBy: { paidAt: 'asc' },
+          },
         },
       },
       delivery: {
@@ -129,6 +149,31 @@ async function fetchLedger(where) {
       },
     },
   });
+}
+
+// A short token can be the ledger's own short_id, OR (now that both the
+// SmartPay and 1Bill consumer numbers are shown on the page — see point 13)
+// the customer's 1Bill/SmartPay ID itself. Try short_id first (cheap, no
+// extra join), then fall back to resolving via consumer_numbers so a
+// customer entering their displayed ID directly still lands on their ledger.
+//
+// Deliberately NOT a fallback for old/retired short_ids — every ledger's
+// short_id is now itself the real 1Bill number (see the short_id-to-1Bill
+// migration), and the client explicitly wants an old pre-migration link to
+// stop resolving rather than silently keep working, so this only ever
+// matches a real installment/officer_cash consumer number, never a
+// redirect-style row.
+async function fetchLedgerByShortToken(token) {
+  const bySortId = await fetchLedger({ short_id: token });
+  if (bySortId) return bySortId;
+
+  const consumer = await prisma.consumerNumber.findUnique({
+    where: { consumer_number: token },
+    select: { ledger_id: true, type: true },
+  });
+  if (!consumer?.ledger_id || consumer.type === 'legacy_short_id') return null;
+
+  return fetchLedger({ id: consumer.ledger_id });
 }
 
 // ─── Shared: best-effort product photo lookup ───────────────────────────────
@@ -212,34 +257,106 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     return color ? `${color}${variant ? ' / ' + variant : ''}` : 'N/A';
   })();
 
-  const deliveryDate = formatDate(delivery?.end_time || ledger.created_at);
-  const accountOpenedDate = formatDate(order.created_at);
+  const deliveryDate = formatDate(delivery?.end_time || ledger.created_at || order.created_at);
+  // Account Opened = the day the product was actually delivered to the
+  // customer, not the day the order record was first created (which can be
+  // days/weeks earlier, during verification/processing).
+  const accountOpenedDate = deliveryDate;
   const customerSinceDate = formatDate(order.customer?.created_at || order.created_at);
 
   // ── Use normalized ledger for consistent financial calculations ──
   const normalized = getNormalizedLedger(ledger.ledger_rows);
-  const { advance_payment: advancePayment, installment_ledger: installmentRows, summary, rows: allRows } = normalized;
+  const { advance_payment: advancePayment, installment_ledger: rawInstallmentRows, rows: allRows } = normalized;
+
+  // Real per-transaction history, grouped by installment month — the actual
+  // OrderPayment table (created on every payment) is the source of truth for
+  // money collected; ledger_rows.paid_amount is only a cached snapshot that
+  // can drift from it (seen for real: a run of cash payments against one
+  // month never made it into ledger_rows, so the row showed "—" paid while
+  // its own payment history still listed every transaction). Reconcile once,
+  // up front, so every number derived below — Paid/Remaining/Status per row,
+  // account totals, QR amount, account status — is consistent with what
+  // actually happened rather than a possibly-stale cache.
+  const paymentsByMonth = new Map();
+  for (const p of (order.payments || [])) {
+    if (p.monthNumber == null) continue;
+    if (!paymentsByMonth.has(p.monthNumber)) paymentsByMonth.set(p.monthNumber, []);
+    paymentsByMonth.get(p.monthNumber).push(p);
+  }
+  const installmentRows = rawInstallmentRows.map((row) => {
+    const monthPayments = paymentsByMonth.get(row.monthNumber) || [];
+    const txnPaid = monthPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const effectivePaid = Math.max(row.paidAmount, txnPaid);
+    if (effectivePaid <= row.paidAmount) return row; // no drift — keep as-is
+    const effectiveRemaining = Math.max(0, row.dueAmount - effectivePaid);
+    return {
+      ...row,
+      paidAmount: effectivePaid,
+      remainingAmount: effectiveRemaining,
+      status: effectiveRemaining <= 0 ? 'paid' : 'partial',
+    };
+  });
 
   const advanceAmount = advancePayment.amount;
-  const totalAmount = summary.grandTotalDue;
-  const totalPaidAmount = summary.grandTotalPaid;
-  const remainingAmount = summary.grandTotalRemaining;
-  const paidInstallmentCount = summary.paidInstallments;
-  const overdueAmount = summary.totalArrears;
+  const totalAmount = installmentRows.reduce((s, r) => s + r.dueAmount, 0) + advanceAmount;
+  const totalInstallmentPaid = installmentRows.reduce((s, r) => s + r.paidAmount, 0);
+  const totalPaidAmount = (advancePayment.paid ? advanceAmount : 0) + totalInstallmentPaid;
+  const remainingAmount = Math.max(0, totalAmount - totalPaidAmount);
+  const paidInstallmentCount = installmentRows.filter(r => (r.status || '').toLowerCase() === 'paid').length;
+
+  const todayEndForArrears = new Date();
+  todayEndForArrears.setHours(23, 59, 59, 999);
+  let overdueAmount = 0;
+  let overdueInstallmentsCount = 0;
+  for (const r of installmentRows) {
+    const d = r.dueDate ? new Date(r.dueDate) : null;
+    const isPaid = (r.status || '').toLowerCase() === 'paid';
+    if (d && !isNaN(d.getTime()) && d <= todayEndForArrears && !isPaid) {
+      overdueAmount += r.remainingAmount;
+      overdueInstallmentsCount += 1;
+    }
+  }
 
   const monthlyInstallment = installmentRows[0]?.dueAmount || order.monthly_amount || 0;
 
-  const nextDueRow = installmentRows.find(r => r.status !== 'paid');
-  const nextDueDate = nextDueRow ? formatDate(nextDueRow.dueDate) : 'N/A';
+  // "Next Due Date" used to mean "the oldest unpaid installment's date" —
+  // which can be a date that's already passed once an account falls behind,
+  // reading as a stale/wrong "next" date. Split it in two: the oldest unpaid
+  // row (shown as "Oldest Unpaid Due Date" only when it's actually overdue)
+  // and the true next upcoming (not-yet-due) installment.
+  const todayForDates = new Date();
+  const oldestUnpaidRow = installmentRows.find(r => r.status !== 'paid');
+  const oldestUnpaidIsOverdue = !!(oldestUnpaidRow && new Date(oldestUnpaidRow.dueDate) < todayForDates);
+  const nextUpcomingRow = installmentRows.find(r => r.status !== 'paid' && new Date(r.dueDate) >= todayForDates);
 
-  const paidDates = allRows.filter(r => r.status === 'paid' && r.paid_at).map(r => new Date(r.paid_at));
+  const nextDueDateLabel = oldestUnpaidIsOverdue ? 'Oldest Unpaid Due Date' : 'Next Due Date';
+  const nextDueDate = oldestUnpaidIsOverdue
+    ? formatDate(oldestUnpaidRow.dueDate)
+    : (nextUpcomingRow ? formatDate(nextUpcomingRow.dueDate) : 'N/A');
+  // Only rendered as a second line when there's genuinely something overdue
+  // AND a distinct future installment to show — otherwise it would just
+  // repeat nextDueDate.
+  const upcomingDueDateHtml = (oldestUnpaidIsOverdue && nextUpcomingRow)
+    ? `Next Upcoming: <strong>${formatDate(nextUpcomingRow.dueDate)}</strong>`
+    : '';
+
+  // Most recent payment TRANSACTION — a partial payment still stamps
+  // paid_at on its row, so this must not be restricted to fully 'paid' rows
+  // or the latest partial payment gets silently ignored in favour of an
+  // older fully-paid installment.
+  const paidDates = allRows.filter(r => r.paid_at).map(r => new Date(r.paid_at));
   const lastPaymentDate = paidDates.length ? formatDate(new Date(Math.max(...paidDates))) : 'N/A';
 
-  const statusMeta = accountStatusMeta(order.status);
+  const ledgerStatusKey = classifyLedgerAccountStatus(installmentRows);
+  const statusMeta = accountStatusMeta(order.status, ledgerStatusKey);
 
   const outlet = order.outlet;
   const branchName = outlet?.name || 'N/A';
   const branchAddress = outlet?.address || 'N/A';
+  // Falls back to the global support line only for branches that genuinely
+  // haven't had a phone number entered yet — real per-branch contact info
+  // (captured on the branch's own profile) now takes priority.
+  const branchPhone = outlet?.phone || QIST_SUPPORT_PHONE;
   const mapsUrl = outlet?.address
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(outlet.address)}`
     : null;
@@ -256,40 +373,81 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   };
   const purchaserMapUrl = purchaser ? verificationMapUrl('purchaser', purchaser.id) : null;
 
-  // SmartPay is the only live gateway — 1Bill was never actually turned on,
-  // so the locally-built 1Bill EMVCo QR below used to be shown as a
-  // fallback whenever SmartPay failed (or whenever the cached QR just
-  // didn't have a "6500"-prefixed number to match against). That meant
-  // customers would sometimes get a real SmartPay QR and sometimes a
-  // non-functional 1Bill one with no visible difference between the two.
-  // Only ever generate/show SmartPay now; if it's unreachable, say so
-  // instead of handing out a QR that doesn't actually work.
+  // SmartPay QR is the only *QR code* gateway (the locally-built 1Bill EMVCo
+  // QR was dropped for the reasons below), but the 1Bill/TPS consumer number
+  // itself is real and live — tpsController.js implements the full 1Link
+  // BillInquiry/BillPayment spec against it, so any bank/wallet's own "pay a
+  // bill" feature can pay against that number even without a QR from us. It
+  // was simply never surfaced on the ledger page before now.
   const consumerNumberRows = ledger.consumer_numbers || [];
-  const smartPayConsumerNumber = consumerNumberRows.find((c) => c.consumer_number.startsWith('6500'))?.consumer_number || null;
+  let smartPayConsumerNumber = consumerNumberRows.find((c) => c.consumer_number.startsWith('6500'))?.consumer_number || null;
+  // Prefix-matched rather than "anything that isn't 6500…" so this can never
+  // accidentally pick up some other consumer_number row (e.g. a legacy_short_id
+  // one, see fetchLedgerByShortToken above) and show it as the real 1Bill ID.
+  const oneBillConsumerNumber = consumerNumberRows.find((c) => c.consumer_number.startsWith('1017100015'))?.consumer_number || null;
+
+  // Legacy/older orders can predate consistent dual consumer-number creation
+  // at delivery — rather than silently showing no ID/QR at all (the
+  // "inconsistent across ledgers" complaint), generate and persist a
+  // SmartPay number on-demand the same way the QR itself is already
+  // regenerated on-demand below.
+  if (!smartPayConsumerNumber) {
+    try {
+      const imeiForGen = delivery?.product_imei || cashRecord?.imei_serial || null;
+      const mobileForGen = purchaser?.telephone_number || order.whatsapp_number || null;
+      const generated = await generateSmartPayConsumerNumber(imeiForGen, mobileForGen);
+      await prisma.consumerNumber.create({
+        data: {
+          consumer_number: generated,
+          ledger_id: ledger.id,
+          delivery_id: delivery?.id || null,
+          customer_name: customerName,
+          mobile_number: mobileForGen || 'N/A',
+          imei_serial: imeiForGen,
+          amount_due: monthlyInstallment || 0,
+          billing_month: String(new Date().getFullYear()).slice(-2) + String(new Date().getMonth() + 1).padStart(2, '0'),
+          due_date: oldestUnpaidRow?.dueDate ? new Date(oldestUnpaidRow.dueDate) : now(),
+          bill_status: 'U',
+          created_at: now(),
+          updated_at: now(),
+        },
+      });
+      smartPayConsumerNumber = generated;
+    } catch (genErr) {
+      console.error('[LedgerController] on-demand SmartPay consumer number generation failed:', genErr);
+    }
+  }
+
+  // What the QR should actually charge: arrears (everything already overdue)
+  // plus the current/nearest installment — NOT the entire remaining loan
+  // balance. A customer scanning to "pay now" shouldn't be shown a QR for
+  // months of future installments they haven't reached yet.
+  const { due: dueNowArrears, current: dueNowCurrent } = computeDueAndCurrent(installmentRows);
+  const amountDueNow = dueNowArrears + dueNowCurrent;
 
   // The QR has to reflect what's actually owed right now — a cached QR is
-  // only reused while it's both unexpired AND still for the current total
-  // outstanding balance; otherwise (expired, or the balance moved since it
-  // was generated) it's regenerated live so the code always scans for the
-  // real current amount instead of a stale one.
+  // only reused while it's both unexpired AND still for the current
+  // payable-now amount; otherwise (expired, or the amount moved since it was
+  // generated) it's regenerated live so the code always scans for the real
+  // current amount instead of a stale one.
   const cachedSmartPayQr = order.smart_pay_qrs?.[0] || null;
   const cachedQrIsFresh =
     cachedSmartPayQr &&
-    cachedSmartPayQr.amount === remainingAmount &&
+    cachedSmartPayQr.amount === amountDueNow &&
     (!cachedSmartPayQr.expires_at || new Date(cachedSmartPayQr.expires_at) > now());
 
   let qrImageSrc = cachedQrIsFresh ? cachedSmartPayQr.qr_image_base64 : null;
   let qrProvider = qrImageSrc ? 'SmartPay' : null;
 
-  // Generate live for the full outstanding balance when there's no
-  // still-valid cached QR — only ever with a real "6500"-prefixed SmartPay
-  // number, and only while there's actually something left to pay.
-  if (!qrImageSrc && smartPayConsumerNumber && remainingAmount > 0) {
+  // Generate live for the payable-now amount when there's no still-valid
+  // cached QR — only ever with a real "6500"-prefixed SmartPay number, and
+  // only while there's actually something due.
+  if (!qrImageSrc && smartPayConsumerNumber && amountDueNow > 0) {
     try {
       const dqrRes = await generateDqr({
         consumerNumber: smartPayConsumerNumber,
         consumerDetail: customerName,
-        amount: remainingAmount,
+        amount: amountDueNow,
         cellNo: phone || '',
         referenceInfo: `QIST-${order.id}-${Date.now()}`.substring(0, 30),
       });
@@ -321,21 +479,72 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
 
   // ── Ledger rows, computed once and rendered into both a compact (mobile) and full (desktop) table ──
   const rowsMeta = installmentRows.map((row, idx) => {
-    const priorInstallments = installmentRows.filter(r => r.monthNumber < row.monthNumber);
-    const isNext = row.status === 'pending' && priorInstallments.every(r => r.status === 'paid');
-    const displayStatus = isNext ? 'pending' : row.status;
+    const isPaid = row.status === 'paid';
+    const dueDate = new Date(row.dueDate);
+    const isOverdue = !isPaid && !isNaN(dueDate.getTime()) && dueDate < todayForDates;
+    const isPartial = row.paidAmount > 0 && row.remainingAmount > 0;
+
+    let displayStatus = 'pending';
+    let displayLabel = 'Pending';
+    if (isPaid) {
+      displayStatus = 'paid';
+      displayLabel = 'Paid';
+    } else if (isOverdue) {
+      displayStatus = 'overdue';
+      displayLabel = isPartial ? 'Partial / Overdue' : 'Overdue';
+    } else if (isPartial) {
+      displayStatus = 'partial';
+      displayLabel = 'Partial';
+    }
+
+    // Not every paid row has a real OrderPayment transaction behind it yet
+    // (older/imported payments only ever touched the cached ledger_rows
+    // snapshot) — rather than hiding "View Payments" for those rows, fall
+    // back to a single entry built from the row's own paid_amount/paid_at/
+    // payment_method so every row that's had anything paid against it gets
+    // the same "what was paid" breakdown, not just rows with 2+ real
+    // transaction records.
+    const monthPayments = (paymentsByMonth.get(row.monthNumber) || []);
+    const paymentEntries = monthPayments.length > 0
+      ? monthPayments
+      : (row.paidAmount > 0 ? [{ paidAt: row.paidAt, amount: row.paidAmount, paymentMethod: row.paymentMethod }] : []);
+    const paymentHistoryHtml = paymentEntries.length > 0
+      ? `<details style="margin-top:4px;">
+          <summary style="cursor:pointer;color:#2563eb;font-size:0.68rem;font-weight:700;">View Payments (${paymentEntries.length})</summary>
+          <div style="margin-top:6px;">
+            ${paymentEntries.map(p => `<div style="font-size:0.68rem;color:#334155;padding:4px 0;border-top:1px solid #f1f5f9;">${formatDate(p.paidAt)} — <strong style="color:#16a34a;">${formatPKR(p.amount)}</strong> (${p.paymentMethod || 'N/A'})</div>`).join('')}
+          </div>
+        </details>`
+      : '';
+
+    // The one row that's actually "due right now" (the nearest unpaid
+    // installment that isn't itself overdue yet) carries forward whatever's
+    // already overdue from earlier months — so THIS row's total, not the
+    // bare monthly installment, is what the customer actually needs to pay
+    // to get current. Every other future row stays untouched (that's the
+    // "don't repeat arrears under every future row" fix from before) — only
+    // the single next-due row gets this rollup.
+    const isCurrentDueRow = oldestUnpaidIsOverdue && nextUpcomingRow && row.monthNumber === nextUpcomingRow.monthNumber;
+    const carriedArrears = isCurrentDueRow ? overdueAmount : 0;
+    const totalRowRemaining = row.remainingAmount + carriedArrears;
+    const arrearsNoteHtml = carriedArrears > 0
+      ? `<div style="color:#ef4444;font-size:0.65rem;font-weight:600;margin-top:2px;">+ Arrears: ${formatPKR(carriedArrears)}</div>`
+      : '';
+
     return {
       rowNum: String(idx + 1).padStart(2, '0'),
       isAdvance: false,
-      isNext,
-      rowClass: isNext ? 'current-month' : '',
+      isNext: displayStatus === 'overdue' || (displayStatus === 'pending' && idx === 0),
+      rowClass: (isOverdue || isCurrentDueRow) ? 'current-month' : '',
       dueDateText: formatDate(row.dueDate),
       dueAmountText: formatPKR(row.dueAmount),
-      arrearsText: row.arrears ? formatPKR(row.arrears) : null,
+      arrearsNoteHtml,
       paidText: row.paidAmount > 0 ? formatPKR(row.paidAmount) : '—',
+      remainingText: totalRowRemaining > 0 ? formatPKR(totalRowRemaining) : '—',
       paymentDateText: row.paidAt ? formatDate(row.paidAt) : '—',
       paymentMethodText: row.paymentMethod || '—',
-      statusHtml: statusBadge(displayStatus),
+      statusHtml: statusBadge(displayStatus, displayLabel),
+      paymentHistoryHtml,
       extra: idx >= 6,
     };
   });
@@ -345,19 +554,20 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
           <td>${r.rowNum}</td>
           <td>${r.dueDateText}</td>
           <td style="color:#16a34a;font-weight:700;">${r.paidText}</td>
-          <td>${r.statusHtml}</td>
+          <td style="color:#dc2626;font-weight:700;">${r.remainingText}${r.arrearsNoteHtml}</td>
+          <td>${r.statusHtml}${r.paymentHistoryHtml}</td>
         </tr>`).join('');
 
   const desktopLedgerRowsHtml = rowsMeta.map(r => `
         <tr class="${r.rowClass}">
           <td>${r.rowNum}</td>
           <td>${r.dueDateText}</td>
-          <td style="font-weight:700;">${r.dueAmountText}${r.arrearsText ? `<div style="color:#ef4444;font-size:0.65rem;font-weight:500;">Arrears: ${r.arrearsText}</div>` : ''}</td>
+          <td style="font-weight:700;">${r.dueAmountText}${r.arrearsNoteHtml}</td>
           <td style="color:#16a34a;">${r.paidText}</td>
+          <td style="color:#dc2626;font-weight:700;">${r.remainingText}</td>
           <td>${r.paymentDateText}</td>
           <td>${r.paymentMethodText}</td>
-          <td style="color:#94a3b8;">—</td>
-          <td>${r.statusHtml}</td>
+          <td>${r.statusHtml}${r.paymentHistoryHtml}</td>
         </tr>`).join('');
 
   // "gdfgdfg C/O Guarantor1 C/O Guarantor2" — chained C/O per guarantor on the order.
@@ -394,8 +604,8 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       <div class="summary-item"><span class="info-label">Total Paid</span><span class="info-val" style="color:#16a34a;">${formatPKR(totalPaidAmount)}</span></div>
       <div class="summary-item"><span class="info-label">Total Outstanding</span><span class="info-val" style="color:#f59e0b;">${formatPKR(remainingAmount)}</span></div>
       <div class="summary-item"><span class="info-label">Current Installment</span><span class="info-val" style="color:#2563eb;">${formatPKR(monthlyInstallment)}</span></div>
-      <div class="summary-item"><span class="info-label">Overdue Amount</span><span class="info-val" style="color:#dc2626;">${formatPKR(overdueAmount)}</span></div>
-      <div class="summary-item"><span class="info-label">Next Due Date</span><span class="info-val">${nextDueDate}</span></div>`;
+      <div class="summary-item"><span class="info-label">Total Overdue${overdueInstallmentsCount ? ` (${overdueInstallmentsCount} Installment${overdueInstallmentsCount > 1 ? 's' : ''})` : ''}</span><span class="info-val" style="color:#dc2626;">${formatPKR(overdueAmount)}</span></div>
+      <div class="summary-item"><span class="info-label">${nextDueDateLabel}</span><span class="info-val"${oldestUnpaidIsOverdue ? ' style="color:#dc2626;"' : ''}>${nextDueDate}</span></div>`;
 
   const hirerDetailsRows = `
       <div class="info-row"><span class="info-label">Hirer Name</span><span class="info-val">${customerName}${grantorRelationLabel}</span></div>
@@ -407,7 +617,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   const branchDetailsBlock = `
       <div class="info-row"><span class="info-label">Branch Name</span><span class="info-val">${branchName}</span></div>
       <div class="info-row"><span class="info-label">Address</span><span class="info-val">${branchAddress}</span></div>
-      <div class="info-row"><span class="info-label">Phone</span><span class="info-val">${QIST_SUPPORT_PHONE}</span></div>
+      <div class="info-row"><span class="info-label">Phone</span><span class="info-val">${branchPhone}</span></div>
       ${mapsUrl ? `<a class="btn-outline" style="margin-top:10px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a>` : ''}`;
 
   const paymentProviderLabel = 'SmartPay';
@@ -419,10 +629,25 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     ? `<a href="${paymentInstructionsUrl.replace(/"/g, '&quot;')}" target="_blank" rel="noopener" class="btn-primary no-print" style="width:100%;margin-top:14px;display:block;text-align:center;text-decoration:none;box-sizing:border-box;">Payment Karne ka Tareeqa</a>`
     : `<button class="btn-primary no-print" style="width:100%;margin-top:14px;" disabled>Payment Karne ka Tareeqa</button>`;
 
+  const payableNowHtml = amountDueNow > 0
+    ? `<div class="info-label" style="margin-top:4px;">Payable Now</div>
+      <div class="info-val" style="font-size:1.1rem;color:#dc2626;margin-bottom:10px;">${formatPKR(amountDueNow)}</div>`
+    : '';
+
+  const oneBillBoxHtml = oneBillConsumerNumber
+    ? `<div class="info-label" style="margin-top:14px;">Your 1Bill ID</div>
+      <div class="bill-id-box">
+        <span id="oneBillId-${ledger.id}">${oneBillConsumerNumber}</span>
+        <button class="copy-btn no-print" onclick="navigator.clipboard.writeText('${oneBillConsumerNumber}').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);})">Copy</button>
+      </div>
+      <p style="font-size:0.68rem;color:#94a3b8;margin:-4px 0 4px;">Kisi bhi bank/wallet app ke bill payment section mein "QistMarket" biller select karke ye ID se bhi payment kar sakte hain.</p>`
+    : '';
+
   const paymentBoxHtml = `
       <div class="section-title" style="color:#0f172a;">SCAN & PAY</div>
+      ${payableNowHtml}
       ${displayConsumerNumber ? `
-      <div class="info-label" style="margin-top:4px;">Your ${paymentProviderLabel} ID</div>
+      <div class="info-label" style="margin-top:4px;">Your ${paymentProviderLabel} Consumer No</div>
       <div class="bill-id-box">
         <span id="billId-${ledger.id}">${displayConsumerNumber}</span>
         <button class="copy-btn no-print" onclick="navigator.clipboard.writeText('${displayConsumerNumber}').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);})">Copy</button>
@@ -433,10 +658,12 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
         <p>Powered by <strong>${paymentProviderLabel.toUpperCase()}</strong></p>`
           : `<p style="color:#94a3b8;font-size:0.8rem;padding:20px 0;">QR abhi generate nahi ho saka. Thodi dair baad page refresh karein ya outlet se rabta karein.</p>`}
       </div>
+      ${oneBillBoxHtml}
       <div class="section-title" style="color:#0f172a;margin-top:20px;">PAYMENT METHODS</div>
       <ul class="payment-methods-list">
         <li><span class="pm-dot" style="background:#16a34a;"></span>${paymentProviderLabel}</li>
         <li><span class="pm-dot" style="background:#0ea5e9;"></span>QR Payment</li>
+        ${oneBillConsumerNumber ? `<li><span class="pm-dot" style="background:#7c3aed;"></span>1Bill (Bank/Wallet Bill Payment)</li>` : ''}
       </ul>
       ${paymentTareeqaButtonHtml}`;
 
@@ -444,10 +671,10 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       <div class="note-box">
         <div class="info-label" style="color:#b45309;margin-bottom:8px;">⚠ IMPORTANT NOTE</div>
         <ul>
-          <li>Sirf ${paymentProviderLabel} ID aur QR par hi payment karein.</li>
+          <li>Sirf ${paymentProviderLabel} Consumer No aur QR par hi payment karein.</li>
           <li>Agar aap cash payment karte hain to receiving message zaroor check karein.</li>
           <li>Payment ka message na aaye to hamare bande ko payment bilkul bhi na dein.</li>
-          <li>Apni payment sirf official ${paymentProviderLabel} ID ya QR se hi karein.</li>
+          <li>Apni payment sirf official ${paymentProviderLabel} Consumer No ya QR se hi karein.</li>
         </ul>
       </div>`;
 
@@ -777,14 +1004,14 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     <div class="card mobile-header-card">
       <div class="cust-name">${customerName}${grantorRelationLabel}</div>
       <div class="cust-sub">Order No. <strong>${order.order_ref}</strong> &nbsp;•&nbsp; <span class="status-pill" style="background:${statusMeta.bg};color:${statusMeta.color};">${statusMeta.label}</span></div>
-      <div class="cust-sub" style="margin-top:6px;">Next Due Date: <strong>${nextDueDate}</strong></div>
+      <div class="cust-sub" style="margin-top:6px;${oldestUnpaidIsOverdue ? 'color:#dc2626;font-weight:700;' : ''}">${nextDueDateLabel}: <strong>${nextDueDate}</strong></div>
+      ${upcomingDueDateHtml ? `<div class="cust-sub" style="margin-top:2px;">${upcomingDueDateHtml}</div>` : ''}
     </div>
 
     <div class="mobile-outstanding">
       <div class="amt">${formatPKR(remainingAmount)}</div>
       <div class="lbl">Total Outstanding</div>
     </div>
-    <a class="btn-primary no-print" href="javascript:void(0)" onclick="showTab('payments')" style="display:block;text-align:center;margin-bottom:20px;">Pay Now</a>
 
     <div class="card tab-panel" data-tab="dashboard">
       <div class="section-title">📦 Product Details</div>
@@ -803,10 +1030,15 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     </div>
 
     <div class="card tab-panel" data-tab="dashboard,ledger">
+      <div class="section-title">📊 Account Summary</div>
+      <div class="summary-bar">${accountSummaryRows}</div>
+    </div>
+
+    <div class="card tab-panel" data-tab="dashboard,ledger">
       <div class="section-title">🧾 Installment / Payment Ledger</div>
       <div class="table-wrapper" style="box-shadow:none;">
         <table class="ledger-table mobile-ledger-table" id="mobileLedgerTable">
-          <thead><tr><th>#</th><th>Due Date</th><th>Paid</th><th>Status</th></tr></thead>
+          <thead><tr><th>#</th><th>Due Date</th><th>Paid</th><th>Remaining</th><th>Status</th></tr></thead>
           <tbody>${mobileLedgerRowsHtml}</tbody>
         </table>
       </div>
@@ -848,8 +1080,8 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       <div class="desktop-outstanding">
         <div class="lbl">Total Outstanding</div>
         <div class="amt">${formatPKR(remainingAmount)}</div>
-        <div class="info-label" style="margin-top:6px;">Next Due Date: <strong>${nextDueDate}</strong></div>
-        <a class="btn-primary no-print" href="javascript:void(0)" onclick="showTab('payments')" style="display:inline-block;margin-top:10px;">Pay Now</a>
+        <div class="info-label" style="margin-top:6px;${oldestUnpaidIsOverdue ? 'color:#dc2626;' : ''}">${nextDueDateLabel}: <strong>${nextDueDate}</strong></div>
+        ${upcomingDueDateHtml ? `<div class="info-label" style="margin-top:2px;">${upcomingDueDateHtml}</div>` : ''}
       </div>
     </div>
 
@@ -886,7 +1118,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
           </div>
         </div>
 
-        <div class="card tab-panel" data-tab="dashboard">
+        <div class="card tab-panel" data-tab="dashboard,ledger">
           <div class="section-title">📊 Account Summary</div>
           <div class="summary-bar">${accountSummaryRows}</div>
         </div>
@@ -897,7 +1129,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
           </div>
           <div class="table-wrapper" style="box-shadow:none;border-radius:0;margin:14px 0 0;">
             <table class="ledger-table">
-              <thead><tr><th>#</th><th>Due Date</th><th>Installment</th><th>Paid Amount</th><th>Payment Date</th><th>Payment Method</th><th>Receipt No.</th><th>Status</th></tr></thead>
+              <thead><tr><th>#</th><th>Due Date</th><th>Installment</th><th>Paid Amount</th><th>Remaining</th><th>Payment Date</th><th>Payment Method</th><th>Status</th></tr></thead>
               <tbody>${desktopLedgerRowsHtml}</tbody>
               <tfoot>
                 <tr>
@@ -1051,7 +1283,7 @@ const viewLedger = async (req, res) => {
     
     // Check if it's a short_id (JWT tokens are long, short_ids are typically 6-10 chars)
     if (token.length < 50) {
-        ledger = await fetchLedger({ short_id: token });
+        ledger = await fetchLedgerByShortToken(token);
     } else {
         // Fallback to legacy JWT token
         let decoded;
@@ -1089,7 +1321,7 @@ const downloadLedgerPdf = async (req, res) => {
   const { shortId } = req.params;
 
   try {
-    const ledger = await fetchLedger({ short_id: shortId });
+    const ledger = await fetchLedgerByShortToken(shortId);
     if (!ledger) {
       return res.status(404).send(renderErrorPage('Ledger nahi mila. Meherbani karke support se rabta karen.'));
     }
@@ -1130,16 +1362,61 @@ const downloadLedgerPdf = async (req, res) => {
 // ─── Error Page (responsive) ─────────────────────────────────────────────────
 
 function renderErrorPage(message) {
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Error — QistMarket</title>
+  const waNumber = QIST_WHATSAPP_NUMBER.replace(/\D/g, '');
+  const waLink = `https://wa.me/92${waNumber.replace(/^0/, '')}`;
+  const telLink = `tel:${QIST_UAN_NUMBER.replace(/\s/g, '')}`;
+
+  return `<!DOCTYPE html><html lang="ur" dir="ltr"><head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Ledger Nahi Mila — QistMarket</title>
+  <link rel="icon" type="image/x-icon" href="${faviconURI}" />
   <style>
-    *{margin:0;padding:0;box-sizing:border-box;}
-    body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f8fafc;margin:0;padding:16px;}
-    .box{text-align:center;padding:32px 24px;background:#fff;border-radius:24px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.05);max-width:90%;width:400px;}
-    h1{color:#ef4444;font-size:22px;margin-bottom:12px;}p{color:#64748b;font-size:15px;line-height:1.5;}
-    @media (max-width:480px){.box{padding:24px 20px;} h1{font-size:20px;}}
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: system-ui, 'Segoe UI', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #f1f5f9; color: #0f172a;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .box {
+      background: #fff; border-radius: 24px; max-width: 420px; width: 100%;
+      padding: 36px 28px; text-align: center;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 10px 25px -5px rgba(0,0,0,0.06);
+    }
+    .logo-img { height: 32px; width: auto; margin-bottom: 22px; }
+    .icon-badge {
+      width: 64px; height: 64px; border-radius: 50%; background: #fee2e2;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 30px; margin: 0 auto 18px;
+    }
+    h1 { font-size: 20px; font-weight: 800; color: #0f172a; margin-bottom: 10px; }
+    p.msg { color: #64748b; font-size: 14.5px; line-height: 1.6; margin-bottom: 26px; }
+    .actions { display: flex; flex-direction: column; gap: 10px; }
+    .btn-primary, .btn-outline {
+      display: block; padding: 13px 20px; border-radius: 60px; font-weight: 800;
+      font-size: 0.85rem; text-decoration: none; text-align: center;
+    }
+    .btn-primary { background: #dc2626; color: #fff; }
+    .btn-outline { background: #fff; color: #dc2626; border: 1.5px solid #fecaca; }
+    .support-hours { margin-top: 22px; font-size: 12.5px; color: #94a3b8; }
+    .footer-brand { margin-top: 6px; font-size: 12px; color: #cbd5e1; font-weight: 700; letter-spacing: 0.3px; }
+    @media (max-width: 480px) { .box { padding: 28px 20px; } h1 { font-size: 18px; } }
   </style></head>
-  <body><div class="box"><h1>❌ Khed hai!</h1><p>${message}</p>
-  <p style="margin-top:16px;font-size:13px;color:#94a3b8;">QistMarket Support</p></div></body></html>`;
+  <body>
+    <div class="box">
+      <img class="logo-img" src="${logoDataURI}" alt="QistMarket" />
+      <div class="icon-badge">🔍</div>
+      <h1>Ledger Nahi Mila</h1>
+      <p class="msg">${message}</p>
+      <div class="actions">
+        <a class="btn-primary" href="${telLink}">📞 Call Support: ${QIST_UAN_NUMBER}</a>
+        <a class="btn-outline" href="${waLink}" target="_blank" rel="noopener">💬 WhatsApp: ${QIST_WHATSAPP_NUMBER}</a>
+      </div>
+      <p class="support-hours">🕒 Mon - Sat (11:00 AM - 08:30 PM)</p>
+      <p class="footer-brand">QIST MARKET</p>
+    </div>
+  </body></html>`;
 }
 
 const generateInstallmentPaymentOtp = async (req, res) => {
@@ -1747,18 +2024,25 @@ const rebuildOrderLedger = async (req, res) => {
       { expiresIn: '730d' }
     );
 
-    // Same allocate-then-retry dance as the delivery flow: short_id is unique
-    // table-wide and the check is not atomic against a concurrent write.
+    const purchaser = order.verification?.purchaser;
+    const mobile = purchaser?.telephone_number || order.whatsapp_number;
+
+    // The ledger's short_id is set to the customer's real 1Bill/TPS consumer
+    // number itself (not an IMEI/random short_id) — see the matching
+    // deliveryCompletionService.js change — so the repaired ledger's URL
+    // already is the customer's 1Bill ID. Generated fresh per retry so a
+    // short_id collision also gets a freshly-deduped 1Bill number.
     let ledger = null;
+    let consumerNo = null;
     for (let attempt = 0; attempt < 5 && !ledger; attempt += 1) {
-      const shortId = await generateLedgerShortId(delivery.product_imei, { excludeOrderId: order.id });
+      consumerNo = await generateConsumerNumber(delivery.product_imei, mobile);
       try {
         ledger = await prisma.installmentLedger.create({
           data: {
             order_id: order.id,
             delivery_id: delivery.id,
             token: ledgerToken,
-            short_id: shortId,
+            short_id: consumerNo,
             ledger_rows: ledgerRows,
             created_at: now(),
             updated_at: now(),
@@ -1781,8 +2065,6 @@ const rebuildOrderLedger = async (req, res) => {
     try {
       const existing = await prisma.consumerNumber.count({ where: { delivery_id: delivery.id } });
       if (existing === 0) {
-        const purchaser = order.verification?.purchaser;
-        const mobile = purchaser?.telephone_number || order.whatsapp_number;
         const firstInstallment = ledgerRows[1] || null;
         const dueDate = firstInstallment?.due_date ? new Date(firstInstallment.due_date) : now();
         const billingMonthStr = String(dueDate.getFullYear()).slice(-2) + String(dueDate.getMonth() + 1).padStart(2, '0');
@@ -1799,9 +2081,13 @@ const rebuildOrderLedger = async (req, res) => {
           created_at: now(),
           updated_at: now(),
         };
+        // Reuse the same 1Bill number already saved as short_id above —
+        // calling generateConsumerNumber again here would (correctly) dedupe
+        // against itself and hand back a different number, splitting the
+        // ledger's URL from its displayed 1Bill ID.
         const created = await prisma.consumerNumber.createMany({
           data: [
-            { ...base, consumer_number: await generateConsumerNumber(delivery.product_imei, mobile) },
+            { ...base, consumer_number: consumerNo },
             { ...base, consumer_number: await generateSmartPayConsumerNumber(delivery.product_imei, mobile) },
           ],
         });

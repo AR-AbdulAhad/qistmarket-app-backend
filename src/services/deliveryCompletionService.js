@@ -17,7 +17,7 @@ const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
-const { getNormalizedLedger, buildLedgerRows, generateLedgerShortId } = require('../utils/ledgerUtils');
+const { getNormalizedLedger, buildLedgerRows } = require('../utils/ledgerUtils');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const pt = require('../services/paytriggerService');
 
@@ -152,11 +152,21 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
       { expiresIn: '730d' }
     );
 
-    // short_id is unique table-wide and two devices can share the last 6 IMEI
-    // digits, so pick a free one and still retry the write — the check above
-    // and the write below are not atomic against a concurrent delivery.
+    const mobile = purchaser?.telephone_number || order.whatsapp_number;
+
+    // The ledger's short_id is the customer-facing link everyone (WhatsApp
+    // messages, "Send Ledger", receipts) builds the shareable ledger URL
+    // from. It's set to the customer's real 1Bill/TPS consumer number itself
+    // — generated fresh per attempt below so a short_id collision retry also
+    // gets a freshly-deduped 1Bill number — so the link a customer receives
+    // (qms.qistmarket.pk/ledger/<1Bill ID>) already IS their 1Bill ID; no
+    // separate lookup needed. A failure generating the 1Bill number itself
+    // (e.g. a DB hiccup) is left to propagate, same as before this change —
+    // deliberately not silently substituted with a fake/mismatched ID, since
+    // this same value also becomes the real 1Bill consumer_number row below.
+    let consumerNo = null;
     for (let attempt = 0; attempt < 5 && !installmentLedger; attempt += 1) {
-      const shortId = await generateLedgerShortId(payload.product_imei, { excludeOrderId: order.id });
+      consumerNo = await generateConsumerNumber(payload.product_imei, mobile);
       try {
         installmentLedger = await prisma.installmentLedger.upsert({
           where: { order_id: order.id },
@@ -164,7 +174,7 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
             order_id: order.id,
             delivery_id: delivery.id,
             token: ledgerToken,
-            short_id: shortId,
+            short_id: consumerNo,
             ledger_rows: ledgerRows,
             created_at: now(),
             updated_at: now(),
@@ -172,15 +182,17 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
           update: {
             delivery_id: delivery.id,
             token: ledgerToken,
-            short_id: shortId,
+            short_id: consumerNo,
             ledger_rows: ledgerRows,
             updated_at: now(),
           },
         });
-        ledgerUrl = shortId;
+        ledgerUrl = consumerNo;
       } catch (upsertErr) {
-        // P2002 on short_id = lost the race to another delivery; regenerate.
-        // Anything else is a real failure and must not be retried blindly.
+        // P2002 on short_id = lost the race to another delivery, or (very
+        // rarely) this 1Bill number already exists as some other ledger's
+        // short_id; either way, regenerate and retry rather than fail the
+        // whole delivery. Anything else is a real failure.
         const isShortIdRace = upsertErr?.code === 'P2002'
           && (upsertErr.meta?.target || []).toString().includes('short_id');
         if (!isShortIdRace) throw upsertErr;
@@ -189,8 +201,6 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
 
     if (!installmentLedger) throw new Error('Could not allocate a unique ledger short_id after 5 attempts');
 
-    const mobile = purchaser?.telephone_number || order.whatsapp_number;
-    const consumerNo = await generateConsumerNumber(payload.product_imei, mobile);
     const smartPayConsumerNo = await generateSmartPayConsumerNumber(payload.product_imei, mobile);
 
     let firstMonthDue = 0;

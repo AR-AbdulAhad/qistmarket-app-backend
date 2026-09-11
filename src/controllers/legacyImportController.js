@@ -441,17 +441,37 @@ async function importOneRow(row, { adminUserId, payoffStatus }) {
 
   // 5. InstallmentLedger — backfilled payment history from the sheet.
   const ledgerRows = buildLedgerRows({ orderDate, advanceAmount: advance, monthlyAmount: installment, months, paidCount });
-  const imeiStr = serial ? serial.replace(/\D/g, '') : '';
-  // short_id is unique across the whole table — a bulk import can plausibly
-  // hit two rows whose last-6-serial-digits (or, with no serial, random hex
-  // fallback) collide, so check-and-regenerate rather than letting the
-  // create() below fail outright.
-  let shortId = imeiStr.length >= 6 ? imeiStr.slice(-6) : crypto.randomBytes(4).toString('hex').slice(0, 6);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+
+  // Resolve the real 1Bill consumer number FIRST (reusing the sheet's own
+  // 1BILL ID when given — it's the real historical bill number customers may
+  // already know/have used — otherwise generating one the same way a normal
+  // sale does) so it can also become the ledger's short_id below: the
+  // imported ledger's URL (qms.qistmarket.pk/ledger/<1Bill ID>) then already
+  // is the customer's real, known 1Bill ID, same as every other
+  // ledger-creation path.
+  const billIdFromSheet = row.bill_id ? String(row.bill_id).trim() : null;
+  let billConsumerNumber = billIdFromSheet;
+  if (billConsumerNumber) {
+    const clash = await prisma.consumerNumber.findUnique({ where: { consumer_number: billConsumerNumber } });
+    if (clash) billConsumerNumber = null; // fall through to generating a fresh one below
+  }
+  if (!billConsumerNumber) {
+    billConsumerNumber = await generateConsumerNumber(serial, purchaserPhone);
+  }
+  // short_id is unique across the whole table too (a separate constraint
+  // from consumer_number's own uniqueness) — vanishingly unlikely to clash
+  // given the value just cleared the consumer_number check above, but a bulk
+  // import is exactly the scenario where a one-in-a-million shot can still
+  // happen, so fall back to a freshly generated number rather than letting
+  // the create() below fail outright.
+  let shortId = billConsumerNumber;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     const clash = await prisma.installmentLedger.findUnique({ where: { short_id: shortId }, select: { id: true } });
     if (!clash) break;
-    shortId = crypto.randomBytes(4).toString('hex').slice(0, 6);
+    shortId = await generateConsumerNumber(serial, purchaserPhone);
+    billConsumerNumber = shortId;
   }
+
   const ledgerToken = jwt.sign(
     { order_id: order.id, delivery_id: delivery.id },
     LEDGER_TOKEN_SECRET,
@@ -468,18 +488,7 @@ async function importOneRow(row, { adminUserId, payoffStatus }) {
     },
   });
 
-  // 6. Consumer numbers — reuse the sheet's own 1BILL ID when given (it's
-  // the real historical bill number customers may already know/have used),
-  // otherwise generate one the same way a normal sale does.
-  const billIdFromSheet = row.bill_id ? String(row.bill_id).trim() : null;
-  let billConsumerNumber = billIdFromSheet;
-  if (billConsumerNumber) {
-    const clash = await prisma.consumerNumber.findUnique({ where: { consumer_number: billConsumerNumber } });
-    if (clash) billConsumerNumber = null; // fall through to generating a fresh one below
-  }
-  if (!billConsumerNumber) {
-    billConsumerNumber = await generateConsumerNumber(serial, purchaserPhone);
-  }
+  // 6. Consumer numbers.
   const smartPayConsumerNumber = await generateSmartPayConsumerNumber(serial, purchaserPhone);
 
   const dueDate = new Date();

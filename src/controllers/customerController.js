@@ -817,10 +817,16 @@ const getClearedCustomers = async (req, res) => {
       },
     });
 
-    // Fetch returned orders that were NOT blacklisted on return — these are
-    // also "cleared" (account settled via return rather than full payment),
-    // but their Delivery/InstallmentLedger rows were deleted at return time,
-    // so their ledger snapshot only survives in archived_deliveries.
+    // Fetch returned orders — these are also "cleared" (account settled via
+    // return rather than full payment), but their Delivery/InstallmentLedger
+    // rows were deleted at return time, so their ledger snapshot only
+    // survives in archived_deliveries. Only shown here once 3 days have
+    // passed since the return itself — until then they're still visible in
+    // the outlet's Returns list, not here. A still-blacklisted account is
+    // included too (marked as such) rather than excluded outright; the
+    // account itself only leaves Blacklisted Customers once an admin
+    // whitelists it separately.
+    const RETURN_CLEARED_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
     const returnedOrdersRaw = await prisma.order.findMany({
       where: { status: 'Returned' },
       include: {
@@ -838,14 +844,20 @@ const getClearedCustomers = async (req, res) => {
           orderBy: { archived_at: 'desc' },
           take: 1,
         },
+        return_exchanges: {
+          where: { type: 'Return', status: 'verified' },
+          orderBy: { verified_at: 'desc' },
+          take: 1,
+        },
       },
     });
 
-    const returnedOrders = returnedOrdersRaw.filter(order => !(
-      order.customer?.is_blacklisted ||
-      order.verification?.purchaser?.is_blacklisted ||
-      order.verification?.grantors?.some(g => g.is_blacklisted)
-    ));
+    const nowForClearGate = new Date();
+    const returnedOrders = returnedOrdersRaw.filter(order => {
+      const returnTimestamp = order.return_exchanges?.[0]?.verified_at || order.return_exchanges?.[0]?.created_at;
+      if (!returnTimestamp) return false;
+      return nowForClearGate.getTime() - new Date(returnTimestamp).getTime() >= RETURN_CLEARED_DELAY_MS;
+    });
 
     const allImeis = orders
       .map(o => o.cash_in_hand?.[0]?.imei_serial || o.delivery?.product_imei || o.imei_serial)
@@ -988,6 +1000,12 @@ const getClearedCustomers = async (req, res) => {
         try { archivedPlan = JSON.parse(archivedPlan); } catch (e) { archivedPlan = null; }
       }
 
+      const isStillBlacklisted = !!(
+        order.customer?.is_blacklisted ||
+        order.verification?.purchaser?.is_blacklisted ||
+        order.verification?.grantors?.some(g => g.is_blacklisted)
+      );
+
       if (!customerMap.has(key)) {
         customerMap.set(key, {
           customer: {
@@ -1003,7 +1021,8 @@ const getClearedCustomers = async (req, res) => {
             area: order.area,
             profile_photo: profilePhoto,
             is_cleared: true,
-            clear_reason: 'returned',
+            is_blacklisted: isStillBlacklisted,
+            clear_reason: isStillBlacklisted ? 'returned_blacklisted' : 'returned',
             created_at: order.created_at,
             cleared_at: order.updated_at,
           },
@@ -1036,7 +1055,7 @@ const getClearedCustomers = async (req, res) => {
         order_id: order.id,
         order_ref: order.order_ref,
         status: order.status,
-        clear_reason: 'returned',
+        clear_reason: isStillBlacklisted ? 'returned_blacklisted' : 'returned',
         customer_name: order.customer_name,
         verification: order.verification,
         product_details: {

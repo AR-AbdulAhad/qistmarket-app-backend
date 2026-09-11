@@ -175,6 +175,63 @@ function computeDueAndCurrent(installmentLedgerRows) {
 }
 
 /**
+ * Classifies an account exactly the way recoveryController's internal
+ * Overdue/Defaulter/Blacklist/Cleared dashboard tiers do (see
+ * recoveryController.js ~L2144-2262), but as a standalone, reusable
+ * function so the customer-facing ledger page can show the *real* account
+ * status instead of the mostly-dead order.status field. Deliberately kept
+ * separate from recoveryController's inline version rather than refactoring
+ * it to call this — that dashboard is high-traffic/high-stakes internally
+ * and isn't part of this change.
+ *
+ * Rules (unchanged from recoveryController):
+ * - Cleared: fully paid off (installments started, nothing remaining).
+ * - Defaulter: zero payment against every installment due in the last 3
+ *   months (only evaluated once there are 3+ such rows).
+ * - Blacklist: some payment in that same 3-month window, but under 50% of
+ *   what was due.
+ * - Overdue: 2+ unpaid installments whose due date has already passed.
+ * - Regular: exactly 1 unpaid overdue installment.
+ * - Active: nothing overdue at all.
+ */
+function classifyLedgerAccountStatus(installmentLedgerRows) {
+    const rows = Array.isArray(installmentLedgerRows) ? installmentLedgerRows : [];
+    const today = new Date();
+    const threeMonthsAgo = new Date(today);
+    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+
+    const installmentsStarted = rows.length > 0;
+    const grandTotalRemaining = rows.reduce((s, r) => s + Number(r.remainingAmount || 0), 0);
+
+    if (installmentsStarted && grandTotalRemaining === 0) {
+        return 'cleared';
+    }
+
+    const overdueRows = rows.filter(r => {
+        if ((r.status || '').toLowerCase() === 'paid') return false;
+        const d = r.dueDate ? new Date(r.dueDate) : null;
+        return d && !isNaN(d.getTime()) && d < today;
+    });
+
+    const last3Rows = rows.filter(r => {
+        const d = r.dueDate ? new Date(r.dueDate) : null;
+        return d && !isNaN(d.getTime()) && d >= threeMonthsAgo && d < today;
+    });
+
+    if (last3Rows.length >= 3) {
+        const totalPaidInPeriod = last3Rows.reduce((s, r) => s + Number(r.paidAmount || 0), 0);
+        const totalDueInPeriod = last3Rows.reduce((s, r) => s + Number(r.dueAmount || 0), 0);
+
+        if (totalPaidInPeriod === 0) return 'defaulter';
+        if (totalDueInPeriod > 0 && totalPaidInPeriod < totalDueInPeriod * 0.5) return 'blacklist';
+    }
+
+    if (overdueRows.length >= 2) return 'overdue';
+    if (overdueRows.length === 1) return 'regular';
+    return 'active';
+}
+
+/**
  * Picks a free `short_id` for a new installment ledger.
  *
  * The short id is the customer-facing ledger handle (it is what goes out in
@@ -263,6 +320,7 @@ module.exports = {
     normalizeLedger,
     getNormalizedLedger,
     computeDueAndCurrent,
+    classifyLedgerAccountStatus,
     generateLedgerShortId,
     buildLedgerRows
 };

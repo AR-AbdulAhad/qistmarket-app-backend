@@ -12,6 +12,7 @@ const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const { getNormalizedLedger, normalizeLedger } = require('../utils/ledgerUtils');
 const pt = require('../services/paytriggerService');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
+const { completeSelfPickupDelivery } = require('../services/deliveryCompletionService');
 const { notifyUser } = require('../utils/notificationUtils');
 const { logLoginAction } = require('../utils/auditLogger');
 const { EXCLUDE_PENDING_LEGACY_IMPORT } = require('../utils/legacyImportFilter');
@@ -19,7 +20,7 @@ const { EXCLUDE_PENDING_LEGACY_IMPORT } = require('../utils/legacyImportFilter')
 const now = () => new Date();
 
 const createOutlet = async (req, res) => {
-    const { code, name, address } = req.body;
+    const { code, name, address, phone } = req.body;
 
     if (!code || !name) {
         return res.status(400).json({ success: false, message: 'Code and Name are required.' });
@@ -36,6 +37,7 @@ const createOutlet = async (req, res) => {
                 code,
                 name,
                 address,
+                phone,
                 created_at: now(),   // ✅ explicit created_at
                 updated_at: now()    // ✅ explicit updated_at
             }
@@ -62,7 +64,7 @@ const getOutlets = async (req, res) => {
 
 const updateOutlet = async (req, res) => {
     const { id } = req.params;
-    const { code, name, address, status } = req.body;
+    const { code, name, address, phone, status } = req.body;
 
     try {
         const updated = await prisma.outlet.update({
@@ -71,6 +73,7 @@ const updateOutlet = async (req, res) => {
                 ...(code && { code }),
                 ...(name && { name }),
                 ...(address !== undefined && { address }),
+                ...(phone !== undefined && { phone }),
                 ...(status && { status }),
                 updated_at: now()   // ✅ explicit updated_at
             }
@@ -924,7 +927,12 @@ const getReturnExchanges = async (req, res) => {
         const records = await prisma.returnExchange.findMany({
             where: { outlet_id: parseInt(outlet_id) },
             include: {
-                order: true,
+                order: {
+                    include: {
+                        customer: { select: { is_blacklisted: true } },
+                        verification: { include: { purchaser: { select: { is_blacklisted: true } }, grantors: { select: { is_blacklisted: true } } } },
+                    }
+                },
                 delivery_officer: { select: { full_name: true, phone: true } }
             },
             orderBy: { created_at: 'desc' }
@@ -936,11 +944,24 @@ const getReturnExchanges = async (req, res) => {
                 ? (typeof record.selected_plan === 'string' ? JSON.parse(record.selected_plan) : record.selected_plan)
                 : {};
 
+            const isCustomerBlacklisted = !!(
+                record.order?.customer?.is_blacklisted ||
+                record.order?.verification?.purchaser?.is_blacklisted ||
+                record.order?.verification?.grantors?.some(g => g.is_blacklisted)
+            );
+
+            // Eligible for the Self Pickup Exchange action only while it's still
+            // a plain, not-yet-exchanged return sitting in status 'Returned',
+            // and the account isn't blacklisted.
+            const canExchange = record.type !== 'Exchange' && record.order?.status === 'Returned' && !isCustomerBlacklisted;
+
             return {
                 ...record,
                 product_color: plan.delivered_color || record.product_color || 'N/A',
                 product_variant: plan.delivered_variant || record.product_variant || 'N/A',
-                delivered_advance_amount: plan.delivered_advance_amount || record.delivered_advance_amount || 0
+                delivered_advance_amount: plan.delivered_advance_amount || record.delivered_advance_amount || 0,
+                is_customer_blacklisted: isCustomerBlacklisted,
+                can_exchange: canExchange,
             };
         });
 
@@ -1229,9 +1250,8 @@ const initiateDirectReturn = async (req, res) => {
             order.verification?.purchaser?.is_blacklisted ||
             order.verification?.grantors?.some(g => g.is_blacklisted)
         );
-        if (isAlreadyBlacklisted) {
-            return res.status(400).json({ success: false, error: 'This customer/account is already blacklisted and cannot be returned via this flow.' });
-        }
+        // Blacklisted accounts can still be returned (the account itself stays
+        // blacklisted — only an admin whitelisting it separately lifts that).
 
         // Duplicate check: no pending or verified return for this order already
         const existingReturn = await prisma.returnExchange.findFirst({
@@ -1486,7 +1506,7 @@ const initiateDirectReturn = async (req, res) => {
         });
     } catch (error) {
         console.error('initiateDirectReturn error:', error);
-        return res.status(500).json({ success: false, error: 'Server error' });
+        return res.status(500).json({ success: false, error: error.message || 'Server error' });
     }
 };
 
@@ -1563,8 +1583,21 @@ const searchDeliveredOrders = async (req, res) => {
 
     try {
         const where = {
-            is_delivered: true,
-            AND: [EXCLUDE_PENDING_LEGACY_IMPORT],
+            // Matches the same "delivered" definition the Delivered Orders list
+            // and other lookups use (status:'delivered' OR is_delivered:true) —
+            // this used to check is_delivered alone, which silently missed any
+            // order that has status:'delivered' but is_delivered still false
+            // (a real, existing data inconsistency), so a valid delivered order
+            // would show up on the Delivered Orders list but never be findable
+            // here to return.
+            //
+            // Deliberately NOT applying EXCLUDE_PENDING_LEGACY_IMPORT here (unlike
+            // most other order lists) — the Delivered Orders list this page's
+            // search is meant to mirror doesn't apply it either, so a legacy-
+            // imported order still missing its media/location (tagged LEGACY,
+            // but already shown as Delivered there) was findable on that list
+            // yet silently invisible to Returns search — the exact bug reported.
+            AND: [{ OR: [{ status: 'delivered' }, { is_delivered: true }] }],
             OR: [
                 { order_ref: { contains: query } },
                 { token_number: { contains: query } },
@@ -3608,9 +3641,7 @@ module.exports = {
     verifyCashSubmissionOTP,
     getOutletCashHistory,
     getReturnExchanges,
-    verifyReturnExchangeOtp,
     initiateDirectReturn,
-    resendReturnOtp,
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,
