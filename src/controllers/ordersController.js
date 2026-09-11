@@ -1471,8 +1471,12 @@ const getCsrDashboardStats = async (req, res) => {
       website: buildChannelStats(['website']),
     };
 
-    const monthlyTarget = Number(process.env.CSR_MONTHLY_TARGET || process.env.CSR_SALES_TARGET || 1286500); 
-    const customerTarget = Number(process.env.CSR_CUSTOMER_TARGET || 486); 
+    // Super-Admin-editable via /api/admin-panel/targets (targetConfigUtils.js) — falls
+    // back to CSR_MONTHLY_TARGET/CSR_CUSTOMER_TARGET env vars if never configured.
+    const { getTargetConfig } = require('../utils/targetConfigUtils');
+    const targetsCfg = getTargetConfig();
+    const monthlyTarget = Number(targetsCfg.csr_monthly_sales_target);
+    const customerTarget = Number(targetsCfg.csr_customer_target);
     const remainingAmount = monthlyTarget > 0 ? Math.max(0, monthlyTarget - achievedAmount) : 0;
     const remainingCustomers = customerTarget > 0 ? Math.max(0, customerTarget - achievedCustomers) : 0;
 

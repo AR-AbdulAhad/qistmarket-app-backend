@@ -1,5 +1,6 @@
 const prisma = require('../../lib/prisma');
 const { getScoringConfig, saveScoringConfig, getOverridesConfig, saveOverride, deleteOverride } = require('../utils/scoringConfigUtils');
+const { getTargetConfig, saveTargetConfig } = require('../utils/targetConfigUtils');
 const { updateCsrRanking } = require('../services/rankingService');
 const { updateDeliveryRanking } = require('../services/deliveryRankingService');
 const { updateRecoveryRanking } = require('../services/recoveryRankingService');
@@ -336,7 +337,6 @@ async function computeOutletRankings(dateRange) {
     return Object.values(stats).map((s) => {
         const recoveryPct = s.dueAmount > 0 ? (s.recoveredAmount / s.dueAmount) * 100 : 0;
         const scoringCfg = getEffectiveScoringRules('outlet', 'outlet', s.outlet_id);
-
         const salesPts = (s.totalSales / (scoringCfg.sales_divisor || 1000)) * (scoringCfg.sales_multiplier ?? 1);
         const recPts = recoveryPct * (scoringCfg.recovery_pct_multiplier ?? 5);
         const delPts = s.customerCount * (scoringCfg.points_per_delivered_order ?? 10);
@@ -455,6 +455,29 @@ const updateScoringRulesConfig = async (req, res) => {
     } catch (error) {
         console.error('updateScoringRulesConfig error:', error);
         return res.status(500).json({ success: false, message: 'Failed to update scoring rules.' });
+    }
+};
+
+const getCsrTargetsConfig = async (req, res) => {
+    try {
+        const config = getTargetConfig();
+        return res.json({ success: true, data: config });
+    } catch (error) {
+        console.error('getCsrTargetsConfig error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to fetch CSR targets.' });
+    }
+};
+
+const updateCsrTargetsConfig = async (req, res) => {
+    try {
+        const result = saveTargetConfig(req.body);
+        if (!result.success) {
+            return res.status(500).json({ success: false, message: result.error || 'Failed to save targets' });
+        }
+        return res.json({ success: true, message: 'CSR targets updated successfully.', data: result.config });
+    } catch (error) {
+        console.error('updateCsrTargetsConfig error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to update CSR targets.' });
     }
 };
 
@@ -1263,5 +1286,7 @@ module.exports = {
     updateScoringOverride,
     removeScoringOverride,
     getScoringEntities,
+    getCsrTargetsConfig,
+    updateCsrTargetsConfig,
 };
 
