@@ -3724,6 +3724,38 @@ const getHandoverHistory = async (req, res) => {
  * GET /orders/self-pickup/inventory
  * Returns In Stock inventory items for the user's outlet (for self-pickup dropdown)
  */
+// Matched in JS on normalized (lowercased, punctuation/space-stripped) text so
+// formatting differences between the stored name and what's typed/pasted — spacing,
+// slashes, casing — don't prevent an otherwise-correct match.
+const normalizeProductName = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// installment_plans stored on OutletInventory is a one-time snapshot taken when the
+// unit was added to stock (see inventoryController.js addInventory) — it never
+// updates again. If the live catalog's price/plans change afterwards, the outlet
+// portal silently keeps showing the stale numbers while qistmarket.pk shows the
+// current ones. To keep the two in sync, overlay each item with the live plans
+// from the product catalog (matched by api_product_name, falling back to
+// product_name) whenever a match is found; the stored snapshot is only used when
+// the live catalog is unreachable or has no matching product.
+const getLiveInstallmentPlansByName = async () => {
+  const map = new Map();
+  try {
+    const response = await axios.get('https://api.qistmarket.pk/api/product', { timeout: 5000 });
+    const products = Array.isArray(response.data) ? response.data : (response.data?.data || []);
+    for (const product of products) {
+      const key = normalizeProductName(product.name);
+      if (!key) continue;
+      const plans = Array.isArray(product.ProductInstallments)
+        ? product.ProductInstallments.filter((p) => p.isActive !== false)
+        : [];
+      if (plans.length > 0) map.set(key, plans);
+    }
+  } catch (error) {
+    console.error('getLiveInstallmentPlansByName: failed to fetch live catalog, falling back to stored snapshots:', error.message);
+  }
+  return map;
+};
+
 const getSelfPickupInventory = async (req, res) => {
   const { search = '' } = req.query;
   const outlet_id = req.user.outlet_id;
@@ -3743,23 +3775,27 @@ const getSelfPickupInventory = async (req, res) => {
         color_variant: true,
         purchase_price: true,
         installment_plans: true,
+        api_product_name: true,
         status: true,
         is_used: true
       },
       orderBy: { product_name: 'asc' },
     });
 
-    // Matched in JS on normalized (lowercased, punctuation/space-stripped) text so
-    // formatting differences between the stored name and what's typed/pasted — spacing,
-    // slashes, casing — don't prevent an otherwise-correct match.
-    const normalize = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const normalizedSearch = normalize(search);
+    const livePlansByName = await getLiveInstallmentPlansByName();
+    const withLivePlans = allInventory.map((item) => {
+      const liveKey = normalizeProductName(item.api_product_name) || normalizeProductName(item.product_name);
+      const livePlans = livePlansByName.get(liveKey);
+      return livePlans ? { ...item, installment_plans: livePlans } : item;
+    });
+
+    const normalizedSearch = normalizeProductName(search);
     const inventory = normalizedSearch
-      ? allInventory.filter(item => {
-          const haystack = normalize([item.product_name, item.imei_serial, item.color_variant, item.category].filter(Boolean).join(' '));
+      ? withLivePlans.filter(item => {
+          const haystack = normalizeProductName([item.product_name, item.imei_serial, item.color_variant, item.category].filter(Boolean).join(' '));
           return haystack.includes(normalizedSearch);
         })
-      : allInventory;
+      : withLivePlans;
 
     return res.status(200).json({ success: true, data: inventory });
   } catch (error) {
