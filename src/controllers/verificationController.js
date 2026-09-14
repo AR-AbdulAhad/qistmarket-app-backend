@@ -2684,8 +2684,22 @@ const getDeliveredProductDetails = async (req, res) => {
     const hasLedgerPlan = !!normalizedLedger && normalizedLedger.installment_ledger.length > 0;
     const actualTotalAmount = hasLedgerPlan ? normalizedLedger.summary.grandTotalDue : order.total_amount;
     const actualAdvanceAmount = hasLedgerPlan ? normalizedLedger.advance_payment.amount : order.advance_amount;
+    // Was always the FIRST installment row's amount — accurate before a plan
+    // could ever change, but once month 1 is paid it's frozen at whatever
+    // rate applied back then. After a Super Admin corrects the Monthly
+    // Amount (Product Information edit), only the still-pending rows get the
+    // new rate (paid rows are never touched — see
+    // ledgerController.syncLedgerPricingFromOrderEdit), so this field must
+    // reflect the rate that will actually apply GOING FORWARD: the first
+    // not-yet-fully-paid row, falling back to the last row if the plan is
+    // fully paid off.
+    const firstUnpaidRow = hasLedgerPlan
+      ? normalizedLedger.installment_ledger.find((r) => r.status !== 'paid')
+      : null;
     const actualMonthlyAmount = hasLedgerPlan
-      ? (normalizedLedger.installment_ledger[0]?.dueAmount ?? order.monthly_amount)
+      ? (firstUnpaidRow?.dueAmount
+          ?? normalizedLedger.installment_ledger[normalizedLedger.installment_ledger.length - 1]?.dueAmount
+          ?? order.monthly_amount)
       : order.monthly_amount;
     const actualMonths = hasLedgerPlan ? normalizedLedger.installment_ledger.length : order.months;
 

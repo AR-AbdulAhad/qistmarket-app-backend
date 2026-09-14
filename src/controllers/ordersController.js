@@ -13,6 +13,7 @@ const { saveOTP, verifyOTP } = require('../utils/otpUtils');
 const customerNotify = require('../services/customerNotificationService');
 const { getOrCreateCustomer, checkRepeatStatus, updateCsrRanking, getWorkingDaysLeftInMonth, getOrderSalesValue } = require('../services/rankingService');
 const { EXCLUDE_PENDING_LEGACY_IMPORT, isRequestingLegacyImportChannel } = require('../utils/legacyImportFilter');
+const { syncLedgerPricingFromOrderEdit } = require('./ledgerController');
 
 const admin = require('firebase-admin');
 
@@ -1996,6 +1997,7 @@ const getOrderById = async (req, res) => {
         assigned_to: { select: { username: true, full_name: true } },
         delivery_officer: { select: { username: true, full_name: true, id: true } },
         recovery_officer: { select: { username: true, full_name: true, id: true } },
+        outlet: { select: { id: true, name: true, code: true } },
         productHistories: {
           include: {
             changed_by: { select: { username: true, full_name: true } }
@@ -3017,21 +3019,31 @@ const updateOrderItem = async (req, res) => {
   const {
     product_name, total_amount, advance_amount, monthly_amount, months, imei_serial,
     customer_name, whatsapp_number, alternate_contact, address, city, area, zone, block, house_no, street, gender, residential_type, order_notes,
+    outlet_id,
   } = req.body;
 
   // imei_serial + the Customer Information fields below are newer,
   // Super-Admin-only correction tools (added alongside the verification
   // page's editable sections) — every field this endpoint already accepted
   // keeps its existing access so the pre-delivery "Edit Item" flow
-  // elsewhere in the app isn't affected.
+  // elsewhere in the app isn't affected. outlet_id lets a Super Admin
+  // "connect" an outlet to an order that has none (see the Product
+  // Information edit form's outlet-picker fallback), so the stock picker
+  // there has something to browse.
   const newFieldValues = [customer_name, whatsapp_number, alternate_contact, address, city, area, zone, block, house_no, street, gender, residential_type, order_notes];
-  const touchingNewFields = imei_serial !== undefined || newFieldValues.some((v) => v !== undefined);
+  const touchingNewFields = imei_serial !== undefined || outlet_id !== undefined || newFieldValues.some((v) => v !== undefined);
   if (touchingNewFields && req.user?.role !== 'Super Admin') {
     return res.status(403).json({ success: false, message: 'Only Super Admin can edit these fields.' });
   }
 
   try {
-    const order = await prisma.order.findUnique({ where: { id: parseInt(id) } });
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(id) },
+      include: {
+        delivery: true,
+        cash_in_hand: { orderBy: { created_at: 'desc' }, take: 1 },
+      },
+    });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     if (product_name && product_name !== order.product_name) {
@@ -3046,15 +3058,89 @@ const updateOrderItem = async (req, res) => {
       });
     }
 
+    // Reconcile OutletInventory stock whenever the assigned unit's
+    // IMEI/Serial actually changes — release whichever unit was previously
+    // linked back to "In Stock", and claim the newly selected one if it's a
+    // real stock item (a hand-typed custom serial simply has no matching
+    // row, so nothing is claimed for it). Mirrors the same imei_serial-match
+    // convention deliveryCompletionService.js uses when stock is first
+    // assigned to an order at delivery time.
+    if (imei_serial !== undefined) {
+      const latestCash = order.cash_in_hand?.[0] || null;
+      // Same priority getDeliveredProductDetails uses to decide what IMEI is
+      // actually being shown/edited, so "old" reflects the real prior unit.
+      const oldImei = latestCash?.imei_serial || order.delivery?.product_imei || order.imei_serial || null;
+      const newImei = imei_serial || null;
+
+      if (oldImei !== newImei) {
+        if (oldImei) {
+          await prisma.outletInventory.updateMany({
+            where: { imei_serial: oldImei, status: 'Sold' },
+            data: { status: 'In Stock', updated_at: new Date() },
+          });
+        }
+        if (newImei) {
+          // Best-effort claim — a Super Admin correction is allowed to
+          // proceed even if the unit isn't currently claimable (e.g. it was
+          // already marked Sold for an unrelated reason); the order's own
+          // imei_serial field is updated below regardless.
+          await prisma.outletInventory.updateMany({
+            where: { imei_serial: newImei, status: 'In Stock', is_used: false },
+            data: { status: 'Sold', updated_at: new Date() },
+          });
+        }
+
+        // Keep whichever field actually drives the displayed IMEI in sync
+        // (same cash_in_hand -> delivery -> order priority), so the new
+        // value is what shows up on the next fetch.
+        if (latestCash) {
+          await prisma.cashInHand.update({ where: { id: latestCash.id }, data: { imei_serial: newImei } });
+        } else if (order.delivery) {
+          await prisma.delivery.update({ where: { id: order.delivery.id }, data: { product_imei: newImei } });
+        }
+      }
+    }
+
+    // The Pricing Plan card shown for a delivered order is ledger-derived
+    // (getDeliveredProductDetails prefers the installment ledger's own
+    // numbers over these Order fields whenever a ledger exists), so writing
+    // a correction here alone would silently have no visible effect and
+    // leave the ledger desynced. Keep the ledger's pending (unpaid) rows in
+    // step with whatever the admin just typed — paid/partial rows are never
+    // touched — and, since only 3 of these 4 numbers are truly independent,
+    // always persist Total Amount as advance + monthly*months rather than
+    // trusting a 4th, separately-typed figure that could disagree with it.
+    let effectiveTotalAmount = total_amount ? parseFloat(total_amount) : undefined;
+    if (advance_amount !== undefined || monthly_amount !== undefined || months !== undefined || total_amount !== undefined) {
+      const effectiveAdvance = advance_amount !== undefined ? parseFloat(advance_amount) : order.advance_amount;
+      const effectiveMonthly = monthly_amount !== undefined ? parseFloat(monthly_amount) : order.monthly_amount;
+      const effectiveMonths = months !== undefined ? parseInt(months, 10) : order.months;
+
+      const syncResult = await syncLedgerPricingFromOrderEdit({
+        orderId: order.id,
+        advanceAmount: effectiveAdvance,
+        monthlyAmount: effectiveMonthly,
+        months: effectiveMonths,
+        req,
+      });
+      if (!syncResult.ok) {
+        return res.status(400).json({ success: false, message: syncResult.message });
+      }
+      if (syncResult.ledgerUpdated) {
+        effectiveTotalAmount = syncResult.computedTotal;
+      }
+    }
+
     const updatedOrder = await prisma.order.update({
       where: { id: parseInt(id) },
       data: {
         product_name,
-        total_amount: total_amount ? parseFloat(total_amount) : undefined,
+        total_amount: effectiveTotalAmount,
         advance_amount: advance_amount ? parseFloat(advance_amount) : undefined,
         monthly_amount: monthly_amount ? parseFloat(monthly_amount) : undefined,
         months: months ? parseInt(months) : undefined,
         ...(imei_serial !== undefined && { imei_serial: imei_serial || null }),
+        ...(outlet_id !== undefined && { outlet_id: outlet_id ? parseInt(outlet_id, 10) : null }),
         ...(customer_name !== undefined && customer_name && { customer_name }),
         ...(whatsapp_number !== undefined && whatsapp_number && { whatsapp_number }),
         ...(alternate_contact !== undefined && { alternate_contact: alternate_contact || null }),

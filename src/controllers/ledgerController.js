@@ -1932,6 +1932,109 @@ const setLedgerMonths = async (req, res) => {
   }
 };
 
+// Called from ordersController.js's updateOrderItem (the "Product
+// Information" / Pricing Plan edit form on the Order Details page) — NOT an
+// Express handler itself (no res), just a plain async helper the caller
+// awaits and inspects.
+//
+// Why this exists: the Pricing Plan card shown to admins is ledger-derived
+// (getDeliveredProductDetails prefers the ledger's own numbers over
+// Order.total_amount/advance_amount/monthly_amount/months whenever a ledger
+// exists), because the ledger — not the original order snapshot — is the
+// thing that actually drives collections. Writing a correction to the Order
+// row alone therefore has no visible effect and silently desyncs the two;
+// this keeps them consistent by reusing the exact same "protect anything
+// paid/partial, regenerate only the pending tail" rule as setLedgerMonths
+// above, with the admin's typed Monthly Amount applied as a flat rate across
+// every regenerated pending row (rather than setLedgerMonths' own behavior of
+// dividing a fixed remaining balance across them) and the advance row's
+// amount corrected directly. Total Amount is intentionally NOT taken from
+// the form as-typed — with only 3 real degrees of freedom (advance, monthly,
+// months), trusting a 4th independently-typed total risks saving numbers
+// that don't add up, so it's always recomputed as advance + monthly*months
+// and handed back to the caller to persist on the Order row instead.
+const syncLedgerPricingFromOrderEdit = async ({ orderId, advanceAmount, monthlyAmount, months, req }) => {
+  const ledger = await prisma.installmentLedger.findFirst({
+    where: { order_id: orderId },
+    include: { order: { select: { id: true, order_ref: true } } },
+  });
+  // No ledger yet (e.g. order not delivered) — nothing to keep in sync, the
+  // caller's plain Order-field write is the whole story.
+  if (!ledger) return { ok: true, ledgerUpdated: false };
+
+  if (advanceAmount == null || isNaN(advanceAmount) || advanceAmount < 0) {
+    return { ok: false, message: 'Advance Amount must be a valid, non-negative number.' };
+  }
+  if (monthlyAmount == null || isNaN(monthlyAmount) || monthlyAmount < 0) {
+    return { ok: false, message: 'Monthly Amount must be a valid, non-negative number.' };
+  }
+  const newMonths = parseInt(months, 10);
+  if (!newMonths || newMonths < 1) {
+    return { ok: false, message: 'Plan Duration (Months) must be a positive integer.' };
+  }
+
+  const rows = Array.isArray(ledger.ledger_rows) ? ledger.ledger_rows : [];
+  const advanceRow = rows.find((r) => Number(r.month) === 0) || null;
+  const installmentRows = rows.filter((r) => Number(r.month) > 0).sort((a, b) => Number(a.month) - Number(b.month));
+
+  let keptThroughMonth = 0;
+  for (const r of installmentRows) {
+    if (r.status === 'paid' || r.status === 'partial') keptThroughMonth = Number(r.month);
+  }
+
+  if (newMonths < keptThroughMonth) {
+    return {
+      ok: false,
+      message: `Cannot set Plan Duration below ${keptThroughMonth} months — that many installments are already paid or partially paid. Use "Edit Ledger" if those specific months need correcting.`,
+    };
+  }
+
+  const keptRows = installmentRows.filter((r) => Number(r.month) <= keptThroughMonth);
+  const anchorRow = keptRows[keptRows.length - 1] || advanceRow;
+  const anchorDate = anchorRow ? new Date(anchorRow.due_date) : now();
+  const newPendingMonths = newMonths - keptThroughMonth;
+
+  const newPendingRows = [];
+  for (let i = 0; i < newPendingMonths; i += 1) {
+    const monthNumber = keptThroughMonth + i + 1;
+    newPendingRows.push({
+      month: monthNumber,
+      label: `Month ${monthNumber}`,
+      due_date: addMonthsToDate(anchorDate, i + 1),
+      amount: monthlyAmount,
+      paid_amount: 0,
+      status: 'pending',
+      paid_at: null,
+      payment_method: null,
+    });
+  }
+
+  const finalAdvanceRow = advanceRow ? { ...advanceRow, amount: advanceAmount } : null;
+  const newRows = [...(finalAdvanceRow ? [finalAdvanceRow] : []), ...keptRows, ...newPendingRows];
+
+  await prisma.installmentLedger.update({
+    where: { id: ledger.id },
+    data: { ledger_rows: newRows, updated_at: now() },
+  });
+
+  if (req?.user) {
+    await logAction(
+      req,
+      'LEDGER_PRICING_SYNCED',
+      `Pricing plan for order ${ledger.order.order_ref} corrected via Product Information edit by ${req.user.full_name || req.user.username} — Advance Rs.${advanceAmount}, Monthly Rs.${monthlyAmount} x ${newPendingMonths} pending month(s); ${keptThroughMonth} already-paid/partial month(s) left untouched.`,
+      ledger.order.id,
+      'Order',
+    );
+  }
+
+  return {
+    ok: true,
+    ledgerUpdated: true,
+    ledgerId: ledger.id,
+    computedTotal: advanceAmount + monthlyAmount * newMonths,
+  };
+};
+
 /**
  * Repairs a delivered order that has no installment ledger.
  *
@@ -2132,5 +2235,6 @@ module.exports = {
   sendLedgerToCustomer,
   editLedgerRows,
   setLedgerMonths,
+  syncLedgerPricingFromOrderEdit,
   rebuildOrderLedger
 };

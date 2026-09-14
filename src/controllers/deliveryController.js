@@ -2157,7 +2157,7 @@ const replaceDeliveryUpload = async (req, res) => {
 // existed to correct it or the rest of that card (feedback/verified/self_pickup).
 const updateDeliveryDetails = async (req, res) => {
   const { delivery_id } = req.params;
-  const { self_pickup, feedback, verified, delivery_agent_id } = req.body;
+  const { self_pickup, feedback, verified, delivery_agent_id, start_time, end_time } = req.body;
 
   if (req.user?.role !== 'Super Admin') {
     return res.status(403).json({ success: false, message: 'Only Super Admin can edit this.' });
@@ -2173,6 +2173,8 @@ const updateDeliveryDetails = async (req, res) => {
     if (self_pickup !== undefined) data.self_pickup = !!self_pickup;
     if (feedback !== undefined) data.feedback = feedback || null;
     if (verified !== undefined) data.verified = !!verified;
+    if (start_time !== undefined) data.start_time = start_time ? new Date(start_time) : null;
+    if (end_time !== undefined) data.end_time = end_time ? new Date(end_time) : null;
     if (delivery_agent_id !== undefined) {
       const agentId = delivery_agent_id ? parseInt(delivery_agent_id, 10) : null;
       if (!agentId) {
