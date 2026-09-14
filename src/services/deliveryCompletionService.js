@@ -12,26 +12,17 @@
 const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
-const { sendDeliveryConfirmation, sendCustomerLedger } = require('../services/watiService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
-const { getNormalizedLedger, buildLedgerRows } = require('../utils/ledgerUtils');
+const { buildLedgerRows } = require('../utils/ledgerUtils');
 const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
 const pt = require('../services/paytriggerService');
 
 const now = () => new Date();
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
-
-const formatDatePK = (d) => {
-  const date = d ? new Date(d) : new Date();
-  return date.toLocaleDateString('en-PK', {
-    day: '2-digit', month: 'short', year: 'numeric',
-    timeZone: 'Asia/Karachi'
-  });
-};
 
 const addMonths = (date, n) => {
   const d = new Date(date);
@@ -286,68 +277,16 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
 
 function sendCompletionWatiMessages({ purchaser, order, productNameSnapshot, colorVariant, advanceAmount, orderStatusLabel, installmentLedger, ledgerUrl, product_imei, confirmedCustomerName, deliveredByName, deliveredByNumber }) {
   const customerPhone = purchaser?.telephone_number;
-  const deliveryDateStr = formatDatePK(now());
 
   if (!customerPhone) {
     console.warn('[deliveryCompletionService] No customer phone — WATI messages skipped for order', order.order_ref);
     return;
   }
 
-  // Installment summary for the delivery-confirmation message — same normalized
-  // ledger math used everywhere else (getNormalizedLedger), so these figures stay
-  // consistent with the customer's ledger page.
-  let totalInstallmentPrice = 0;
-  let installmentDuration = 0;
-  let monthlyInstallment = 0;
-  let nextDueDateStr = 'N/A';
-  let remainingAmountVal = 0;
-  if (installmentLedger?.ledger_rows) {
-    const normalized = getNormalizedLedger(installmentLedger.ledger_rows);
-    installmentDuration = normalized.installment_ledger.length;
-    monthlyInstallment = normalized.installment_ledger[0]?.dueAmount || 0;
-    totalInstallmentPrice = normalized.summary.grandTotalDue;
-    remainingAmountVal = normalized.summary.grandTotalRemaining;
-    const nextRow = normalized.installment_ledger.find(r => r.status !== 'paid');
-    nextDueDateStr = nextRow ? formatDatePK(nextRow.dueDate) : 'N/A';
-  }
-
-  sendDeliveryConfirmation(customerPhone, {
-    customerName: confirmedCustomerName,
-    productName: productNameSnapshot,
-    imei: product_imei || 'N/A',
-    advanceAmount,
-    deliveryDate: deliveryDateStr,
-    orderRef: order.order_ref,
-    orderStatus: orderStatusLabel,
-    deliveredByName: deliveredByName || 'N/A',
-    deliveredByNumber: deliveredByNumber || 'N/A',
-    branchName: order.outlet?.name || 'N/A',
-    branchCode: order.outlet?.code || 'N/A',
-    totalInstallmentPrice,
-    installmentDuration,
-    monthlyInstallment,
-    nextDueDate: nextDueDateStr,
-    remainingAmount: remainingAmountVal,
-    ledgerUrl,
-  }).then(r => console.log('[WATI] Delivery confirmation:', r?.success ? 'sent ✓' : r?.error))
-    .catch(e => console.error('[WATI] Delivery confirmation error:', e));
-
+  // Only the account-awareness message is sent on delivery completion — the
+  // delivery-confirmation and customer-ledger templates were redundant on top
+  // of it (three separate WhatsApp messages for one event) and were dropped.
   sendAccountAwarenessForOrder(order.id, customerPhone, { itemName: productNameSnapshot });
-
-  const sendLedgerTo = (phone) => {
-    if (!installmentLedger || !ledgerUrl) return;
-    sendCustomerLedger(phone, {
-      customerName: confirmedCustomerName,
-      orderRef: order.order_ref,
-      itemName: productNameSnapshot,
-      remainingBalance: remainingAmountVal,
-      ledgerUrl,
-    }).catch(e => console.error('[WATI] Ledger template error:', e));
-  };
-
-  sendLedgerTo(customerPhone);
-  const altPhone = purchaser?.alternate_phone_number;
-  if (altPhone) sendLedgerTo(altPhone);
 }
 
 // ─── Agent (Delivery Officer) completion ───────────────────────────────────
@@ -619,6 +558,10 @@ async function completeSelfPickupDelivery({ order, payload, io, productNameSnaps
         is_delivered: true,
         delivered_at: order.delivered_at || now(),
         updated_at: now(),
+        // Legacy/unassigned orders (outlet_id null) get claimed by whichever
+        // outlet actually completes the self-pickup handover — never overwrites
+        // an order that already belongs to a (possibly different) outlet.
+        outlet_id: order.outlet_id ?? outlet_id,
       },
     });
 
@@ -650,6 +593,13 @@ async function completeSelfPickupDelivery({ order, payload, io, productNameSnaps
 
   const { delivery, colorVariant } = result;
   productNameSnapshot = result.productNameSnapshot;
+
+  // The order-update above may have just claimed this order for `outlet_id`
+  // (it was previously unassigned) — refresh the in-memory outlet so the
+  // WATI messages below show the real branch instead of a stale N/A.
+  if (!order.outlet) {
+    order.outlet = await prisma.outlet.findUnique({ where: { id: outlet_id }, select: { name: true, code: true } });
+  }
 
   await logOrderStatusChange(order.id, order.status, 'delivered', user);
 

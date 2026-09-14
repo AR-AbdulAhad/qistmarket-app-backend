@@ -3420,6 +3420,14 @@ const getReturnedOrders = async (req, res) => {
       }
     });
 
+    // A returned order only belongs on this operational list for 3 days —
+    // matching the "Moves to Cleared" countdown OrderList.tsx shows on each
+    // row (returnTime + 3 days, keyed off this same updated_at). Past that
+    // window it's considered cleared and should drop off here.
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    where.AND = [...(where.AND || []), { updated_at: { gte: threeDaysAgo } }];
+
     const orders = await prisma.order.findMany({
       where,
       skip,

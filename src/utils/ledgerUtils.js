@@ -15,6 +15,16 @@ function normalizeLedger(rows) {
     const updatedRows = JSON.parse(JSON.stringify(rows)); // Deep copy
 
     let carriedForward = 0;
+    // The row that gets to display the running arrears total AND is treated
+    // as "current" for payment everywhere else (Installment Receiving, the
+    // PAY button, the summary/arrears badge) — the most recently overdue
+    // unpaid row, i.e. the latest due date that has already passed. Every
+    // other row shows 0, so the same backlog figure doesn't repeat down the
+    // whole schedule. Kept in sync with InstallmentsTable.tsx's
+    // activePayableIndex/isFinalDueUnlock, which pick the same row on the
+    // frontend for which PAY button unlocks.
+    let arrearsRowIndex = -1;
+    let arrearsValue = 0;
 
     for (let i = 0; i < updatedRows.length; i++) {
         const row = updatedRows[i];
@@ -41,17 +51,31 @@ function normalizeLedger(rows) {
             continue;
         }
 
-        // Arrears shown ON this row = everything carried forward from prior
-        // overdue months only (this row's own due/remaining is shown separately).
-        row.arrears = carriedForward;
+        row.arrears = 0; // filled in below, on the one row selected as "current"
 
         const dueDate = row.due_date || row.dueDate;
         const dDate = dueDate ? new Date(dueDate) : null;
         const isOverdueUnpaid = dDate && !isNaN(dDate.getTime()) && dDate <= todayEnd && status !== 'paid';
 
         if (isOverdueUnpaid) {
+            // Each overdue-unpaid row we pass becomes the new "current" one —
+            // by the end of the loop this lands on the LATEST such row. The
+            // value carried onto it is everything overdue BEFORE it (this
+            // row's own due/remaining is already shown in its own columns).
+            arrearsRowIndex = i;
+            arrearsValue = carriedForward;
             carriedForward += row.remainingAmount;
+        } else if (arrearsRowIndex === -1 && status !== 'paid') {
+            // Nothing has come due yet at all — no backlog exists, but still
+            // let the earliest upcoming row be "current" (arrears stays 0)
+            // rather than leaving every row unpayable until its due date.
+            arrearsRowIndex = i;
+            arrearsValue = 0;
         }
+    }
+
+    if (arrearsRowIndex !== -1) {
+        updatedRows[arrearsRowIndex].arrears = arrearsValue;
     }
 
     return updatedRows;

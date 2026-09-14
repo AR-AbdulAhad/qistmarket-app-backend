@@ -1604,7 +1604,7 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
 const sendLedgerToCustomer = async (req, res) => {
   try {
     const { shortId } = req.params;
-    const { targetPhone } = req.body; // 'primary', 'alternate', or 'both'
+    const { targetPhone, customPhone } = req.body; // 'primary', 'alternate', 'both', or 'custom'
 
     const ledger = await fetchLedger({ short_id: shortId });
     if (!ledger) {
@@ -1623,6 +1623,8 @@ const sendLedgerToCustomer = async (req, res) => {
     else if (targetPhone === 'both') {
       if (primaryPhone) phonesToSend.push(primaryPhone);
       if (altPhone) phonesToSend.push(altPhone);
+    } else if (targetPhone === 'custom') {
+      if (customPhone && String(customPhone).trim()) phonesToSend.push(String(customPhone).trim());
     } else if (!targetPhone) {
       // default to primary
       if (primaryPhone) phonesToSend.push(primaryPhone);

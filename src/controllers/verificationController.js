@@ -2457,6 +2457,42 @@ const updateLocationVerified = async (req, res) => {
   }
 };
 
+// ArchivedDelivery.selected_plan is a free-form JSON snapshot of whatever the
+// order's Delivery.selected_plan looked like at the time — different delivery
+// flows (self-pickup, agent, legacy import) have used different key names for
+// the same figures over time, so normalize every variant seen in the wild
+// rather than assuming one shape.
+function parseArchivedSelectedPlan(selectedPlan) {
+  if (!selectedPlan) return null;
+  let plan = selectedPlan;
+  if (typeof plan === 'string') {
+    try { plan = JSON.parse(plan); } catch (e) { return null; }
+  }
+  if (!plan || typeof plan !== 'object') return null;
+
+  const totalAmount = plan.totalPrice ?? plan.total_amount ?? null;
+  const advanceAmount = plan.advance ?? plan.advanceAmount ?? plan.advance_amount ?? null;
+  const monthlyAmount = plan.monthlyAmount ?? plan.monthly_amount ?? null;
+  const months = plan.months ?? plan.duration ?? null;
+  const productName = plan.productName ?? plan.product_name ?? null;
+  const colorVariant = plan.delivered_color && plan.delivered_variant
+    ? `${plan.delivered_color} | ${plan.delivered_variant}`
+    : (plan.color || plan.productColor || null);
+
+  if (totalAmount == null && advanceAmount == null && monthlyAmount == null && months == null && !productName) {
+    return null;
+  }
+
+  return {
+    total_amount: totalAmount,
+    advance_amount: advanceAmount,
+    monthly_amount: monthlyAmount,
+    months,
+    product_name: productName,
+    color_variant: colorVariant,
+  };
+}
+
 const getDeliveredProductDetails = async (req, res) => {
   const { order_id } = req.params;
 
@@ -2566,8 +2602,46 @@ const getDeliveredProductDetails = async (req, res) => {
     // Extract archived deliveries
     let archivedDeliveries = [];
     if (order.archived_deliveries && order.archived_deliveries.length > 0) {
+      // ArchivedDelivery has no product_name/color_variant column of its own
+      // (only product_imei + a selected_plan JSON blob) — best-effort recover
+      // the product identity from the outlet inventory row that IMEI still
+      // points to, batched up front rather than one query per archived row.
+      const archivedImeis = order.archived_deliveries.map(ad => ad.product_imei).filter(Boolean);
+      const archivedInventoryByImei = {};
+      if (archivedImeis.length > 0) {
+        const inventoryRows = await prisma.outletInventory.findMany({
+          where: { imei_serial: { in: archivedImeis } },
+          select: { imei_serial: true, product_name: true, color_variant: true, category: true },
+        });
+        inventoryRows.forEach(row => { archivedInventoryByImei[row.imei_serial] = row; });
+      }
+
       archivedDeliveries = order.archived_deliveries.map(ad => {
-        let adPaymentDetails = null;
+        const archivedInventoryMatch = ad.product_imei ? archivedInventoryByImei[ad.product_imei] : null;
+        const archivedPlan = parseArchivedSelectedPlan(ad.selected_plan);
+        // Per-field fallback to Order.product_name/total_amount/advance_amount/
+        // monthly_amount/months when the archived IMEI/selected_plan didn't
+        // capture something. Those order columns are set once at booking and,
+        // for an order that's only ever been returned once, still describe
+        // exactly the product that was delivered and returned — redelivery
+        // writes a fresh CashInHand/plan snapshot but never rewrites these
+        // order columns unless someone explicitly edits Product Information
+        // (which would show up in OrderProductHistory).
+        const adProductDetails = (archivedInventoryMatch || archivedPlan || order.product_name) ? {
+          product_name: archivedInventoryMatch?.product_name || archivedPlan?.product_name || order.product_name || null,
+          color_variant: archivedInventoryMatch?.color_variant || archivedPlan?.color_variant || null,
+          category: archivedInventoryMatch?.category || null,
+          total_amount: archivedPlan?.total_amount ?? order.total_amount ?? null,
+          advance_amount: archivedPlan?.advance_amount ?? order.advance_amount ?? null,
+          monthly_amount: archivedPlan?.monthly_amount ?? order.monthly_amount ?? null,
+          months: archivedPlan?.months ?? order.months ?? null,
+        } : null;
+        // No ledger was snapshotted for this returned delivery (either the
+        // archival happened before a ledger existed, or creation failed at
+        // the time) — say so explicitly instead of silently rendering
+        // nothing, mirroring the "ledger missing" notice the live/current
+        // ledger already shows via the same ledger_missing flag.
+        let adPaymentDetails = { ledger_missing: true };
         if (ad.installment_ledger && ad.installment_ledger.ledger_rows) {
             const normalized = getNormalizedLedger(ad.installment_ledger.ledger_rows);
             let advPayment = null;
@@ -2621,6 +2695,7 @@ const getDeliveredProductDetails = async (req, res) => {
             self_pickup: ad.self_pickup,
             archived_at: ad.archived_at,
             uploads: ad.uploads,
+            product_details: adProductDetails,
             payment_details: adPaymentDetails
         };
       });
@@ -2713,7 +2788,12 @@ const getDeliveredProductDetails = async (req, res) => {
         whatsapp_number: order.whatsapp_number,
         is_delivered: order.is_delivered,
         status: order.status,
-        delivered_at: order.updated_at,
+        // order.updated_at is bumped by ANY edit to the order row (not just
+        // delivery), so it drifts away from the real delivery date the
+        // moment something else — e.g. correcting the Delivery Date & Time
+        // itself — touches the row afterward. Fall back to updated_at only
+        // for legacy orders that never got delivered_at populated.
+        delivered_at: order.delivered_at || order.updated_at,
         outlet_id: resolvedOutletId
       },
       product_details: {
@@ -2972,6 +3052,63 @@ const updateVerificationMedia = async (req, res) => {
     });
   } catch (error) {
     console.error('Update verification media error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
+// Add one or more new photos to an existing verification location — separate
+// from replaceLocationPhoto above, which only swaps an already-uploaded photo
+// in place and can't grow the set.
+const addLocationPhoto = async (req, res) => {
+  const { location_id } = req.params;
+  const files = req.files || [];
+
+  if (files.length === 0) {
+    return res.status(400).json({ success: false, error: 'No files uploaded' });
+  }
+
+  try {
+    const location = await prisma.verificationLocation.findUnique({
+      where: { id: parseInt(location_id) }
+    });
+
+    if (!location) {
+      return res.status(404).json({ success: false, error: 'Location not found' });
+    }
+
+    const created = await prisma.$transaction(
+      files.map((file) =>
+        prisma.verificationLocationPhoto.create({
+          data: {
+            verification_location_id: location.id,
+            file_url: file.url,
+            uploaded_at: now()
+          }
+        })
+      )
+    );
+
+    await prisma.verificationEditHistory.createMany({
+      data: created.map((photo) => ({
+        verification_id: location.verification_id,
+        entity_type: 'location_photo',
+        entity_id: photo.id,
+        field_name: 'file_url',
+        old_value: null,
+        new_value: photo.file_url,
+        edited_by_id: req.user.id,
+        edited_by_name: req.user.full_name,
+        edited_at: now()
+      }))
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Location photo(s) added successfully',
+      data: { photos: created }
+    });
+  } catch (error) {
+    console.error('Add location photo error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
@@ -3809,6 +3946,7 @@ module.exports = {
   getDeliveredProductDetails,
   getDeliveredProductsList,
   updateVerificationMedia,
+  addLocationPhoto,
   replaceLocationPhoto,
   updateVerificationAssignment,
   updateVerificationDetails,

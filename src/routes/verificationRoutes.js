@@ -35,6 +35,7 @@ const {
   getDeliveredProductDetails,
   getDeliveredProductsList,
   updateVerificationMedia,
+  addLocationPhoto,
   replaceLocationPhoto,
   getDashboardStats,
   checkVerificationPerson,
@@ -177,6 +178,15 @@ router.get('/delivered-product/order/:order_id', authenticateJWT, getDeliveredPr
 
 // Get list of all delivered products (with pagination and search)
 router.get('/delivered-products', authenticateJWT, getDeliveredProductsList);
+
+// Add new photo(s) to an existing verification location
+router.post(
+  '/location/:location_id/photo',
+  authenticateJWT,
+  upload.array('files'),
+  fixUploadPath,
+  addLocationPhoto
+);
 
 // Replace verification location photo (Super Admin only)
 router.put(

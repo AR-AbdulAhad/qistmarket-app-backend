@@ -1956,7 +1956,14 @@ const submitSelfPickupDelivery = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
-    if (order.outlet_id !== outlet_id) {
+    const userRole = (req.user?.role || '').toLowerCase();
+    const isSuperAdminOrAdmin = userRole === 'super admin' || userRole === 'admin';
+    const belongsToOutlet = isSuperAdminOrAdmin
+      || order.outlet_id === outlet_id
+      || order.outlet_id === null
+      || order.created_by_user_id === req.user.id;
+
+    if (!belongsToOutlet) {
       return res.status(403).json({ success: false, message: 'Order does not belong to your outlet' });
     }
 
@@ -2164,7 +2171,10 @@ const updateDeliveryDetails = async (req, res) => {
   }
 
   try {
-    const delivery = await prisma.delivery.findUnique({ where: { id: parseInt(delivery_id, 10) } });
+    const delivery = await prisma.delivery.findUnique({
+      where: { id: parseInt(delivery_id, 10) },
+      include: { installment_ledger: true },
+    });
     if (!delivery) {
       return res.status(404).json({ success: false, message: 'Delivery record not found.' });
     }
@@ -2187,7 +2197,41 @@ const updateDeliveryDetails = async (req, res) => {
       data.delivery_agent_id = agentId;
     }
 
-    const updated = await prisma.delivery.update({ where: { id: delivery.id }, data });
+    // The delivery date shown everywhere else — Order.delivered_at (the
+    // "Delivered on" header, Delivered Orders list, date-range filters) and
+    // the ledger's advance-payment paid_at (the "Payment Date" under Advance
+    // Payment) — is captured independently at delivery-completion time. Keep
+    // them in sync with this same edit instead of only updating Delivery.end_time.
+    // (Installment due dates are intentionally left alone — those are a
+    // separate, financial-schedule decision, not just a display date.)
+    const newEndTime = data.end_time;
+    const [updated] = await prisma.$transaction([
+      prisma.delivery.update({ where: { id: delivery.id }, data }),
+      ...(newEndTime ? [
+        prisma.order.update({ where: { id: delivery.order_id }, data: { delivered_at: newEndTime } }),
+      ] : []),
+    ]);
+
+    if (newEndTime && delivery.installment_ledger?.ledger_rows) {
+      const rows = typeof delivery.installment_ledger.ledger_rows === 'string'
+        ? JSON.parse(delivery.installment_ledger.ledger_rows)
+        : delivery.installment_ledger.ledger_rows;
+      let changed = false;
+      const updatedRows = rows.map((row) => {
+        if (row.month === 0 && (row.status === 'paid' || Number(row.paid_amount) > 0)) {
+          changed = true;
+          return { ...row, paid_at: newEndTime.toISOString() };
+        }
+        return row;
+      });
+      if (changed) {
+        await prisma.installmentLedger.update({
+          where: { id: delivery.installment_ledger.id },
+          data: { ledger_rows: updatedRows },
+        });
+      }
+    }
+
     return res.status(200).json({ success: true, message: 'Delivery details updated successfully', data: { delivery: updated } });
   } catch (error) {
     console.error('updateDeliveryDetails error:', error);
