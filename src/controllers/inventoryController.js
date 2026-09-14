@@ -667,6 +667,8 @@ const initiateStockTransfer = async (req, res) => {
             const conflictingTransfers = await prisma.stockTransfer.findMany({
                 where: {
                     inventory_id: { in: imeiItems.map(i => i.id) },
+                    from_id: outlet_id,
+                    from_type: 'Outlet',
                     status: 'pending'
                 },
                 include: { inventory: { select: { imei_serial: true, product_name: true } } }

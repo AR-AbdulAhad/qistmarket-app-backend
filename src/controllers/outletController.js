@@ -1574,6 +1574,7 @@ const getAllOutlets = async (req, res) => {
 };
 
 const searchDeliveredOrders = async (req, res) => {
+    const userRole = (req.user?.role || '').toLowerCase();
     const outlet_id = req.user.outlet_id;
     const { query } = req.query;
 
@@ -1582,49 +1583,58 @@ const searchDeliveredOrders = async (req, res) => {
     }
 
     try {
+        const isSuperAdminOrAdmin = userRole === 'super admin' || userRole === 'admin';
+
         const where = {
-            // Matches the same "delivered" definition the Delivered Orders list
-            // and other lookups use (status:'delivered' OR is_delivered:true) —
-            // this used to check is_delivered alone, which silently missed any
-            // order that has status:'delivered' but is_delivered still false
-            // (a real, existing data inconsistency), so a valid delivered order
-            // would show up on the Delivered Orders list but never be findable
-            // here to return.
-            //
-            // Deliberately NOT applying EXCLUDE_PENDING_LEGACY_IMPORT here (unlike
-            // most other order lists) — the Delivered Orders list this page's
-            // search is meant to mirror doesn't apply it either, so a legacy-
-            // imported order still missing its media/location (tagged LEGACY,
-            // but already shown as Delivered there) was findable on that list
-            // yet silently invisible to Returns search — the exact bug reported.
-            AND: [{ OR: [{ status: 'delivered' }, { is_delivered: true }] }],
+            AND: [
+                {
+                    OR: [
+                        { status: { equals: 'delivered', mode: 'insensitive' } },
+                        { is_delivered: true }
+                    ]
+                },
+                {
+                    NOT: [
+                        { status: { equals: 'returned', mode: 'insensitive' } },
+                        { status: { equals: 'cancelled', mode: 'insensitive' } }
+                    ]
+                }
+            ],
             OR: [
-                { order_ref: { contains: query } },
-                { token_number: { contains: query } },
-                { customer_name: { contains: query } },
-                { verification: { purchaser: { name: { contains: query } } } },
-                { product_name: { contains: query } },
-                { imei_serial: { contains: query } },
-                { whatsapp_number: { contains: query } },
-                { alternate_contact: { contains: query } },
+                { order_ref: { contains: query, mode: 'insensitive' } },
+                { token_number: { contains: query, mode: 'insensitive' } },
+                { customer_name: { contains: query, mode: 'insensitive' } },
+                { verification: { purchaser: { name: { contains: query, mode: 'insensitive' } } } },
+                { product_name: { contains: query, mode: 'insensitive' } },
+                { imei_serial: { contains: query, mode: 'insensitive' } },
+                { whatsapp_number: { contains: query, mode: 'insensitive' } },
+                { alternate_contact: { contains: query, mode: 'insensitive' } },
                 {
                     delivery: {
-                        product_imei: { contains: query }
+                        product_imei: { contains: query, mode: 'insensitive' }
                     }
                 },
                 {
                     customer: {
                         OR: [
-                            { cnic: { contains: query } },
-                            { mobile: { contains: query } }
+                            { cnic: { contains: query, mode: 'insensitive' } },
+                            { mobile: { contains: query, mode: 'insensitive' } }
                         ]
                     }
                 }
             ]
         };
 
-        // Filter by outlet if the user belongs to one
-        if (outlet_id) where.outlet_id = outlet_id;
+        // Filter by outlet if user is branch user, but also allow unassigned/global orders
+        if (outlet_id && !isSuperAdminOrAdmin) {
+            where.AND.push({
+                OR: [
+                    { outlet_id: outlet_id },
+                    { outlet_id: null },
+                    { created_by_user_id: req.user.id }
+                ]
+            });
+        }
 
         const orders = await prisma.order.findMany({
             where,
