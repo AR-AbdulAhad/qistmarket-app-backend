@@ -246,8 +246,8 @@ const getVendorList = async (req, res) => {
                 ...outletFilter,
                 ...(search ? {
                     OR: [
-                        { name: { contains: search, mode: 'insensitive' } },
-                        { phone: { contains: search, mode: 'insensitive' } },
+                        { name: { contains: search } },
+                        { phone: { contains: search } },
                     ],
                 } : {}),
             },

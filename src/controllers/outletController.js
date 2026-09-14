@@ -1589,36 +1589,36 @@ const searchDeliveredOrders = async (req, res) => {
             AND: [
                 {
                     OR: [
-                        { status: { equals: 'delivered', mode: 'insensitive' } },
+                        { status: { equals: 'delivered' } },
                         { is_delivered: true }
                     ]
                 },
                 {
                     NOT: [
-                        { status: { equals: 'returned', mode: 'insensitive' } },
-                        { status: { equals: 'cancelled', mode: 'insensitive' } }
+                        { status: { equals: 'returned' } },
+                        { status: { equals: 'cancelled' } }
                     ]
                 }
             ],
             OR: [
-                { order_ref: { contains: query, mode: 'insensitive' } },
-                { token_number: { contains: query, mode: 'insensitive' } },
-                { customer_name: { contains: query, mode: 'insensitive' } },
-                { verification: { purchaser: { name: { contains: query, mode: 'insensitive' } } } },
-                { product_name: { contains: query, mode: 'insensitive' } },
-                { imei_serial: { contains: query, mode: 'insensitive' } },
-                { whatsapp_number: { contains: query, mode: 'insensitive' } },
-                { alternate_contact: { contains: query, mode: 'insensitive' } },
+                { order_ref: { contains: query } },
+                { token_number: { contains: query } },
+                { customer_name: { contains: query } },
+                { verification: { purchaser: { name: { contains: query } } } },
+                { product_name: { contains: query } },
+                { imei_serial: { contains: query } },
+                { whatsapp_number: { contains: query } },
+                { alternate_contact: { contains: query } },
                 {
                     delivery: {
-                        product_imei: { contains: query, mode: 'insensitive' }
+                        product_imei: { contains: query }
                     }
                 },
                 {
                     customer: {
                         OR: [
-                            { cnic: { contains: query, mode: 'insensitive' } },
-                            { mobile: { contains: query, mode: 'insensitive' } }
+                            { cnic: { contains: query } },
+                            { mobile: { contains: query } }
                         ]
                     }
                 }

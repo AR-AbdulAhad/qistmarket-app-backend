@@ -1816,8 +1816,7 @@ const syncProductPlans = async (req, res) => {
         const matchingRecords = await prisma.outletInventory.findMany({
             where: {
                 api_product_name: {
-                    equals: normalizedName,
-                    mode: 'insensitive'
+                    equals: normalizedName
                 }
             },
             select: { id: true }
