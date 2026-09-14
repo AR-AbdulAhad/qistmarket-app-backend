@@ -1210,6 +1210,8 @@ const verifyReturnExchangeOtp = async (req, res) => {
  */
 const initiateDirectReturn = async (req, res) => {
     const outlet_id = req.user.outlet_id;
+    const userRole = (req.user?.role || '').toLowerCase();
+    const isSuperAdminOrAdmin = userRole === 'super admin' || userRole === 'admin';
     const { order_id, is_cash_refund, refund_amount, customer_phone, blacklist_customer, keep_enrolled = true } = req.body;
 
     if (!order_id) {
@@ -1241,7 +1243,12 @@ const initiateDirectReturn = async (req, res) => {
             return res.status(400).json({ success: false, error: 'Order is not marked as delivered.' });
         }
 
-        if (order.outlet_id !== outlet_id) {
+        const belongsToOutlet = isSuperAdminOrAdmin
+            || order.outlet_id === outlet_id
+            || order.outlet_id === null
+            || order.created_by_user_id === req.user.id;
+
+        if (!belongsToOutlet) {
             return res.status(403).json({ success: false, error: 'This order does not belong to your outlet.' });
         }
 
