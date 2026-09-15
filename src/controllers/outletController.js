@@ -955,6 +955,13 @@ const getReturnExchanges = async (req, res) => {
             // and the account isn't blacklisted.
             const canExchange = record.type !== 'Exchange' && record.order?.status === 'Returned' && !isCustomerBlacklisted;
 
+            // Cancelling undoes a direct return — only offered while the order
+            // is still sitting exactly where the return left it ('Returned').
+            // The moment it's re-delivered (self-pickup/agent), the archived
+            // delivery this would restore is gone/superseded, so cancel must
+            // disappear.
+            const canCancel = record.type === 'Return' && record.status === 'verified' && record.order?.status === 'Returned';
+
             return {
                 ...record,
                 product_color: plan.delivered_color || record.product_color || 'N/A',
@@ -962,6 +969,7 @@ const getReturnExchanges = async (req, res) => {
                 delivered_advance_amount: plan.delivered_advance_amount || record.delivered_advance_amount || 0,
                 is_customer_blacklisted: isCustomerBlacklisted,
                 can_exchange: canExchange,
+                can_cancel: canCancel,
             };
         });
 
@@ -1260,9 +1268,19 @@ const initiateDirectReturn = async (req, res) => {
         // Blacklisted accounts can still be returned (the account itself stays
         // blacklisted — only an admin whitelisting it separately lifts that).
 
-        // Duplicate check: no pending or verified return for this order already
+        // Duplicate check: no pending or verified return already open for THIS
+        // delivery cycle. Scoped to returns filed since the current delivery
+        // was created — an order can be delivered, returned, and redelivered
+        // (a new device, or the same one after cancelling the return) many
+        // times over its life, and each cycle gets its own return; an old
+        // 'verified' row from a prior, already-superseded cycle must not
+        // permanently block every future return of this order.
         const existingReturn = await prisma.returnExchange.findFirst({
-            where: { order_id: parseInt(order_id), status: { in: ['pending', 'verified'] } }
+            where: {
+                order_id: parseInt(order_id),
+                status: { in: ['pending', 'verified'] },
+                created_at: { gte: order.delivery.created_at },
+            }
         });
         if (existingReturn) {
             const msg = existingReturn.status === 'verified' ? 'already returned' : 'already has a pending return request';
@@ -1513,6 +1531,203 @@ const initiateDirectReturn = async (req, res) => {
         });
     } catch (error) {
         console.error('initiateDirectReturn error:', error);
+        return res.status(500).json({ success: false, error: error.message || 'Server error' });
+    }
+};
+
+/**
+ * Undoes a direct return: restores the order to 'delivered', recreates the
+ * Delivery (and its ledger/uploads) from the ArchivedDelivery snapshot the
+ * return created, puts the inventory item back to 'Sold', and reverses the
+ * cash-register/cash-in-hand side effects. Only allowed while the order is
+ * still sitting exactly where the return left it ('Returned') — once it's
+ * been re-delivered, the archived snapshot this restores is stale/superseded
+ * and cancelling is no longer offered (see can_cancel in getReturnExchanges).
+ *
+ * Deliberately does NOT touch PayTrigger enrollment or blacklist status:
+ * there's no reliable stored record of the device's prior PayTrigger state
+ * (expiration/plan) to safely re-enroll from, and unblacklisting could wrongly
+ * clear a flag set for an unrelated reason since ReturnExchange doesn't track
+ * whether *this* return was what caused it. Both are left for manual review.
+ */
+const cancelDirectReturn = async (req, res) => {
+    const outlet_id = req.user.outlet_id;
+    const userRole = (req.user?.role || '').toLowerCase();
+    const isSuperAdminOrAdmin = userRole === 'super admin' || userRole === 'admin';
+    const { record_id } = req.body;
+
+    if (!record_id) {
+        return res.status(400).json({ success: false, error: 'record_id is required.' });
+    }
+
+    try {
+        const returnRecord = await prisma.returnExchange.findUnique({
+            where: { id: parseInt(record_id) },
+            include: {
+                order: {
+                    include: { verification: { include: { purchaser: true } } }
+                }
+            }
+        });
+
+        if (!returnRecord) return res.status(404).json({ success: false, error: 'Return record not found.' });
+
+        const belongsToOutlet = isSuperAdminOrAdmin || returnRecord.outlet_id === outlet_id;
+        if (!belongsToOutlet) {
+            return res.status(403).json({ success: false, error: 'This return does not belong to your outlet.' });
+        }
+
+        if (returnRecord.type !== 'Return' || returnRecord.status !== 'verified') {
+            return res.status(400).json({ success: false, error: 'This record cannot be cancelled.' });
+        }
+
+        const order = returnRecord.order;
+        if (!order || order.status !== 'Returned') {
+            return res.status(400).json({ success: false, error: 'This order has moved on since the return (e.g. re-delivered) and can no longer be cancelled from here.' });
+        }
+
+        const archivedDelivery = await prisma.archivedDelivery.findFirst({
+            where: { order_id: order.id },
+            include: { uploads: true },
+            orderBy: { archived_at: 'desc' }
+        });
+
+        if (!archivedDelivery) {
+            return res.status(400).json({ success: false, error: 'Could not find the original delivery record to restore. Please handle this manually.' });
+        }
+
+        const nowDate = now();
+        let warnings = [];
+
+        // ── Recreate the Delivery (+ ledger + uploads) from the archive ──────
+        const newDelivery = await prisma.delivery.create({
+            data: {
+                order_id: archivedDelivery.order_id,
+                delivery_agent_id: archivedDelivery.delivery_agent_id,
+                status: archivedDelivery.status,
+                start_time: archivedDelivery.start_time,
+                end_time: archivedDelivery.end_time,
+                feedback: archivedDelivery.feedback,
+                product_imei: archivedDelivery.product_imei,
+                selected_plan: archivedDelivery.selected_plan,
+                self_pickup: archivedDelivery.self_pickup,
+                created_at: archivedDelivery.created_at,
+                updated_at: nowDate,
+                uploads: {
+                    create: archivedDelivery.uploads.map(u => ({
+                        upload_type: u.upload_type,
+                        file_url: u.file_url,
+                        link: u.link,
+                        tag: u.tag,
+                        uploaded_at: u.uploaded_at
+                    }))
+                }
+            }
+        });
+
+        let restoredLedger = null;
+        const archivedLedger = archivedDelivery.installment_ledger;
+        if (archivedLedger && archivedLedger.token) {
+            try {
+                restoredLedger = await prisma.installmentLedger.create({
+                    data: {
+                        order_id: order.id,
+                        delivery_id: newDelivery.id,
+                        token: archivedLedger.token,
+                        short_id: archivedLedger.short_id || null,
+                        ledger_rows: archivedLedger.ledger_rows,
+                        created_at: nowDate,
+                        updated_at: nowDate
+                    }
+                });
+
+                // Re-link whichever ConsumerNumbers were orphaned (ledger_id/delivery_id
+                // set to null) when the return archived this same delivery — matched by
+                // IMEI + customer mobile since the old ledger/delivery ids no longer exist.
+                const mobile = order.verification?.purchaser?.telephone_number || order.whatsapp_number;
+                if (archivedDelivery.product_imei) {
+                    await prisma.consumerNumber.updateMany({
+                        where: {
+                            ledger_id: null,
+                            delivery_id: null,
+                            imei_serial: archivedDelivery.product_imei,
+                            ...(mobile ? { mobile_number: mobile } : {})
+                        },
+                        data: { ledger_id: restoredLedger.id, delivery_id: newDelivery.id }
+                    });
+                }
+            } catch (ledgerErr) {
+                console.error('cancelDirectReturn: failed to restore installment ledger:', ledgerErr);
+                warnings.push('Delivery was restored, but the installment ledger could not be restored automatically — use "Generate Ledger" on the order to repair it.');
+            }
+        }
+
+        // ── Delete the now-restored archive row ───────────────────────────
+        await prisma.archivedDelivery.delete({ where: { id: archivedDelivery.id } }).catch(() => {});
+
+        // ── Restore the order ─────────────────────────────────────────────
+        await prisma.order.update({
+            where: { id: order.id },
+            data: {
+                status: 'delivered',
+                is_delivered: true,
+                imei_serial: returnRecord.imei_returned || order.imei_serial,
+                updated_at: nowDate
+            }
+        });
+        await logOrderStatusChange(order.id, 'Returned', 'delivered', req.user, 'Return cancelled — restored to Delivered');
+
+        // ── Restore inventory (back with the customer, not in stock) ─────
+        // Scoped by the return's own outlet_id (not the acting user's) so this
+        // still works correctly when a super admin/admin cancels a return on
+        // behalf of an outlet they aren't personally assigned to.
+        if (returnRecord.imei_returned) {
+            const inventory = await prisma.outletInventory.findFirst({
+                where: { imei_serial: returnRecord.imei_returned, outlet_id: returnRecord.outlet_id }
+            });
+            if (inventory) {
+                await prisma.outletInventory.update({
+                    where: { id: inventory.id },
+                    data: { status: 'Sold', updated_at: nowDate }
+                });
+            }
+        }
+
+        // ── Reverse the cash-register expense entry from the refund ──────
+        if (returnRecord.is_cash_refund && returnRecord.refund_amount > 0) {
+            await updateCashRegister(null, returnRecord.outlet_id, 'expenses', returnRecord.refund_amount, 'subtract');
+        }
+
+        // ── Restore the CashInHand row the return had cancelled ───────────
+        const cancelledCash = await prisma.cashInHand.findFirst({
+            where: { order_id: order.id, status: 'cancelled' },
+            orderBy: { updated_at: 'desc' }
+        });
+        if (cancelledCash) {
+            await prisma.cashInHand.update({
+                where: { id: cancelledCash.id },
+                data: { status: 'pending', updated_at: nowDate }
+            });
+        }
+
+        // ── Mark the return record itself as cancelled ────────────────────
+        // (ReturnExchange has no updated_at column, only status.)
+        await prisma.returnExchange.update({
+            where: { id: returnRecord.id },
+            data: { status: 'cancelled' }
+        });
+
+        if (returnRecord.imei_returned) {
+            warnings.push('PayTrigger enrollment/lock state was not automatically reverted — review it on the PayTrigger page if needed.');
+        }
+
+        return res.json({
+            success: true,
+            message: 'Return cancelled — order restored to Delivered.',
+            warnings,
+        });
+    } catch (error) {
+        console.error('cancelDirectReturn error:', error);
         return res.status(500).json({ success: false, error: error.message || 'Server error' });
     }
 };
@@ -3659,6 +3874,7 @@ module.exports = {
     getOutletCashHistory,
     getReturnExchanges,
     initiateDirectReturn,
+    cancelDirectReturn,
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,

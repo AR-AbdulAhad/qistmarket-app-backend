@@ -289,12 +289,15 @@ function detectBrand(productName) {
   return null;
 }
 
+function isMobileCategory(category) {
+  const cat = (category || '').toLowerCase().trim();
+  return config.SUPPORTED_CATEGORIES.some(c => cat.includes(c));
+}
+
 function isEligible(productName, category) {
   if (!productName) return false;
-  const cat = (category || '').toLowerCase().trim();
-  const isMobileCat = config.SUPPORTED_CATEGORIES.some(c => cat.includes(c));
   const brand = detectBrand(productName);
-  return isMobileCat && brand !== null;
+  return isMobileCategory(category) && brand !== null;
 }
 
 module.exports = {
@@ -319,5 +322,6 @@ module.exports = {
   resetSimLock,
   detectBrand,
   isEligible,
+  isMobileCategory,
   ENABLED: () => config.ENABLED,
 };

@@ -86,13 +86,23 @@ function computeFirstInstallmentDueDate(selected_plan, custom_ledger, order) {
 /**
  * Determines PayTrigger brand + gate eligibility for a delivery request.
  * Pure/read-only — does not enroll anything.
+ *
+ * Only Tecno/Infinix/Itel devices can ever be gated on the real PayTrigger
+ * webhook (gateRequired). Every other mobile device — a non-supported brand,
+ * or a supported brand delivered with the enrollment toggle switched off —
+ * still isn't allowed to jump straight to "delivered": it must pass through
+ * the same "Waiting For Software Activation" pending state, but can only be
+ * completed by a human submitting a manual lock-screen photo, never by a
+ * PayTrigger webhook (manualActivationRequired).
  */
 function resolvePaytriggerGate({ enrollPaytriggerFlag, product_imei, productNameSnapshot, inventoryCategory }) {
   const enrollPaytrigger = enrollPaytriggerFlag === true || enrollPaytriggerFlag === 'true';
   const paytriggerBrand = pt.detectBrand(productNameSnapshot);
   const eligible = Boolean(paytriggerBrand && pt.isEligible(paytriggerBrand, inventoryCategory));
   const gateRequired = Boolean(enrollPaytrigger && pt.ENABLED() && product_imei && eligible);
-  return { enrollPaytrigger, paytriggerBrand, eligible, gateRequired };
+  const isMobileDevice = Boolean(product_imei) && pt.isMobileCategory(inventoryCategory);
+  const manualActivationRequired = isMobileDevice && !gateRequired;
+  return { enrollPaytrigger, paytriggerBrand, eligible, gateRequired, manualActivationRequired };
 }
 
 // ─── Ledger + consumer numbers (shared between both modes) ────────────────
@@ -833,6 +843,50 @@ async function initiateGatedDelivery({ mode, order, payload, io, productNameSnap
 }
 
 /**
+ * Called from submitDelivery / submitSelfPickupDelivery for a mobile device that is
+ * NOT going through the real PayTrigger gate (non-Tecno/Infinix/Itel brand, or a
+ * supported brand delivered with the enrollment toggle off). Creates the same kind
+ * of *pending* Delivery placeholder (status = awaiting_paytrigger_enrollment /
+ * "Waiting For Software Activation") as initiateGatedDelivery, but never talks to
+ * PayTrigger and never creates a PayTriggerDevice row — this delivery can only be
+ * finished by a human submitting a manual lock-screen photo via
+ * completePendingDeliveryWithManualLockPhoto, never by a PayTrigger webhook.
+ */
+async function initiateManualActivationPending({ mode, order, payload, io, productNameSnapshot, inventoryCategory }) {
+  const delivery = await prisma.delivery.create({
+    data: {
+      order_id: order.id,
+      delivery_agent_id: payload.user.id,
+      status: PENDING_STATUS,
+      start_time: now(),
+      verified: false,
+      product_imei: payload.product_imei || null,
+      selected_plan: payload.selected_plan || null,
+      feedback: payload.feedback || null,
+      self_pickup: mode === 'self_pickup',
+      pending_payload: { ...payload, mode, productNameSnapshot, inventoryCategory },
+      created_at: now(),
+      updated_at: now(),
+    },
+  });
+
+  await prisma.order.update({
+    where: { id: order.id },
+    data: { status: PENDING_STATUS, updated_at: now() },
+  });
+
+  const notifyRoom = mode === 'self_pickup' ? `outlet_${payload.outlet_id}` : `officer_${payload.user.id}`;
+  io?.to(`user_${payload.user.id}`).emit('notification', {
+    type: 'info', title: 'Software Activation', message: 'Delivery initiated. Submit a lock-screen photo to complete it.',
+  });
+  io?.to(notifyRoom).emit('delivery_data_updated', {
+    reason: 'manual_activation_pending', orderId: order.id, delivery_id: delivery.id, status: PENDING_STATUS,
+  });
+
+  return { delivery };
+}
+
+/**
  * Idempotent webhook-triggered completion. Safe to call multiple times for the same
  * device/delivery — only the call that wins the atomic status transition proceeds.
  */
@@ -1013,6 +1067,7 @@ module.exports = {
   completeAgentDelivery,
   completeSelfPickupDelivery,
   initiateGatedDelivery,
+  initiateManualActivationPending,
   completePendingPaytriggerDelivery,
   completePendingDeliveryWithManualLockPhoto,
 };

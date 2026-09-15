@@ -12,6 +12,7 @@ const {
     getOutletCashHistory,
     getReturnExchanges,
     initiateDirectReturn,
+    cancelDirectReturn,
     searchDeliveredOrders,
     getOutletInstallments,
     generateInstallmentOtp,
@@ -58,6 +59,7 @@ router.delete('/outlet/cash/limits/:id', authenticateJWT, deleteOutletCashLimit)
 router.get('/outlet/return-exchanges', authenticateJWT, getReturnExchanges);
 router.get('/outlet/search-delivered-orders', authenticateJWT, searchDeliveredOrders);
 router.post('/outlet/initiate-direct-return', authenticateJWT, initiateDirectReturn);
+router.post('/outlet/cancel-direct-return', authenticateJWT, cancelDirectReturn);
 router.get('/outlet/installments', authenticateJWT, getOutletInstallments);
 router.get('/outlet/installments/due-list', authenticateJWT, getOutletInstallmentsDueList);
 router.patch('/outlet/installments/:id/note', authenticateJWT, updateInstallmentNote);

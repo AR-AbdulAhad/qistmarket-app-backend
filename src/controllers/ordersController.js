@@ -973,7 +973,11 @@ const getOrders = async (req, res) => {
     const include = {
       created_by: { select: { username: true } },
       assigned_to: { select: { username: true, full_name: true } },
-      delivery: { select: { status: true } },
+      // paytrigger_devices tells the frontend whether an "awaiting_paytrigger_enrollment"
+      // order is a real PayTrigger-gated device (webhook-only completion — no manual
+      // upload option) or a manual "Waiting For Software Activation" pending delivery
+      // (non-supported brand, or toggle off — completed via lock-screen photo upload).
+      delivery: { select: { status: true, paytrigger_devices: { select: { id: true } } } },
         delivery_officer: { select: { id: true, username: true, full_name: true } },
         recovery_officer: { select: { id: true, username: true, full_name: true } },
       productHistories: {
@@ -1156,7 +1160,7 @@ const getOrdersWithPagination = async (req, res) => {
       include: {
         created_by: { select: { username: true } },
         assigned_to: { select: { username: true } },
-        delivery: { select: { status: true } },
+        delivery: { select: { status: true, paytrigger_devices: { select: { id: true } } } },
         statusHistories: true,
         productHistories: {
           include: {

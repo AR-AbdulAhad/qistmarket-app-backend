@@ -181,7 +181,7 @@ const submitDelivery = async (req, res) => {
       inventoryCategory = inventory?.category || null;
     }
 
-    const { gateRequired } = deliveryCompletionService.resolvePaytriggerGate({
+    const { gateRequired, manualActivationRequired } = deliveryCompletionService.resolvePaytriggerGate({
       enrollPaytriggerFlag: enroll_paytrigger,
       product_imei,
       productNameSnapshot,
@@ -239,6 +239,19 @@ const submitDelivery = async (req, res) => {
         status: deliveryCompletionService.PENDING_STATUS,
         message: 'Delivery initiated. Waiting for PayTrigger device enrollment confirmation.',
         data: { delivery: gateResult.delivery, paytrigger: gateResult.paytriggerDevice },
+      });
+    }
+
+    if (manualActivationRequired) {
+      const { delivery: pendingDelivery } = await deliveryCompletionService.initiateManualActivationPending({
+        mode: 'agent', order, payload, io, productNameSnapshot, inventoryCategory,
+      });
+
+      return res.status(202).json({
+        success: true,
+        status: deliveryCompletionService.PENDING_STATUS,
+        message: 'Delivery initiated. Submit a lock-screen photo to complete it.',
+        data: { delivery: pendingDelivery },
       });
     }
 
@@ -2016,7 +2029,7 @@ const submitSelfPickupDelivery = async (req, res) => {
       }
     }
 
-    const { gateRequired } = deliveryCompletionService.resolvePaytriggerGate({
+    const { gateRequired, manualActivationRequired } = deliveryCompletionService.resolvePaytriggerGate({
       enrollPaytriggerFlag: enroll_paytrigger,
       product_imei,
       productNameSnapshot,
@@ -2073,6 +2086,19 @@ const submitSelfPickupDelivery = async (req, res) => {
         status: deliveryCompletionService.PENDING_STATUS,
         message: 'Self Pickup initiated. Waiting for PayTrigger device enrollment confirmation.',
         data: { delivery: gateResult.delivery, paytrigger: gateResult.paytriggerDevice },
+      });
+    }
+
+    if (manualActivationRequired) {
+      const { delivery: pendingDelivery } = await deliveryCompletionService.initiateManualActivationPending({
+        mode: 'self_pickup', order, payload, io, productNameSnapshot, inventoryCategory,
+      });
+
+      return res.status(202).json({
+        success: true,
+        status: deliveryCompletionService.PENDING_STATUS,
+        message: 'Self Pickup initiated. Submit a lock-screen photo to complete it.',
+        data: { delivery: pendingDelivery },
       });
     }
 
