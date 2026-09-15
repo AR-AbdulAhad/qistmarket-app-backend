@@ -24,6 +24,26 @@ const now = () => new Date();
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
 
+// The public domain customers' ledger links already resolve to (confirmed
+// against the live WATI "delivery confirmation" template, which sends
+// https://qms.qistmarket.pk/ledger/{{Ledger_Link}}). Reused here to build the
+// "Tap to Pay" deeplink PayTrigger shows on the device lock screen — same
+// destination, just handed to PayTrigger instead of WhatsApp.
+const LEDGER_BASE_URL = (process.env.LEDGER_BASE_URL || 'https://qms.qistmarket.pk').replace(/\/$/, '');
+
+/**
+ * Builds the customer-facing ledger URL for an order, usable before its
+ * InstallmentLedger row exists yet (e.g. at PayTrigger pre-enrollment time).
+ * Mirrors the legacy JWT-token branch of GET /api/ledger/:token, which looks
+ * up whatever ledger currently exists for order_id at view-time rather than
+ * requiring one to already exist when the link is generated.
+ */
+function buildLedgerDeeplink(orderId, deliveryId) {
+  if (!LEDGER_TOKEN_SECRET) return '';
+  const token = jwt.sign({ order_id: orderId, delivery_id: deliveryId }, LEDGER_TOKEN_SECRET, { expiresIn: '730d' });
+  return `${LEDGER_BASE_URL}/ledger/${token}`;
+}
+
 const formatDatePK = (d) => {
   const date = d ? new Date(d) : new Date();
   return date.toLocaleDateString('en-PK', {
@@ -740,7 +760,8 @@ async function initiateGatedDelivery({ mode, order, payload, io, productNameSnap
 
   let enrollResult;
   try {
-    enrollResult = await pt.preEnrollImei(payload.product_imei, order.order_ref, productNameSnapshot, firstInstallmentDueDate);
+    const deeplink = buildLedgerDeeplink(order.id, delivery.id);
+    enrollResult = await pt.preEnrollImei(payload.product_imei, order.order_ref, productNameSnapshot, firstInstallmentDueDate, { deeplink });
   } catch (e) {
     await prisma.delivery.delete({ where: { id: delivery.id } }).catch(() => {});
     const err = new Error(`PayTrigger pre-enrollment failed: ${e.message}`);
