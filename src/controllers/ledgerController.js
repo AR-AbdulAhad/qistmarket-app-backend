@@ -32,10 +32,17 @@ const now = () => new Date();
 const formatPKR = (amount) =>
   `PKR ${Number(amount || 0).toLocaleString('en-PK')}`;
 
+// Explicit Asia/Karachi timeZone — without it, toLocaleDateString silently
+// converts using whatever OS timezone the Node process happens to run
+// under, so a value stored near a day boundary (e.g. 10-11 PM PKT) can
+// render on the wrong calendar day depending on where the server is
+// physically hosted (commonly UTC), producing dates that look impossible
+// (like "Account Opened" landing a day before the order was even placed).
+const LEDGER_TIMEZONE = 'Asia/Karachi';
 const formatDate = (d) => {
   if (!d) return 'N/A';
   const date = new Date(d);
-  return date.toLocaleDateString('en-PK', { day: '2-digit', month: 'short', year: 'numeric' });
+  return date.toLocaleDateString('en-PK', { day: '2-digit', month: 'short', year: 'numeric', timeZone: LEDGER_TIMEZONE });
 };
 
 const formatDatePK = (d) => formatDate(d);
@@ -233,14 +240,23 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     } catch (e) { plan = null; }
   }
 
+  // delivery.selected_plan ("plan") is a JSON snapshot frozen at the moment
+  // of delivery — it never changes afterward. order.product_name is the
+  // live, currently-editable field (what an admin actually changes via the
+  // order's "Product Name History" correction), so it must win over that
+  // frozen snapshot, not the other way around, or a later product
+  // correction would silently never show up on the ledger. cashRecord/
+  // stockItem stay first — they reflect what was actually verified/
+  // collected for this specific delivery, which is more specific than the
+  // generic order-level name.
   const productName = cashRecord?.product_name
     || stockItem?.product_name
+    || order.product_name
     || plan?.productName
     || plan?.product_name
-    || order.product_name
     || 'N/A';
 
-  const modelName = plan?.model || plan?.productModel || stockItem?.model || productName;
+  const modelName = stockItem?.model || plan?.model || plan?.productModel || productName;
 
   const imei = cashRecord?.imei_serial || delivery?.product_imei || 'N/A';
 
@@ -1545,7 +1561,7 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         productName: order.product_name,
         paidAmount: payingNow,
         paymentMethod: payment_method,
-        paymentDate: new Date().toLocaleDateString('en-PK'),
+        paymentDate: new Date().toLocaleDateString('en-PK', { timeZone: LEDGER_TIMEZONE }),
         transactionId: paymentTxnId,
         representativeName: rep.name,
         representativeNumber: rep.phone,
@@ -1560,7 +1576,7 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         productName: order.product_name,
         paidAmount: payingNow,
         paymentMethod: payment_method,
-        paymentDate: new Date().toLocaleDateString('en-PK'),
+        paymentDate: new Date().toLocaleDateString('en-PK', { timeZone: LEDGER_TIMEZONE }),
         transactionId: paymentTxnId,
         representativeName: rep.name,
         representativeNumber: rep.phone,
@@ -1577,7 +1593,7 @@ const verifyInstallmentPaymentOtp = async (req, res) => {
         customerName,
         productName: order.product_name,
         monthlyAmount: nextRow.amount || nextRow.dueAmount,
-        dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK'),
+        dueDate: new Date(nextRow.due_date || nextRow.dueDate).toLocaleDateString('en-PK', { timeZone: LEDGER_TIMEZONE }),
         ledgerUrl
       });
     }
