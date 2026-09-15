@@ -429,37 +429,51 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
   // Prefix-matched rather than "anything that isn't 6500…" so this can never
   // accidentally pick up some other consumer_number row (e.g. a legacy_short_id
   // one, see fetchLedgerByShortToken above) and show it as the real 1Bill ID.
-  const oneBillConsumerNumber = consumerNumberRows.find((c) => c.consumer_number.startsWith('1017100015'))?.consumer_number || null;
+  let oneBillConsumerNumber = consumerNumberRows.find((c) => c.consumer_number.startsWith('1017100015'))?.consumer_number || null;
 
   // Legacy/older orders can predate consistent dual consumer-number creation
   // at delivery — rather than silently showing no ID/QR at all (the
   // "inconsistent across ledgers" complaint), generate and persist a
   // SmartPay number on-demand the same way the QR itself is already
   // regenerated on-demand below.
+  const imeiForGen = delivery?.product_imei || cashRecord?.imei_serial || null;
+  const mobileForGen = purchaser?.telephone_number || order.whatsapp_number || null;
+  const consumerNumberBaseData = {
+    ledger_id: ledger.id,
+    delivery_id: delivery?.id || null,
+    customer_name: customerName,
+    mobile_number: mobileForGen || 'N/A',
+    imei_serial: imeiForGen,
+    amount_due: monthlyInstallment || 0,
+    billing_month: String(new Date().getFullYear()).slice(-2) + String(new Date().getMonth() + 1).padStart(2, '0'),
+    due_date: oldestUnpaidRow?.dueDate ? new Date(oldestUnpaidRow.dueDate) : now(),
+    bill_status: 'U',
+    created_at: now(),
+    updated_at: now(),
+  };
+
   if (!smartPayConsumerNumber) {
     try {
-      const imeiForGen = delivery?.product_imei || cashRecord?.imei_serial || null;
-      const mobileForGen = purchaser?.telephone_number || order.whatsapp_number || null;
       const generated = await generateSmartPayConsumerNumber(imeiForGen, mobileForGen);
-      await prisma.consumerNumber.create({
-        data: {
-          consumer_number: generated,
-          ledger_id: ledger.id,
-          delivery_id: delivery?.id || null,
-          customer_name: customerName,
-          mobile_number: mobileForGen || 'N/A',
-          imei_serial: imeiForGen,
-          amount_due: monthlyInstallment || 0,
-          billing_month: String(new Date().getFullYear()).slice(-2) + String(new Date().getMonth() + 1).padStart(2, '0'),
-          due_date: oldestUnpaidRow?.dueDate ? new Date(oldestUnpaidRow.dueDate) : now(),
-          bill_status: 'U',
-          created_at: now(),
-          updated_at: now(),
-        },
-      });
+      await prisma.consumerNumber.create({ data: { ...consumerNumberBaseData, consumer_number: generated } });
       smartPayConsumerNumber = generated;
     } catch (genErr) {
       console.error('[LedgerController] on-demand SmartPay consumer number generation failed:', genErr);
+    }
+  }
+
+  // Same self-healing for the 1Bill number — this was missing before, which
+  // silently hid the whole "Your 1Bill ID" box on any order whose 1Bill
+  // number was never created (older orders, or a partial failure at
+  // delivery), even though the SmartPay ID right next to it would happily
+  // self-heal.
+  if (!oneBillConsumerNumber) {
+    try {
+      const generated = await generateConsumerNumber(imeiForGen, mobileForGen);
+      await prisma.consumerNumber.create({ data: { ...consumerNumberBaseData, consumer_number: generated } });
+      oneBillConsumerNumber = generated;
+    } catch (genErr) {
+      console.error('[LedgerController] on-demand 1Bill consumer number generation failed:', genErr);
     }
   }
 
