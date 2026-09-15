@@ -8,7 +8,7 @@ const { sendCustomerLedger, sendNextInstallmentReminder } = require('../services
 const { sendQistReceivingForPayment, sendPartialPaymentForRow, getRepresentativeOfficerDetails } = require('../utils/qistReceivingUtils');
 const { sendOtp: sendOTP } = require('../services/otpDispatcher');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
-const { getNormalizedLedger, normalizeLedger, buildLedgerRows, computeDueAndCurrent, classifyLedgerAccountStatus } = require('../utils/ledgerUtils');
+const { getNormalizedLedger, normalizeLedger, buildLedgerRows, classifyLedgerAccountStatus } = require('../utils/ledgerUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { logAction } = require('../utils/auditLogger');
 const { syncPayTriggerAfterPayment } = require('../utils/paytriggerSyncUtils');
@@ -356,6 +356,21 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     ? `Next Upcoming: <strong>${formatDate(nextUpcomingRow.dueDate)}</strong>`
     : '';
 
+  // The row that actually carries the arrears rollup — NOT the same thing
+  // as nextUpcomingRow above. It must be the most RECENT already-overdue
+  // installment (the "internal" reference build — Installment Receiving —
+  // rolls every older unpaid month into whichever overdue month is
+  // closest to today, and a month that hasn't reached its own due date yet
+  // gets nothing added to it until it becomes overdue too). Using
+  // nextUpcomingRow here was the bug: it kept dumping the whole arrears
+  // total onto next month before next month was even due, while the
+  // actually-current overdue month sat there showing only its own amount
+  // as if the arrears had vanished.
+  const overdueUnpaidRows = installmentRows.filter(r => r.status !== 'paid' && new Date(r.dueDate) < todayForDates);
+  const currentDueRow = overdueUnpaidRows.length
+    ? overdueUnpaidRows.reduce((latest, r) => (new Date(r.dueDate) > new Date(latest.dueDate) ? r : latest))
+    : nextUpcomingRow; // nothing overdue yet — "current" is just the next payable installment, no arrears to carry
+
   // Most recent payment TRANSACTION — a partial payment still stamps
   // paid_at on its row, so this must not be restricted to fully 'paid' rows
   // or the latest partial payment gets silently ignored in favour of an
@@ -434,12 +449,15 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     }
   }
 
-  // What the QR should actually charge: arrears (everything already overdue)
-  // plus the current/nearest installment — NOT the entire remaining loan
-  // balance. A customer scanning to "pay now" shouldn't be shown a QR for
-  // months of future installments they haven't reached yet.
-  const { due: dueNowArrears, current: dueNowCurrent } = computeDueAndCurrent(installmentRows);
-  const amountDueNow = dueNowArrears + dueNowCurrent;
+  // What the QR should actually charge: every already-overdue installment,
+  // summed — matching Installment Receiving's own "PAY" amount on the
+  // current overdue month exactly. NOT the entire remaining loan balance,
+  // and NOT next month's not-yet-due installment either — a customer
+  // scanning to "pay now" shouldn't be shown a QR that already includes
+  // money that isn't due yet.
+  const amountDueNow = overdueUnpaidRows.length > 0
+    ? overdueAmount
+    : (currentDueRow ? currentDueRow.remainingAmount : 0);
 
   // The QR has to reflect what's actually owed right now — a cached QR is
   // only reused while it's both unexpired AND still for the current
@@ -533,15 +551,16 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
         </details>`
       : '';
 
-    // The one row that's actually "due right now" (the nearest unpaid
-    // installment that isn't itself overdue yet) carries forward whatever's
-    // already overdue from earlier months — so THIS row's total, not the
-    // bare monthly installment, is what the customer actually needs to pay
-    // to get current. Every other future row stays untouched (that's the
-    // "don't repeat arrears under every future row" fix from before) — only
-    // the single next-due row gets this rollup.
-    const isCurrentDueRow = oldestUnpaidIsOverdue && nextUpcomingRow && row.monthNumber === nextUpcomingRow.monthNumber;
-    const carriedArrears = isCurrentDueRow ? overdueAmount : 0;
+    // The row that's actually "due right now" is the most recent ALREADY-
+    // OVERDUE installment (currentDueRow, computed above) — not next
+    // month's installment before it's even reached its own due date. Every
+    // older overdue row still shows only its own amount (no repeated
+    // arrears — that's the earlier "don't repeat arrears under every future
+    // row" fix); only currentDueRow gets the rollup of everything older,
+    // and a not-yet-due future row gets nothing added until it becomes the
+    // new currentDueRow itself, once its own date passes.
+    const isCurrentDueRow = !!(currentDueRow && row.monthNumber === currentDueRow.monthNumber);
+    const carriedArrears = isCurrentDueRow ? Math.max(0, overdueAmount - row.remainingAmount) : 0;
     const totalRowRemaining = row.remainingAmount + carriedArrears;
     const arrearsNoteHtml = carriedArrears > 0
       ? `<div style="color:#ef4444;font-size:0.65rem;font-weight:600;margin-top:2px;">+ Arrears: ${formatPKR(carriedArrears)}</div>`
