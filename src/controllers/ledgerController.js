@@ -771,23 +771,52 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       </p>
       <a href="${submitComplaintUrl}" target="_blank" class="btn-primary no-print" style="width:100%;display:block;text-align:center;text-decoration:none;box-sizing:border-box;">Submit a Complaint</a>`;
 
-  // "Payment Guide", "Terms & Conditions" and "Privacy Policy" were removed —
-  // no such page exists anywhere in the app yet, so they were dead text. The
-  // one remaining item, "Contact Branch", was dropped too — it just duplicated
-  // the phone number already shown in the CONTACT US column next to this one —
-  // leaving no content for this whole QUICK LINKS block, so it's gone entirely.
+  // Full site footer — same About/Information/Quick Links structure and
+  // real URLs as qistmarket.pk's own footer (confirmed live links, unlike
+  // the placeholder "#" links a previous pass here deliberately stripped).
+  const QIST_SITE_URL = 'https://qistmarket.pk';
+  const QIST_EMAIL = 'info@qistmarket.com';
+  const socialIcon = (label, href, pathSvg) => `<a href="${href}" target="_blank" rel="noopener" aria-label="${label}">${pathSvg}</a>`;
 
-  const contactUsHtml = `
-      <div class="section-title" style="color:#0f172a;text-align:center;">CONTACT US</div>
-      <p style="font-size:0.8rem;color:#334155;line-height:1.7;text-align:center;">
-        📞 ${QIST_SUPPORT_PHONE}<br/>
-        📍 ${branchAddress}<br/>
-        🕒 Mon - Sat (11:00 AM - 08:30 PM)
-      </p>
-      ${mapsUrl ? `<div style="text-align:center;"><a class="btn-outline" style="margin-top:6px;display:inline-block;text-align:center;" href="${mapsUrl}" target="_blank" rel="noopener">📍 View on Map</a></div>` : ''}`;
-
-  // FOLLOW US removed — no real Qist Market social media URLs exist anywhere
-  // in the codebase; all four icons pointed to "#" (dead links).
+  const siteFooterHtml = `
+      <div class="site-footer-top">
+        <div class="site-footer-brand">
+          <img class="logo-img" src="${logoDataURI}" alt="QistMarket" />
+          <p>📍 <span>${QIST_HEAD_OFFICE_ADDRESS}</span></p>
+          <p>📞 <a href="tel:${QIST_UAN_NUMBER.replace(/\s/g, '')}">${QIST_UAN_NUMBER}</a></p>
+          <p>✉️ <a href="mailto:${QIST_EMAIL}">${QIST_EMAIL}</a></p>
+        </div>
+        <div class="site-footer-col">
+          <h4>About</h4>
+          <a href="${QIST_SITE_URL}/about-us" target="_blank" rel="noopener">About Us</a>
+          <a href="${QIST_SITE_URL}/faqs" target="_blank" rel="noopener">FAQs</a>
+          <a href="${QIST_SITE_URL}/contact" target="_blank" rel="noopener">Contact</a>
+          <a href="${QIST_SITE_URL}/visit-us" target="_blank" rel="noopener">Visit Us</a>
+        </div>
+        <div class="site-footer-col">
+          <h4>Information</h4>
+          <a href="${QIST_SITE_URL}/" target="_blank" rel="noopener">Account</a>
+          <a href="${QIST_SITE_URL}/agreement" target="_blank" rel="noopener">Agreement</a>
+          <a href="${QIST_SITE_URL}/verification-proccess" target="_blank" rel="noopener">Verification Proccess</a>
+          <a href="${QIST_SITE_URL}/delivery-policy" target="_blank" rel="noopener">Delivery Policy</a>
+        </div>
+        <div class="site-footer-col">
+          <h4>Quick Links</h4>
+          <a href="${QIST_SITE_URL}/terms-condition" target="_blank" rel="noopener">Terms &amp; Condition</a>
+          <a href="${QIST_SITE_URL}/refunds-policy" target="_blank" rel="noopener">Returns &amp; Refunds Policy</a>
+          <a href="${QIST_SITE_URL}/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a>
+          <a href="${QIST_SITE_URL}/track-your-order" target="_blank" rel="noopener">Track Your Order</a>
+          <a href="${QIST_SITE_URL}/blogs" target="_blank" rel="noopener">Our Blogs</a>
+        </div>
+      </div>
+      <div class="site-footer-bottom">
+        <div class="site-footer-social">
+          ${socialIcon('Facebook', 'https://www.facebook.com/QistMarket', '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M22 12c0-5.52-4.48-10-10-10S2 6.48 2 12c0 4.84 3.44 8.87 8 9.8V15H8v-3h2V9.5C10 7.57 11.57 6 13.5 6H16v3h-2c-.55 0-1 .45-1 1v2h3l-.5 3H13v6.8c4.56-.93 8-4.96 8-9.8Z"/></svg>')}
+          ${socialIcon('Instagram', 'https://www.instagram.com/qistmarket', '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1"/></svg>')}
+          ${socialIcon('Pinterest', 'https://www.pinterest.com/qistmarket/', '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.24 2.64 7.86 6.36 9.32-.09-.79-.17-2.01.03-2.87.19-.8 1.23-5.13 1.23-5.13s-.31-.63-.31-1.55c0-1.46.85-2.55 1.9-2.55.9 0 1.33.67 1.33 1.48 0 .9-.57 2.25-.87 3.5-.25 1.05.52 1.9 1.55 1.9 1.86 0 3.29-1.96 3.29-4.79 0-2.5-1.8-4.25-4.36-4.25-2.97 0-4.71 2.23-4.71 4.53 0 .9.34 1.86.78 2.38.09.1.1.19.07.3-.08.32-.25 1.02-.29 1.16-.05.19-.15.23-.35.14-1.3-.6-2.11-2.49-2.11-4.01 0-3.26 2.37-6.26 6.83-6.26 3.59 0 6.38 2.56 6.38 5.97 0 3.56-2.25 6.43-5.37 6.43-1.05 0-2.03-.55-2.37-1.19l-.64 2.45c-.23.89-.86 2-1.28 2.68.96.3 1.98.46 3.04.46 5.52 0 10-4.48 10-10S17.52 2 12 2Z"/></svg>')}
+        </div>
+        <p class="site-footer-copyright">Qist Market© ${new Date().getFullYear()}. All rights reserved - Developed by Elipse Studio</p>
+      </div>`;
 
   const topNavHtml = `
       <nav class="desktop-topnav no-print">
@@ -991,6 +1020,31 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
 
     .footer-cols { display: grid; grid-template-columns: 1fr; gap: 24px; }
 
+    /* Full site footer — mirrors qistmarket.pk's own footer (brand/address
+       block + About/Information/Quick Links columns + social + copyright)
+       so the ledger page doesn't feel like an orphaned standalone page. */
+    .site-footer { padding: 1.6rem 1.4rem 1.2rem; }
+    .site-footer-top { display: grid; grid-template-columns: 1fr; gap: 28px; }
+    @media (min-width: 768px) { .site-footer-top { grid-template-columns: 1.6fr 1fr 1fr 1fr; } }
+    .site-footer-brand .logo-img { height: 30px; margin-bottom: 12px; }
+    .site-footer-brand p { font-size: 0.8rem; color: #64748b; line-height: 1.7; display: flex; gap: 8px; align-items: flex-start; margin-top: 6px; }
+    .site-footer-brand a { color: #dc2626; text-decoration: none; font-weight: 700; }
+    .site-footer-col h4 { font-size: 0.85rem; font-weight: 800; color: #0f172a; margin-bottom: 14px; }
+    .site-footer-col a { display: block; font-size: 0.8rem; color: #64748b; text-decoration: none; margin-bottom: 10px; }
+    .site-footer-col a:hover { color: #dc2626; }
+    .site-footer-bottom {
+      margin-top: 28px; padding-top: 20px; border-top: 1px solid #f1f5f9;
+      display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center;
+    }
+    @media (min-width: 640px) { .site-footer-bottom { flex-direction: row-reverse; justify-content: space-between; text-align: left; } }
+    .site-footer-social { display: flex; gap: 10px; }
+    .site-footer-social a {
+      width: 34px; height: 34px; border-radius: 50%; border: 1px solid #e2e8f0;
+      display: flex; align-items: center; justify-content: center; color: #334155; transition: 0.15s;
+    }
+    .site-footer-social a:hover { border-color: #dc2626; color: #dc2626; }
+    .site-footer-copyright { font-size: 0.72rem; color: #94a3b8; }
+
     /* Print */
     @media print {
       body { background: #fff; padding: 0; }
@@ -1069,6 +1123,8 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
     <div class="card tab-panel" data-tab="dashboard,documents">${documentsTabHtml}</div>
 
     <div class="card tab-panel" data-tab="dashboard,support">${supportTabHtml}</div>
+
+    <div class="card site-footer">${siteFooterHtml}</div>
 
     ${bottomNavHtml}
   </div>
@@ -1171,9 +1227,7 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
       </div>
     </div>
 
-    <div class="card footer-cols">
-      <div>${contactUsHtml}</div>
-    </div>
+    <div class="card site-footer">${siteFooterHtml}</div>
 
   </div>
 </div>
