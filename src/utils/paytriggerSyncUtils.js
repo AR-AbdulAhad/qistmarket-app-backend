@@ -91,28 +91,32 @@ async function syncPayTriggerAfterPayment({ imeiSerial, order, rows, rowIndex, m
       });
       console.log('[PayTrigger] updateRepayInfo ok:', result?.code, result?.message);
 
-      // CRITICAL: If device is currently locked, updateRepayInfo alone won't remove screen lock policy.
-      // Call tempUnlock to issue cloud unlock command so the phone screen unlocks immediately!
-      let unlockResult = null;
-      const wasLocked = device.lock_status === 'locked' || device.mobile_status === 1000;
-      if (wasLocked) {
-        console.log(`[PayTrigger] Device ${imeiSerial} is locked. Triggering tempUnlock to release screen lock...`);
-        unlockResult = await pt.tempUnlock({ imei: imeiSerial, deviceTag: device.device_tag || '' });
-        console.log('[PayTrigger] tempUnlock on payment ok:', unlockResult?.code, unlockResult?.message);
-      }
+      // CRITICAL: updateRepayInfo alone won't remove an active screen lock policy.
+      // Always issue tempUnlock too — deliberately unconditional, NOT gated on our
+      // own device.lock_status/mobile_status. That local flag is only as fresh as
+      // the last webhook we happened to receive; if PayTrigger ever locks a device
+      // without that callback reaching us (missed webhook, delivery failure, etc.),
+      // our DB silently thinks it's unlocked and this whole sync used to skip the
+      // one call that actually releases the screen — exactly the bug where a paid
+      // installment updates the ledger but the phone stays locked. Unlocking an
+      // already-unlocked device is a harmless no-op on PayTrigger's side, so there's
+      // no downside to always sending it.
+      console.log(`[PayTrigger] Triggering tempUnlock for ${imeiSerial} (unconditional — not gated on locally-tracked lock state)...`);
+      const unlockResult = await pt.tempUnlock({ imei: imeiSerial, deviceTag: device.device_tag || '' });
+      console.log('[PayTrigger] tempUnlock on payment ok:', unlockResult?.code, unlockResult?.message);
 
       // Only mark the device unlocked in our DB once PayTrigger actually confirms
       // it (code 200) — previously this wrote lock_status:'unlocked' unconditionally,
       // so a rejected/failed API call (bad deviceTag, expired session, etc.) still
       // showed as unlocked on our dashboard while the phone stayed locked for real.
       const repayOk = result?.code === 200;
-      const unlockOk = !wasLocked || unlockResult?.code === 200;
+      const unlockOk = unlockResult?.code === 200;
       if (!repayOk || !unlockOk) {
         await prisma.payTriggerDevice.update({
           where: { imei: imeiSerial },
           data: { last_sync_at: now(), raw_state: unlockResult || result || {} },
         });
-        alertSyncFailure(order, `payment recorded but PayTrigger did not confirm the unlock for IMEI ${imeiSerial} (updateRepayInfo: ${result?.code}/${result?.message}${wasLocked ? `, tempUnlock: ${unlockResult?.code}/${unlockResult?.message}` : ''}).`);
+        alertSyncFailure(order, `payment recorded but PayTrigger did not confirm the unlock for IMEI ${imeiSerial} (updateRepayInfo: ${result?.code}/${result?.message}, tempUnlock: ${unlockResult?.code}/${unlockResult?.message}).`);
         return;
       }
 
