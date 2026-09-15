@@ -106,8 +106,8 @@ Qist Market Har Cheez Qist Pe ..!!`;
 };
 
 /**
- * Full "Guarantor OTP Confirmation" SMS — the client's exact template text,
- * word for word, with every {{placeholder}} filled from real order data.
+ * Full "Guarantor OTP Confirmation" SMS — shortened to fit a single 160-char
+ * SMS segment, with every placeholder filled from real order data.
  * Used instead of sendGuarantorOTPSms when the caller has the order context
  * on hand (see otpDispatcher.js's sendGuarantorOtp). Sent when a guarantor
  * verifies via the mobile app (appVerificationOtp.js's sendCode).
@@ -119,22 +119,7 @@ const sendGuarantorOtpFullSms = async (phone, {
   price,
   otp,
 }) => {
-  const message = `Assalam-o-Alaikum ${guarantorName || 'Guarantor'}!
-
-Aap ${customerName} ki Qist Market purchase ke liye Guarantor ban rahe hain.
-
-Item: ${itemNameModel}
-Item Price: ${price}
-
-Ahm Hidayat: Agar customer ki taraf se qist/raqam ada na ki jaye to item aur payable raqam ki zimmedari guarantor ki hogi, agreement ke mutabiq.
-
-Agar aap is guarantee ke liye razamand hain to neeche diya gaya OTP Qist Market ke representative ko batayein. OTP batana aapki guarantor verification aur guarantee ki tasdeeq samjha jayega.
-
-OTP: ${otp}
-
-Complaint: https://qms.qistmarket.pk/complaint
-
-Qist Market Har Cheez Qist Pe ..!!`;
+  const message = `${guarantorName || 'Guarantor'}, aap ${customerName} ke ${itemNameModel} (Rs.${price}) ki zimmedari lete hain. Qist na bharne par zimmedar honge. Razamand hain to OTP: ${otp}`;
 
   return sendSMS(phone, message);
 };
