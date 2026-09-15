@@ -1280,8 +1280,19 @@ const deleteInventoryItem = async (req, res) => {
     const { id } = req.params;
 
     try {
-        const item = await prisma.outletInventory.findFirst({ where: { id: parseInt(id), outlet_id } });
+        const item = await prisma.outletInventory.findFirst({
+            where: { id: parseInt(id), outlet_id },
+            include: { _count: { select: { cash_sales: true } } },
+        });
         if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
+
+        // A unit already sold via Cash Sale has a real receipt pointing at this row
+        // (CashSale.inventory_id is a required FK) — deleting it would either break
+        // that receipt or throw a raw FK-constraint error. Block it with a clear
+        // message instead of a generic 500.
+        if (item._count.cash_sales > 0) {
+            return res.status(400).json({ success: false, message: 'Cannot delete — this unit has a sale record. Cancel the sale first.' });
+        }
 
         await prisma.outletInventory.delete({ where: { id: item.id } });
         await logAction(req, 'INVENTORY_DELETED', `Deleted inventory item: ${item.product_name}${item.imei_serial ? ` (IMEI ${item.imei_serial})` : ''}.`, item.id, 'OutletInventory');
@@ -1334,12 +1345,36 @@ const bulkDeleteInventory = async (req, res) => {
     }
 
     try {
-        const deleted = await prisma.outletInventory.deleteMany({
-            where: { id: { in: ids.map(id => parseInt(id)) }, outlet_id }
+        const numericIds = ids.map(id => parseInt(id));
+        const items = await prisma.outletInventory.findMany({
+            where: { id: { in: numericIds }, outlet_id },
+            include: { _count: { select: { cash_sales: true } } },
         });
-        await logAction(req, 'INVENTORY_BULK_DELETED', `Bulk deleted ${deleted.count} inventory item(s).`, null, 'OutletInventory');
 
-        res.json({ success: true, count: deleted.count, message: 'Items deleted successfully' });
+        // Used for "delete whole product" (all units under one product_name) as
+        // well as manual multi-select — skip any unit that already has a Cash
+        // Sale receipt pointing at it (see deleteInventoryItem) instead of failing
+        // the whole batch, so the rest still get removed and stop being counted.
+        const deletableIds = items.filter(i => i._count.cash_sales === 0).map(i => i.id);
+        const blockedCount = items.length - deletableIds.length;
+
+        let deletedCount = 0;
+        if (deletableIds.length > 0) {
+            const deleted = await prisma.outletInventory.deleteMany({
+                where: { id: { in: deletableIds }, outlet_id }
+            });
+            deletedCount = deleted.count;
+            await logAction(req, 'INVENTORY_BULK_DELETED', `Bulk deleted ${deletedCount} inventory item(s).`, null, 'OutletInventory');
+        }
+
+        res.json({
+            success: true,
+            count: deletedCount,
+            blocked: blockedCount,
+            message: blockedCount > 0
+                ? `${deletedCount} unit(s) deleted. ${blockedCount} unit(s) skipped — already sold (has a sale record).`
+                : 'Items deleted successfully',
+        });
     } catch (error) {
         console.error('Bulk delete err:', error);
         res.status(500).json({ success: false, message: 'Server error' });
