@@ -2643,7 +2643,11 @@ const getDeliveredProductDetails = async (req, res) => {
         // ledger already shows via the same ledger_missing flag.
         let adPaymentDetails = { ledger_missing: true };
         if (ad.installment_ledger && ad.installment_ledger.ledger_rows) {
-            const normalized = getNormalizedLedger(ad.installment_ledger.ledger_rows);
+            // Freeze overdue/arrears math at the return date, not "now" — a
+            // schedule cut short by a return should stop accruing arrears
+            // against months that were never going to be collected, instead
+            // of drifting further "overdue" every day this page is viewed.
+            const normalized = getNormalizedLedger(ad.installment_ledger.ledger_rows, 0, ad.archived_at);
             let advPayment = null;
             if (normalized.advance_payment) {
                 advPayment = {

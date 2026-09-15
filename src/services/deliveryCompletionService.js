@@ -12,17 +12,25 @@
 const prisma = require('../../lib/prisma');
 const jwt = require('jsonwebtoken');
 const { logOrderStatusChange } = require('../utils/orderAuditLogger');
+const { sendDeliveryConfirmation } = require('../services/watiService');
 const { notifyAdmins, notifyOutlet } = require('../utils/notificationUtils');
 const { updateCashRegister } = require('../utils/cashRegisterUtils');
 const { generateConsumerNumber, generateSmartPayConsumerNumber } = require('../utils/consumerNumberUtils');
 const { createOfficerTransaction } = require('../utils/officerTransactionUtils');
-const { buildLedgerRows } = require('../utils/ledgerUtils');
-const { sendAccountAwarenessForOrder } = require('../utils/accountAwarenessUtils');
+const { getNormalizedLedger, buildLedgerRows } = require('../utils/ledgerUtils');
 const pt = require('../services/paytriggerService');
 
 const now = () => new Date();
 
 const LEDGER_TOKEN_SECRET = process.env.LEDGER_TOKEN_SECRET;
+
+const formatDatePK = (d) => {
+  const date = d ? new Date(d) : new Date();
+  return date.toLocaleDateString('en-PK', {
+    day: '2-digit', month: 'short', year: 'numeric',
+    timeZone: 'Asia/Karachi'
+  });
+};
 
 const addMonths = (date, n) => {
   const d = new Date(date);
@@ -277,16 +285,52 @@ async function buildInstallmentLedgerAndConsumerNumbers({ order, delivery, paylo
 
 function sendCompletionWatiMessages({ purchaser, order, productNameSnapshot, colorVariant, advanceAmount, orderStatusLabel, installmentLedger, ledgerUrl, product_imei, confirmedCustomerName, deliveredByName, deliveredByNumber }) {
   const customerPhone = purchaser?.telephone_number;
+  const deliveryDateStr = formatDatePK(now());
 
   if (!customerPhone) {
     console.warn('[deliveryCompletionService] No customer phone — WATI messages skipped for order', order.order_ref);
     return;
   }
 
-  // Only the account-awareness message is sent on delivery completion — the
-  // delivery-confirmation and customer-ledger templates were redundant on top
-  // of it (three separate WhatsApp messages for one event) and were dropped.
-  sendAccountAwarenessForOrder(order.id, customerPhone, { itemName: productNameSnapshot });
+  // Only the delivery-confirmation message is sent on delivery completion —
+  // it's the one that actually carries product/advance/installment-plan
+  // detail (account-awareness and customer-ledger were dropped as redundant
+  // on top of it).
+  let totalInstallmentPrice = 0;
+  let installmentDuration = 0;
+  let monthlyInstallment = 0;
+  let nextDueDateStr = 'N/A';
+  let remainingAmountVal = 0;
+  if (installmentLedger?.ledger_rows) {
+    const normalized = getNormalizedLedger(installmentLedger.ledger_rows);
+    installmentDuration = normalized.installment_ledger.length;
+    monthlyInstallment = normalized.installment_ledger[0]?.dueAmount || 0;
+    totalInstallmentPrice = normalized.summary.grandTotalDue;
+    remainingAmountVal = normalized.summary.grandTotalRemaining;
+    const nextRow = normalized.installment_ledger.find(r => r.status !== 'paid');
+    nextDueDateStr = nextRow ? formatDatePK(nextRow.dueDate) : 'N/A';
+  }
+
+  sendDeliveryConfirmation(customerPhone, {
+    customerName: confirmedCustomerName,
+    productName: productNameSnapshot,
+    imei: product_imei || 'N/A',
+    advanceAmount,
+    deliveryDate: deliveryDateStr,
+    orderRef: order.order_ref,
+    orderStatus: orderStatusLabel,
+    deliveredByName: deliveredByName || 'N/A',
+    deliveredByNumber: deliveredByNumber || 'N/A',
+    branchName: order.outlet?.name || 'N/A',
+    branchCode: order.outlet?.code || 'N/A',
+    totalInstallmentPrice,
+    installmentDuration,
+    monthlyInstallment,
+    nextDueDate: nextDueDateStr,
+    remainingAmount: remainingAmountVal,
+    ledgerUrl,
+  }).then(r => console.log('[WATI] Delivery confirmation:', r?.success ? 'sent ✓' : r?.error))
+    .catch(e => console.error('[WATI] Delivery confirmation error:', e));
 }
 
 // ─── Agent (Delivery Officer) completion ───────────────────────────────────

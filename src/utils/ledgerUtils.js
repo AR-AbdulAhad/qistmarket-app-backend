@@ -4,12 +4,17 @@ const crypto = require('crypto');
 /**
  * Normalizes ledger rows by rolling over overdue unpaid amounts to the next month.
  * @param {Array} rows - The ledger rows array.
+ * @param {Date} [asOfDate] - Reference "today" for overdue/arrears math. Defaults
+ *   to the real current date for a live ledger; callers rendering a RETURNED
+ *   delivery's historical ledger should pass the order's return date instead,
+ *   so a schedule that was cut short by a return doesn't keep accruing arrears
+ *   against months that were never going to be collected.
  * @returns {Array} - The normalized ledger rows.
  */
-function normalizeLedger(rows) {
+function normalizeLedger(rows, asOfDate = new Date()) {
     if (!Array.isArray(rows)) return [];
 
-    const todayEnd = new Date();
+    const todayEnd = new Date(asOfDate);
     todayEnd.setHours(23, 59, 59, 999);
 
     const updatedRows = JSON.parse(JSON.stringify(rows)); // Deep copy
@@ -83,9 +88,11 @@ function normalizeLedger(rows) {
 
 /**
  * Returns a structured object with advance, installments, and a financial summary.
+ * @param {Date} [asOfDate] - See normalizeLedger — pass a returned order's
+ *   return date to freeze overdue/arrears math there instead of at "now".
  */
-function getNormalizedLedger(rows, fallbackAdvance = 0) {
-    const updatedRows = normalizeLedger(rows);
+function getNormalizedLedger(rows, fallbackAdvance = 0, asOfDate = new Date()) {
+    const updatedRows = normalizeLedger(rows, asOfDate);
     
     const advanceRow = updatedRows.find(r => r.month === 0);
     const advanceStatus = (advanceRow?.status || '').toLowerCase();
@@ -117,8 +124,8 @@ function getNormalizedLedger(rows, fallbackAdvance = 0) {
     const totalInstallmentPaid = installmentLedger.reduce((sum, r) => sum + r.paidAmount, 0);
     const totalInstallmentRemaining = Math.max(0, totalInstallmentDue - totalInstallmentPaid);
 
-    // Calculate totalArrears (the exact sum of remaining balance for ALL overdue/unpaid months up to today)
-    const todayEnd = new Date();
+    // Calculate totalArrears (the exact sum of remaining balance for ALL overdue/unpaid months up to asOfDate)
+    const todayEnd = new Date(asOfDate);
     todayEnd.setHours(23, 59, 59, 999);
     let totalArrears = 0;
     let overdueInstallments = 0;
