@@ -145,9 +145,9 @@ async function fetchLedger(where) {
           selected_plan: true,
           end_time: true,
           uploads: {
-            where: { upload_type: 'face_photo' },
-            take: 1,
-            select: { file_url: true },
+            where: { upload_type: { in: ['face_photo', 'product_photo'] } },
+            orderBy: { uploaded_at: 'asc' },
+            select: { file_url: true, upload_type: true },
           },
         },
       },
@@ -195,17 +195,31 @@ const QIST_MARKET_PRODUCT_API = 'https://api.qistmarket.pk/api/product';
 // confirmed to exist in the catalog. Never throws — a slow/unreachable
 // catalog must not break the customer-facing ledger page, it just renders
 // without a photo.
+//
+// Normalized (not fuzzy/substring — a wrong-product photo is worse than no
+// photo, so this only collapses harmless formatting noise, never guesses):
+// case, extra whitespace, and a comma used as a decimal point in a spec
+// like "1,5 Ton" (common data-entry habit) vs the catalog's "1.5". A
+// product genuinely absent from the catalog (wrong brand, etc.) still
+// correctly returns null — normalization can't invent a match that isn't
+// there.
+const normalizeProductName = (n) => n
+  .trim()
+  .toLowerCase()
+  .replace(/(\d),(\d)/g, '$1.$2') // "1,5" -> "1.5" (decimal comma, not a thousands separator)
+  .replace(/\s+/g, ' ');
+
 async function fetchProductImageUrl(productName, apiProductName) {
   const namesToTry = [apiProductName, productName]
     .filter(Boolean)
-    .map((n) => n.trim().toLowerCase());
+    .map(normalizeProductName);
   if (!namesToTry.length) return null;
 
   try {
     const response = await axios.get(QIST_MARKET_PRODUCT_API, { timeout: 6000 });
     const products = Array.isArray(response.data) ? response.data : [];
     for (const name of namesToTry) {
-      const match = products.find((p) => (p.name || '').trim().toLowerCase() === name);
+      const match = products.find((p) => normalizeProductName(p.name || '') === name);
       if (match?.ProductImage?.[0]?.url) return match.ProductImage[0].url;
     }
     return null;
@@ -610,11 +624,18 @@ async function buildLedgerHtml(ledger, stockItem = null, productImageUrl = null)
 
   // ── Reusable content blocks (shared between mobile & desktop markup) ──
 
-  const deliveryPhotoUrl = delivery?.uploads?.[0]?.file_url || null;
+  const deliveryPhotoUrl = delivery?.uploads?.find((u) => u.upload_type === 'face_photo')?.file_url || null;
+  // A real photo of the exact unit handed over, taken at delivery — many
+  // brands/models (like this order's) simply aren't on the qistmarket.pk
+  // catalog at all, so this is the only reliable source of a product photo
+  // for those; prefer it over the generic catalog stock photo when it
+  // exists, since it's the actual item this customer received.
+  const capturedProductPhotoUrl = delivery?.uploads?.find((u) => u.upload_type === 'product_photo')?.file_url || null;
+  const displayProductImageUrl = capturedProductPhotoUrl || productImageUrl;
 
-  const productImageHtml = (productImageUrl || deliveryPhotoUrl)
+  const productImageHtml = (displayProductImageUrl || deliveryPhotoUrl)
     ? `<div style="display:flex;gap:10px;margin-bottom:14px;">
-        ${productImageUrl ? `<div style="text-align:center;"><img src="${productImageUrl}" alt="${productName}" style="width:96px;height:96px;object-fit:contain;border-radius:14px;border:1px solid #e2e8f0;background:#fff;padding:6px;" /><div style="font-size:0.65rem;color:#94a3b8;margin-top:4px;">Product</div></div>` : ''}
+        ${displayProductImageUrl ? `<div style="text-align:center;"><img src="${displayProductImageUrl}" alt="${productName}" style="width:96px;height:96px;object-fit:${capturedProductPhotoUrl ? 'cover' : 'contain'};border-radius:14px;border:1px solid #e2e8f0;background:#fff;padding:${capturedProductPhotoUrl ? '0' : '6px'};" /><div style="font-size:0.65rem;color:#94a3b8;margin-top:4px;">Product</div></div>` : ''}
         ${deliveryPhotoUrl ? `<div style="text-align:center;"><img src="${deliveryPhotoUrl}" alt="Customer at delivery" style="width:96px;height:96px;object-fit:cover;border-radius:14px;border:1px solid #e2e8f0;background:#fff;" /><div style="font-size:0.65rem;color:#94a3b8;margin-top:4px;">Customer</div></div>` : ''}
       </div>`
     : '';

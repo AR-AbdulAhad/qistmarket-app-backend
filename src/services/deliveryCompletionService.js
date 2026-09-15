@@ -438,6 +438,11 @@ async function completeAgentDelivery({ order, payload, io, productNameSnapshot, 
   (u.facePhotos || []).forEach((f) => uploadsData.push({ delivery_id: delivery.id, upload_type: 'face_photo', file_url: f.url, tag: f.tag || null, uploaded_at: now() }));
   (u.locationPhotos || []).forEach((f) => uploadsData.push({ delivery_id: delivery.id, upload_type: 'location_photo', file_url: f.url, tag: f.tag || null, uploaded_at: now() }));
   (u.housePhotos || []).forEach((f) => uploadsData.push({ delivery_id: delivery.id, upload_type: 'house_photo', file_url: f.url, tag: f.tag || null, uploaded_at: now() }));
+  // A photo of the actual product handed over — independent of the
+  // qistmarket.pk catalog image (which many brands/models simply aren't
+  // listed under), this is what lets the ledger show a real product photo
+  // for every delivery regardless of catalog coverage.
+  (u.productPhotos || []).forEach((f) => uploadsData.push({ delivery_id: delivery.id, upload_type: 'product_photo', file_url: f.url, tag: f.tag || null, uploaded_at: now() }));
   (u.locationLinks || []).forEach((l) => uploadsData.push({ delivery_id: delivery.id, upload_type: 'location_link', link: l.link, tag: l.tag || null, uploaded_at: now() }));
   if (uploadsData.length > 0) {
     await prisma.deliveryUpload.createMany({ data: uploadsData });
@@ -619,6 +624,18 @@ async function completeSelfPickupDelivery({ order, payload, io, productNameSnaps
         data: facePhotos.map((f) => ({
           delivery_id: delivery.id,
           upload_type: 'face_photo',
+          file_url: f.url,
+          uploaded_at: now(),
+        })),
+      });
+    }
+
+    const productPhotos = (payload.uploads && payload.uploads.productPhotos) || [];
+    if (productPhotos.length > 0) {
+      await tx.deliveryUpload.createMany({
+        data: productPhotos.map((f) => ({
+          delivery_id: delivery.id,
+          upload_type: 'product_photo',
           file_url: f.url,
           uploaded_at: now(),
         })),

@@ -90,7 +90,7 @@ router.post('/orders/transfer-bulk', authenticateJWT, transferBulk);
 router.get('/orders/self-pickup/inventory', authenticateJWT, getSelfPickupInventory);
 router.post('/orders/self-pickup/send-otp', authenticateJWT, sendSelfPickupOTP);
 router.post('/orders/self-pickup/verify-otp', authenticateJWT, verifySelfPickupOTP);
-router.post('/orders/self-pickup/submit', authenticateJWT, upload.fields([{ name: 'face_photo', maxCount: 1 }]), fixUploadPath, submitSelfPickupDelivery);
+router.post('/orders/self-pickup/submit', authenticateJWT, upload.fields([{ name: 'face_photo', maxCount: 1 }, { name: 'product_photo', maxCount: 1 }]), fixUploadPath, submitSelfPickupDelivery);
 
 // Handover Routes
 router.post('/orders/:id/initiate-handover', authenticateJWT, initiateHandover);

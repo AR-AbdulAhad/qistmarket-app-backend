@@ -39,7 +39,8 @@ router.post(
   upload.fields([
     { name: 'face_photos', maxCount: 5 },
     { name: 'location_photos', maxCount: 5 },
-    { name: 'house_photos', maxCount: 5 }
+    { name: 'house_photos', maxCount: 5 },
+    { name: 'product_photos', maxCount: 5 }
   ]),
   fixUploadPath,
   submitDelivery

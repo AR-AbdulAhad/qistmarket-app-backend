@@ -156,6 +156,7 @@ const submitDelivery = async (req, res) => {
     const facePhotos = req.files['face_photos'] || [];
     const locationPhotos = req.files['location_photos'] || [];
     const housePhotos = req.files['house_photos'] || [];
+    const productPhotos = req.files['product_photos'] || [];
 
     const faceTags = req.body.face_tags ? JSON.parse(req.body.face_tags) : [];
     const locationTags = req.body.location_tags ? JSON.parse(req.body.location_tags) : [];
@@ -164,7 +165,7 @@ const submitDelivery = async (req, res) => {
     const linkTags = req.body.link_tags ? JSON.parse(req.body.link_tags) : [];
 
     // Validate counts
-    if (facePhotos.length > 5 || locationPhotos.length > 5 || housePhotos.length > 5 || locationLinks.length > 5) {
+    if (facePhotos.length > 5 || locationPhotos.length > 5 || housePhotos.length > 5 || productPhotos.length > 5 || locationLinks.length > 5) {
       return res.status(400).json({
         success: false,
         error: { code: 400, message: 'Maximum 5 items per type allowed' }
@@ -199,6 +200,7 @@ const submitDelivery = async (req, res) => {
         facePhotos: facePhotos.map((f, i) => ({ url: f.url, tag: faceTags[i] || null })),
         locationPhotos: locationPhotos.map((f, i) => ({ url: f.url, tag: locationTags[i] || null })),
         housePhotos: housePhotos.map((f, i) => ({ url: f.url, tag: houseTags[i] || null })),
+        productPhotos: productPhotos.map((f) => ({ url: f.url })),
         locationLinks: locationLinks.map((link, i) => ({ link, tag: linkTags[i] || null })),
       },
       user: {
@@ -2014,6 +2016,7 @@ const submitSelfPickupDelivery = async (req, res) => {
 
     // 2.1 Process face photo
     const facePhotos = req.files['face_photo'] || [];
+    const productPhotos = req.files['product_photo'] || [];
 
     // Read-only inventory snapshot — used both for PayTrigger gating and as the
     // product name/category passed down to the completion logic.
@@ -2047,6 +2050,7 @@ const submitSelfPickupDelivery = async (req, res) => {
       custom_ledger: req.body.custom_ledger || null,
       uploads: {
         facePhotos: facePhotos.map((f) => ({ url: f.url || f.path })),
+        productPhotos: productPhotos.map((f) => ({ url: f.url || f.path })),
       },
       user: {
         id: req.user.id,
