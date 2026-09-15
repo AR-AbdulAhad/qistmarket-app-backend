@@ -77,30 +77,15 @@ const sendOTPSms = async (phone, otp) => {
 };
 
 /**
- * Guarantor OTP wrapper — same wording/structure as sendGuarantorOtpFullSms,
- * minus the Item/Item Price lines (no order context to fill them with) and
- * the guarantor's own name in the greeting (only the purchaser's name is
- * passed to this short path). `name` is the purchaser's name (the person
- * being guaranteed for), not the guarantor's own — matches how the caller
- * already passes it. This is the SHORT fallback used when order context
- * isn't available at the call site — see sendGuarantorOtpFullSms for the
- * full, order-detail-rich version.
+ * Guarantor OTP wrapper — shortened to fit a single 160-char SMS segment.
+ * `name` is the purchaser's name (the person being guaranteed for), not the
+ * guarantor's own — matches how the caller already passes it. This is the
+ * SHORT fallback used when order context isn't available at the call site —
+ * see sendGuarantorOtpFullSms for the version with item/price.
  */
 const sendGuarantorOTPSms = async (phone, name, otp) => {
   const purchaserName = name || 'is customer';
-  const message = `Assalam-o-Alaikum!
-
-Aap ${purchaserName} ki Qist Market purchase ke liye Guarantor ban rahe hain.
-
-Ahm Hidayat: Agar customer ki taraf se qist/raqam ada na ki jaye to item aur payable raqam ki zimmedari guarantor ki hogi, agreement ke mutabiq.
-
-Agar aap is guarantee ke liye razamand hain to neeche diya gaya OTP Qist Market ke representative ko batayein. OTP batana aapki guarantor verification aur guarantee ki tasdeeq samjha jayega.
-
-OTP: ${otp}
-
-Complaint: https://qms.qistmarket.pk/complaint
-
-Qist Market Har Cheez Qist Pe ..!!`;
+  const message = `${purchaserName} ke Qist order ke Guarantor ban rahe hain. Qist na bharne par zimmedari aap par hogi. Razamand to OTP rep ko batayein: ${otp}`;
 
   return sendSMS(phone, message);
 };
@@ -125,8 +110,8 @@ const sendGuarantorOtpFullSms = async (phone, {
 };
 
 /**
- * Full "Purchaser Verification OTP" SMS — the client's exact template text,
- * word for word, with every {{placeholder}} filled from real order data.
+ * Full "Purchaser Verification OTP" SMS — shortened to fit a single 160-char
+ * SMS segment, with every placeholder filled from real order data.
  * There is no short fallback for this one (see otpDispatcher.js's sendOtp) —
  * sendOTPSms is used instead when order/officer context isn't available.
  */
@@ -143,40 +128,18 @@ const sendPurchaserVerificationOtpSms = async (phone, {
   verificationOfficerName,
   verificationOfficerNumber,
 }) => {
-  const message = `Assalam-o-Alaikum, ${customerName}!
-
-Aapke Qist Market order ki verification jaari hai. Verification OTP share karne se pehle neeche di gayi tamam details ka ghour se jaiza lein.
-
-Order Number: ${orderNumber}
-Item / Model: ${itemNameModel}
-Total Installment Price: Rs. ${totalInstallmentPrice}
-Advance Amount: Rs. ${advanceAmount}
-Installment Plan: ${installmentDuration} Months
-Monthly Installment: Rs. ${monthlyInstallment}
-Assigned Outlet: ${outletName}
-
-Agar tamam details durust hain aur aap apni marzi se verification process mukammal karwana chahte hain, to yeh OTP sirf assigned Verification Officer ko bata dein:
-
-VERIFICATION OTP: ${otp}
-
-VERIFICATION OFFICER DETAILS
-Officer Name: ${verificationOfficerName || 'N/A'}
-Contact Number: ${verificationOfficerNumber || 'N/A'}
-
-ZAROORI HIDAYAT
-OTP share karna order details, item ki qeemat, advance amount aur installment plan ki tasdeeq samjha jayega. Agar koi detail ghalat ho to OTP share na karein aur pehle record durust karwayein.
-
-Verification bilkul free hai. Verification ke naam par kisi ko koi raqam ada na karein. OTP share karne ya verification mukammal hone ka matlab order approve hona nahi hai; final approval mukammal jaizay ke baad di jayegi.`;
+  const message = `${customerName}, order #${orderNumber} (${itemNameModel}) verify ho raha hai. Advance Rs.${advanceAmount}, ${installmentDuration}mo x Rs.${monthlyInstallment}. Sahi hai to OTP officer ${verificationOfficerName || 'N/A'} ko dein: ${otp}`;
 
   return sendSMS(phone, message);
 };
 
 /**
- * "Repeat Purchase Verification OTP" SMS — the client's exact template text,
- * word for word. For a RETURNING customer whose previous account is already
- * cleared, fast-tracked through the Convert-Sale flow (ordersController.js's
- * sendIndividualConvertOTP / createConvertedSale) instead of the full
- * physical re-verification sendPurchaserVerificationOtpSms is used for.
+ * "Repeat Purchase Verification OTP" SMS — shortened to fit a single
+ * 160-char SMS segment. For a RETURNING customer whose previous account is
+ * already cleared, fast-tracked through the Convert-Sale flow
+ * (ordersController.js's sendIndividualConvertOTP / createConvertedSale)
+ * instead of the full physical re-verification sendPurchaserVerificationOtpSms
+ * is used for.
  */
 const sendRepeatPurchaseOtpSms = async (phone, {
   customerName,
@@ -184,27 +147,13 @@ const sendRepeatPurchaseOtpSms = async (phone, {
   orderRef,
   otp,
 }) => {
-  const message = `Assalam-o-Alaikum ${customerName || 'Customer'}!
-
-Aapki purani profile ka account clear hone ke baad repeat purchase ke liye verification ki ja rahi hai.
-
-New Item: ${itemNameModel || 'N/A'}
-Application/Order Ref: ${orderRef || 'N/A'}
-
-Aapki tasdeeq ke liye neeche OTP diya gaya hai. Meherbani karke OTP sirf Qist Market ke authorized representative ko batayein.
-
-Customer OTP: ${otp}
-
-OTP kisi ghair-mutaliqa shakhs ke saath share na karein.
-
-Complaint: https://qms.qistmarket.pk/complaint
-Qist Market Har Cheez Qist Pe ..!!`;
+  const message = `${customerName || 'Customer'}, purani profile clear hone ke baad ${itemNameModel || 'N/A'} (Ref ${orderRef || 'N/A'}) ke liye verification. OTP sirf authorized rep ko batayein: ${otp}`;
 
   return sendSMS(phone, message);
 };
 
 /**
- * "Item Handover" SMS — the client's exact template text, word for word.
+ * "Item Handover" SMS — shortened to fit a single 160-char SMS segment.
  * Carries the delivery OTP the customer reads back to the delivery officer
  * at the doorstep handover — moved here from WATI (see watiService.js's
  * Template 20 comment); generateDeliveryOtp (deliveryController.js) still
@@ -222,36 +171,7 @@ const sendItemHandoverSms = async (phone, {
   representativeNumber,
   otp,
 }) => {
-  const message = `Assalam-o-Alaikum ${customerName || 'Customer'}!
-
-Aapka item handover ho raha hai. Details check kar lein:
-
-Item: ${itemName || 'N/A'}
-Advance: Rs. ${advanceAmount || 0}
-Installment: Rs. ${installmentAmount || 0}
-Due Date: Har mahine ${installmentDate || 'N/A'}
-Total Installments: ${totalInstallments ?? 'N/A'}
-
-Razamand hain to OTP representative ko batayein.
-
-Zaroori Hidayaat:
-Installment na dene par device lock ho sakta hai.
-Warranty sirf asli company ki terms par, Qist Market ka taalluq nahi.
-Chori/damage par koi relief nahi; poori amount ada karni hogi.
-Handover ke baad koi raqam wapas nahi hogi.
-Item handover ke baad item wapas karne ki surat mein advance, installment ya kisi bhi ada ki hui raqam wapas nahi ki jayegi, jahan tak company ke terms & conditions lagu hon.
-
-Shikayat ke liye OTP se pehle rabta karein.
-Representative: ${representativeName || 'N/A'}
-Contact: ${representativeNumber || 'N/A'}
-
-Agar aap tamam details aur terms se razamand hain to yeh OTP batayein:
-
-OTP: ${otp}
-
-Shukriya, Qist Market — Har Cheez Qist Pe..!!
-
-Complaint: https://qms.qistmarket.pk/complaint`;
+  const message = `${customerName || 'Customer'}, ${itemName || 'N/A'} handover ho raha hai. Advance Rs.${advanceAmount || 0}, qist Rs.${installmentAmount || 0}/mahina x${totalInstallments ?? 'N/A'}. Razamand to OTP rep ${representativeName || 'N/A'} ko dein: ${otp}`;
 
   return sendSMS(phone, message);
 };
